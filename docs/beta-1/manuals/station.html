@@ -1,5 +1,6 @@
-<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="description" content=""><title>Townlight
-Station Manual | Townlight Beta 1</title><style>
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="description" content="Townlight
+Beta 1 staff and technical documentation"><title>Townlight Station
+Manual | Townlight Beta 1</title><style>
 :root{--ink:#182f3a;--muted:#526775;--accent:#006b64;--paper:#fff;--wash:#f1f6f5;--line:#cfdddf;--warm:#dceab2}
 *{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;background:var(--paper);color:var(--ink);font:17px/1.65 "Segoe UI",Arial,sans-serif}a{color:#006b64;text-underline-offset:3px}a:hover{text-decoration-thickness:2px}a:focus-visible,button:focus-visible,input:focus-visible{outline:3px solid #a25900;outline-offset:4px}.skip{position:absolute;left:-9999px}.skip:focus{left:1rem;top:1rem;background:white;padding:1rem;z-index:20}header{border-bottom:1px solid var(--line);padding:1.1rem 5vw;display:flex;align-items:center;gap:1.5rem;flex-wrap:wrap}header .brand{font-size:1.3rem;font-weight:750;letter-spacing:-.04em;text-decoration:none;color:var(--ink)}header nav{margin-left:auto;display:flex;gap:1.25rem;flex-wrap:wrap;font-size:.88rem}.edition{font:700 .72rem/1.5 "Segoe UI",sans-serif;letter-spacing:.12em;text-transform:uppercase;color:var(--accent)}.wrap{max-width:1240px;margin:auto;padding:0 4vw}.hero{padding:5rem 0 3.2rem;max-width:950px}.hero h1{font-size:clamp(2.5rem,5vw,4.7rem);line-height:1.08;letter-spacing:-.045em;margin:1rem 0 1.5rem;font-weight:650}.hero .lead{font-size:1.26rem;max-width:780px;color:var(--muted)}.actions{display:flex;gap:.8rem;flex-wrap:wrap;margin:1.8rem 0}.button{display:inline-block;padding:.7rem 1.15rem;border:1px solid var(--accent);border-radius:4px;text-decoration:none;font-weight:650}.button.primary{background:var(--accent);color:#fff}.facts{display:flex;gap:1.5rem;flex-wrap:wrap;font-size:.85rem;color:var(--muted)}.section{padding:3rem 0;border-top:1px solid var(--line)}h2{font-size:1.8rem;line-height:1.3;letter-spacing:-.025em;margin:2.5rem 0 1rem}h3{font-size:1.18rem;line-height:1.45;margin:1.8rem 0 .7rem}h4{font-size:1rem;margin:1.3rem 0 .6rem}p{margin:.85rem 0 1rem}ul,ol{padding-left:1.6rem}li{margin:.4rem 0}strong{font-weight:650}.grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:1.6rem}.product{border-top:3px solid var(--accent);padding:1.4rem 0}.product h3{font-size:1.65rem;margin:.4rem 0}.product p{color:var(--muted)}.number{font-size:.76rem;letter-spacing:.1em}.split{display:grid;grid-template-columns:1fr 1fr;gap:3rem}.flow{width:100%;height:auto;display:block;margin:1.8rem 0}.caption{font-size:.85rem;color:var(--muted)}.reading{max-width:860px}.doclayout{display:grid;grid-template-columns:245px minmax(0,1fr);gap:3rem;max-width:1320px;margin:auto;padding:2rem 4vw}.toc{font-size:.84rem;align-self:start;position:sticky;top:1rem;max-height:90vh;overflow:auto;padding-right:.8rem}.toc ul{list-style:none;padding:0}.toc li{margin:.5rem 0}.toc li li{padding-left:.8rem}.toc a{text-decoration:none}.docbody{min-width:0}.docbody h1{font-size:2.7rem;line-height:1.1;letter-spacing:-.04em}.docbody h2{border-top:1px solid var(--line);padding-top:1.8rem}.docbody img{max-width:100%;height:auto}.docmeta{color:var(--muted);font-size:.9rem}.docbody section{scroll-margin-top:1rem}table{width:100%;border-collapse:collapse;font-size:.87rem;line-height:1.5;margin:1.3rem 0;table-layout:auto}th{text-align:left;background:var(--wash);font-weight:650}th,td{padding:.65rem .7rem;border-bottom:1px solid var(--line);vertical-align:top;overflow-wrap:anywhere}thead{display:table-header-group}pre{background:#f2f5f6;padding:1rem;border:1px solid #dfe7e8;white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;font:13px/1.6 Consolas,monospace}code{font: .85em/1.6 Consolas,monospace;overflow-wrap:anywhere}pre code{font-size:inherit}blockquote{border-left:3px solid var(--accent);padding-left:1rem;margin-left:0;color:var(--muted)}.search{padding:.65rem;border:1px solid #789399;border-radius:4px;width:100%;font:inherit}.search-status{font-size:.8rem;color:var(--muted)}footer{border-top:1px solid var(--line);padding:2rem 5vw;margin-top:3rem;font-size:.85rem;color:var(--muted);display:flex;gap:2rem;justify-content:space-between;flex-wrap:wrap}.small{font-size:.9rem;color:var(--muted)}.api-entry{padding:1.2rem 0;border-top:1px solid var(--line)}.api-entry h3{overflow-wrap:anywhere}.method{font-size:.76rem;font-weight:750;color:var(--accent)}details{margin:1rem 0}summary{cursor:pointer;font-weight:650}.index-columns{columns:2;column-gap:2rem}.index-columns li{break-inside:avoid}
 @media(max-width:850px){.grid{grid-template-columns:1fr 1fr}.split{grid-template-columns:1fr}.doclayout{grid-template-columns:1fr;gap:1rem}.toc{position:static;max-height:none}.hero{padding-top:3rem}header nav{margin-left:0}.docbody h1{font-size:2.2rem}}
@@ -7,7 +8,7 @@ Station Manual | Townlight Beta 1</title><style>
 main,.toc a,.hero h1{overflow-wrap:anywhere}
 @page{size:Letter;margin:.7in .65in .75in}
 @media print{html{scroll-behavior:auto}body{font:10.5pt/1.45 Arial,sans-serif;color:#172f39}header,footer,.search-area,.screen-only{display:none}.doclayout{display:block;padding:0;max-width:none}.toc{position:static;max-height:none;overflow:visible;font-size:10pt;break-after:page}.toc>h2{border:0}.toc ul{columns:2;column-gap:.3in}.toc li{break-inside:avoid}.docbody h1{font-size:30pt}.docbody h2{font-size:19pt;break-after:avoid;padding-top:.15in;margin-top:.35in}.docbody h3{font-size:12pt;break-after:avoid}.docbody h4{break-after:avoid}p{orphans:3;widows:3}pre{font-size:8.2pt;line-height:1.4;padding:.1in;break-inside:auto}table{font-size:8.4pt;line-height:1.35}th,td{padding:.06in .07in}tr{break-inside:avoid}.flow{max-height:6in;object-fit:contain;break-inside:avoid}a{color:#172f39;text-decoration:underline}.cover{break-after:page;padding-top:1in}.cover .edition{font-size:11pt}.cover h1{font-size:32pt}.cover .lead{font-size:14pt}.api-entry{break-inside:auto}.api-entry h3{break-after:avoid}.index-columns{columns:2}}
-</style></head><body><a class="skip" href="#main">Skip to content</a><header><a class="brand" href="../index.html">townlight<span aria-hidden="true"> ·</span></a><span class="edition">Townlight Beta 1</span><nav aria-label="Main"><a href="../index.html">Products</a><span>Suite manual in companion</span><a href="../reference/index.html">Technical reference</a><a href="../terms.html">Terms and license</a></nav></header>
+</style></head><body><aside aria-label="Beta download" style="padding:1rem 5%;background:#e5f3ec;color:#123b30"><strong>Townlight Beta 1</strong> · <a href="https://github.com/townlight/townlight/releases/tag/townlight-beta-1-station-delivery">Signed Windows installer, source, documentation and acceptance</a>. Updated Station live feed and recorded-video delivery; existing component versions retained. <a href="https://townlight.github.io/versions.html">Candidate identity and retained baseline evidence</a>.</aside><a class="skip" href="#main">Skip to content</a><header><a class="brand" href="../index.html">townlight<span aria-hidden="true"> ·</span></a><span class="edition">Townlight Beta 1</span><nav aria-label="Main"><a href="../index.html#products">Products</a><a href="../manuals/suite.html">Suite manual</a><a href="../reference/index.html">Technical reference</a><a href="../terms.html">Terms and license</a></nav></header>
 <main id="main"><div class="cover wrap"><div class="hero"><div class="edition">Townlight Beta 1</div><h1>Townlight
 Station
 Manual</h1><p class="lead">Staff guide and technical reference</p><p class="docmeta">Documentation edition 30 October 2026<br>Existing component versions retained<br>Signed suite installer 1.6.0.1<br>Private beta documentation companion</p></div></div><div class="doclayout"><aside class="toc" aria-label="Table of contents"><h2>Contents</h2><div class="search-area"><label for="find-section">Find a section</label><input class="search" id="find-section" type="search" placeholder="Type a heading"><p class="search-status" aria-live="polite"></p></div><ul>
@@ -54,8 +55,23 @@ id="toc-alphabetical-subject-index">Alphabetical subject index</a></li>
 <li><a href="#source-and-document-control"
 id="toc-source-and-document-control">Source and document
 control</a></li>
-</ul></aside><article class="docbody"><h2 id="using-this-manual">Using
-this manual</h2>
+<li><a
+href="#completed-recordings-on-youtube-and-live-civiccast-coverage"
+id="toc-completed-recordings-on-youtube-and-live-civiccast-coverage">Completed
+recordings on YouTube and live CivicCast coverage</a></li>
+<li><a href="#delivery-subject-index"
+id="toc-delivery-subject-index">Delivery subject index</a></li>
+</ul></aside><article class="docbody"><blockquote>
+<p><strong>Townlight Beta 1 — Station delivery update, 31 October
+2026.</strong> <a
+href="https://github.com/townlight/townlight/releases/tag/townlight-beta-1-station-delivery">Signed
+Windows installer, source, documentation and acceptance</a>. This
+edition documents the Sandbox-tested Station delivery additions.
+Existing component versions are retained. Earlier baseline results
+remain identified as historical evidence; the new acceptance report
+identifies the new installer.</p>
+</blockquote>
+<h2 id="using-this-manual">Using this manual</h2>
 <p>Townlight Station helps station operators, clerks, records staff and
 deployment administrators. Station adapts a pinned CivicCast media
 implementation into an independent Townlight boundary. It captures
@@ -100,12 +116,12 @@ included with the same documentation companion.</p>
 <td>1.6.0-1</td>
 </tr>
 <tr>
-<td>Candidate MSI SHA256</td>
-<td><code>98bcdef11ebdf5c767f620c904ff49f85115fde3b5c23f62703b111e645aaf86</code></td>
+<td>Candidate artifact identity</td>
+<td>Station delivery update; use the release SHA256SUMS.txt</td>
 </tr>
 <tr>
-<td>Corresponding-source SHA256</td>
-<td><code>84a23e1297e42d17b16cfc9e51b2dd78bc46414c0de8ad7ebd2466c1a409d06b</code></td>
+<td>Corresponding source</td>
+<td>Updated Station delivery candidate source companion</td>
 </tr>
 <tr>
 <td>Current owned software license</td>
@@ -120,13 +136,15 @@ configuration</td>
 </table>
 <p>“Townlight Beta 1” identifies this coordinated beta delivery. It does
 not renumber the installer, native binary, Python packages or historical
-receipts. Component versions may differ. This documentation is a later
-companion to unchanged signed bytes, not a rebuilt installer. Historical
-release pages and manuals describe their own versions and are not the
-download instructions for this private candidate.</p>
+receipts. Component versions may differ. This edition accompanies the
+newly packaged and signed MSI containing the Station delivery additions.
+The native desktop and other native payload files retain their accepted
+signed bytes. Historical release pages and manuals describe their own
+versions and are not the download instructions for this Station delivery
+candidate.</p>
 <h2 id="first-run">First run</h2>
 <ol type="1">
-<li>Obtain the identified signed private candidate and its
+<li>Obtain the identified signed Station delivery candidate and its
 corresponding-source companion from the beta coordinator. The landing
 pages in this documentation are not an installer download service.</li>
 <li>On the intended fresh Windows test installation, verify the MSI hash
@@ -1019,13 +1037,15 @@ private Records readback, idempotent locked original and logout.</td>
 </tr>
 </tbody>
 </table>
-<p>These results come from the identified signed candidate’s fresh
-normal-profile Sandbox exercise: real native IPC/HTTP/PostgreSQL and
-selected headless controls. All accounts, source bundles and media were
-synthetic. The guest install/uninstall and recovery passed, and the
-owned Sandbox stopped. No host installed application or standalone
-CivicCast was changed. This documentation task reuses those receipts; it
-does not claim a new software acceptance run.</p>
+<p>The following baseline results come from the previously accepted
+signed candidate’s fresh normal-profile Sandbox exercise: real native
+IPC/HTTP/PostgreSQL and selected headless controls. All accounts, source
+bundles and media were synthetic. The guest install/uninstall and
+recovery passed, and the owned Sandbox stopped. No host installed
+application or standalone CivicCast was changed. Those baseline receipts
+are retained for unchanged workflows. The accompanying ACCEPTANCE.md
+records the separate installed verification and exact identity of this
+new Station delivery candidate.</p>
 <p>The <a href="../reference/workflow-matrix.json">workflow matrix</a>
 identifies raw receipt filenames. The <a
 href="../reference/sandbox-evidence-index.json">evidence index</a>
@@ -1302,9 +1322,9 @@ return</a>.</li>
 <h2 id="source-and-document-control">Source and document control</h2>
 <p>This edition is authored from the immutable corresponding-source
 companion, the generated installed-domain schema and the retained
-workflow receipts. The current software versions and signed artifacts
-are unchanged. Public historical pages are not synchronized or published
-by this local documentation task.</p>
+workflow receipts. Component version numbers are retained. The private
+MSI has its own new hash and signing receipt. Historical release tags
+and their artifacts remain unchanged.</p>
 <h3 id="workflow-subject-index">Workflow subject index</h3>
 <ul>
 <li><p><strong>Capture and stop</strong> — <a href="#workflow-4">Daily
@@ -1332,5 +1352,248 @@ domain OpenAPI</a></p></li>
 <li><p><a href="../reference/workflow-matrix.json">Workflow
 matrix</a></p></li>
 <li><p><a href="../reference/AGPL-3.0.txt">Full AGPL text</a></p></li>
+</ul>
+<h2
+id="completed-recordings-on-youtube-and-live-civiccast-coverage">Completed
+recordings on YouTube and live CivicCast coverage</h2>
+<p>This source extension adds only completed-recording YouTube uploads
+and a live Station-to-CivicCast feed. It is <strong>not in the published
+Beta 1 installer</strong>. Existing component versions are retained. New
+Station code is AGPL-3.0-only. The pinned CivicCast source and
+third-party licenses remain unchanged. Standalone CivicCast is a
+separate product; no installer, account, database, service or default in
+it is changed by Station.</p>
+<h3 id="staff-workflow">Staff workflow</h3>
+<p>For live coverage, choose a meeting, its chamber input and the
+administrator’s <strong>CivicCast live feed</strong> option, then start
+recording. Choose <strong>Recording only</strong> to capture privately
+without a network feed. A disconnected receiver does not stop the
+recording. Station sends the live MPEG-TS bytes as the recording grows;
+it does not wait for the completed file. The feed is available only
+during that capture. The CivicCast/PEG operator selects that source and
+controls when it is broadcast on local cable. Station does not
+automatically put the PEG channel on air. <code>sending</code> means
+transport bytes were sent, not proof of cable carriage.</p>
+<p>After Station shows <strong>complete</strong>, use <strong>Upload
+completed recording to YouTube</strong>. Review the title, select
+private/unlisted/public visibility (default <strong>private</strong>),
+and enter the approval note. Click <strong>Upload to YouTube</strong>.
+This is an explicit external upload to the Station-configured OAuth
+account. No upload occurs just because recording stopped, a playout was
+committed or a Records attachment was made. Station does not create a
+YouTube livestream.</p>
+<p>The upload receipt shows
+queued/running/uploaded/failed/needs-reconciliation, the chosen
+visibility and returned video link. <code>uploaded</code> is the YouTube
+upload acknowledgement; YouTube may still be processing the video. The
+canonical recording remains private and byte-identical for the existing
+Records handoff. The YouTube visibility is separate from local
+playback/disclosure approval.</p>
+<h3 id="architecture-1">Architecture</h3>
+<p><img class="flow" src="../assets/station-delivery-architecture.svg" alt="Station live feed to separate CivicCast and completed recording upload to YouTube"></p>
+<p>The sender has bounded, leaky buffers and follows the live edge after
+congestion. Its network sink shares no pipeline with the recorder. A
+late join or connection loss can leave a live coverage gap, while the
+private recording continues. H.264/AAC and existing MPEG-TS captions are
+forwarded without another encode. The MP4 upload remux reuses
+<code>vod_job.py</code>; it does not generate transcripts or captions,
+and does not upload a separate caption track. Upload queue work runs in
+a separate process so a long upload never monopolizes the capture
+worker.</p>
+<h3 id="administrator-setup">Administrator setup</h3>
+<p>Use Station’s existing dedicated data root and PostgreSQL database.
+Stop Station writers for a coordinated backup, retain that backup, and
+run the explicit <code>townlight-station migrate</code> before starting
+this source version. Schema <strong>4</strong> adds
+<code>station.youtube_uploads</code>, keeping existing
+recording/schedule/playout evidence. The data identity marker and
+component versions are unchanged. Old services expect schema 3; use a
+matched source/runtime and preserve the backup for rollback.</p>
+<p>Create <code>civiccast-feeds.json</code> in the private Station data
+directory:</p>
+<div class="sourceCode" id="cb16"><pre
+class="sourceCode json"><code class="sourceCode json"><span id="cb16-1"><a href="#cb16-1" aria-hidden="true" tabindex="-1"></a><span class="ot">[</span></span>
+<span id="cb16-2"><a href="#cb16-2" aria-hidden="true" tabindex="-1"></a>  <span class="fu">{</span></span>
+<span id="cb16-3"><a href="#cb16-3" aria-hidden="true" tabindex="-1"></a>    <span class="dt">&quot;id&quot;</span><span class="fu">:</span> <span class="st">&quot;peg&quot;</span><span class="fu">,</span></span>
+<span id="cb16-4"><a href="#cb16-4" aria-hidden="true" tabindex="-1"></a>    <span class="dt">&quot;label&quot;</span><span class="fu">:</span> <span class="st">&quot;CivicCast council feed&quot;</span><span class="fu">,</span></span>
+<span id="cb16-5"><a href="#cb16-5" aria-hidden="true" tabindex="-1"></a>    <span class="dt">&quot;address&quot;</span><span class="fu">:</span> <span class="st">&quot;192.0.2.10&quot;</span><span class="fu">,</span></span>
+<span id="cb16-6"><a href="#cb16-6" aria-hidden="true" tabindex="-1"></a>    <span class="dt">&quot;port&quot;</span><span class="fu">:</span> <span class="dv">10080</span><span class="fu">,</span></span>
+<span id="cb16-7"><a href="#cb16-7" aria-hidden="true" tabindex="-1"></a>    <span class="dt">&quot;secret_env&quot;</span><span class="fu">:</span> <span class="st">&quot;TOWNLIGHT_STATION_SRT_PEG&quot;</span></span>
+<span id="cb16-8"><a href="#cb16-8" aria-hidden="true" tabindex="-1"></a>  <span class="fu">}</span></span>
+<span id="cb16-9"><a href="#cb16-9" aria-hidden="true" tabindex="-1"></a><span class="ot">]</span></span></code></pre></div>
+<p>The address is a numeric IPv4 <strong>local interface bind address on
+Station</strong>, not the CivicCast computer. <code>192.0.2.10</code> is
+a documentation placeholder. Use the actual Station interface, an unused
+port (1024–65535), and appropriate network access between those two
+systems. Clients select an administrator-defined ID, never an arbitrary
+destination or media pipeline. Keep configuration files private.</p>
+<p>Set <code>TOWNLIGHT_STATION_SRT_PEG</code> in the capture worker’s
+process environment to a 10–79 character SRT passphrase. Configure a
+separate CivicCast SRT live source with the caller URI
+<code>srt://&lt;Station-address&gt;:10080?mode=caller&amp;latency=200</code>
+and the same passphrase through CivicCast’s existing credential control.
+Do <strong>not</strong> put the passphrase in the URI. Station’s
+listener uses 128-bit SRT encryption. Keep the two accounts and
+configuration stores separate; matching this specific transport
+credential is the deliberate pairing. Site-specific camera, headend and
+firewall commissioning remain deployment work.</p>
+<p>For completed uploads, configure these <strong>Station-only</strong>
+environment variables in the upload worker process. Obtain OAuth
+authorization for the intended Station YouTube channel/account through
+the existing deployment’s Google configuration; no OAuth onboarding
+framework is added here. Do not use CivicCast’s credentials implicitly
+or copy its profile.</p>
+<ul>
+<li><code>TOWNLIGHT_STATION_YOUTUBE_CLIENT_ID</code></li>
+<li><code>TOWNLIGHT_STATION_YOUTUBE_CLIENT_SECRET</code></li>
+<li><code>TOWNLIGHT_STATION_YOUTUBE_REFRESH_TOKEN</code> (authorized for
+YouTube video uploads)</li>
+</ul>
+<p>Run the existing <code>serve</code> and capture <code>worker</code>,
+plus the separate upload consumer with the same Station settings and
+dedicated database:</p>
+<div class="sourceCode" id="cb17"><pre
+class="sourceCode powershell"><code class="sourceCode powershell"><span id="cb17-1"><a href="#cb17-1" aria-hidden="true" tabindex="-1"></a>townlight-station migrate</span>
+<span id="cb17-2"><a href="#cb17-2" aria-hidden="true" tabindex="-1"></a>townlight-station serve</span>
+<span id="cb17-3"><a href="#cb17-3" aria-hidden="true" tabindex="-1"></a><span class="co"># In separate managed processes with the same explicit Station configuration:</span></span>
+<span id="cb17-4"><a href="#cb17-4" aria-hidden="true" tabindex="-1"></a>townlight-station worker</span>
+<span id="cb17-5"><a href="#cb17-5" aria-hidden="true" tabindex="-1"></a>townlight-station uploads</span></code></pre></div>
+<p>These are deployment commands, <strong>not commands executed against
+installed apps by this development task</strong>. Run only one capture
+worker and one upload worker per database. Each holds a distinct
+advisory lock; media children require the existing Windows job
+containment. The recorder child gets no provider credentials; the SRT
+child receives only its explicit transport passphrase plus the existing
+runtime allowlist. The upload worker reads only the Station OAuth
+variables. OAuth/upload HTTP is restricted to Google HTTPS hosts;
+redirects are not followed. The pinned donor import is checked against
+Station’s declared media source.</p>
+<h3 id="http-api-and-examples">HTTP API and examples</h3>
+<p>All <code>/v1</code> operations below require the existing current
+Townlight staff session header (<code>X-Townlight-Session</code>) or the
+existing same-origin operator session. Read roles can inspect receipts.
+Starting live feed/upload/retry requires the existing Station
+<code>capture</code> capability. No new login, role system or MCP server
+is added.</p>
+<table>
+<colgroup>
+<col style="width: 50%" />
+<col style="width: 50%" />
+</colgroup>
+<thead>
+<tr>
+<th>Method and route</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>GET <code>/v1/civiccast-feeds</code></td>
+<td>Capture-authorized list of configured IDs and labels; no transport
+credentials</td>
+</tr>
+<tr>
+<td>POST <code>/v1/recordings</code></td>
+<td>Existing capture contract plus optional
+<code>civiccast_feed_id</code>, allowed only with
+<code>live_source_id</code></td>
+</tr>
+<tr>
+<td>POST <code>/v1/recordings/{recording_id}/youtube</code></td>
+<td>Queue one explicit completed-recording upload</td>
+</tr>
+<tr>
+<td>GET <code>/v1/youtube-uploads</code></td>
+<td>Read-authorized latest 100 durable upload receipts</td>
+</tr>
+<tr>
+<td>POST <code>/v1/youtube-uploads/{upload_id}/retry</code></td>
+<td>Capture-authorized retry of a <strong>preparation</strong> failure
+only</td>
+</tr>
+</tbody>
+</table>
+<p>Station’s generated <code>/openapi.json</code> includes the new
+routes and request schemas. Example bodies (use real canonical IDs from
+the selected deployment):</p>
+<div class="sourceCode" id="cb18"><pre
+class="sourceCode json"><code class="sourceCode json"><span id="cb18-1"><a href="#cb18-1" aria-hidden="true" tabindex="-1"></a><span class="fu">{</span></span>
+<span id="cb18-2"><a href="#cb18-2" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;meeting_id&quot;</span><span class="fu">:</span> <span class="st">&quot;11111111-1111-4111-8111-111111111111&quot;</span><span class="fu">,</span></span>
+<span id="cb18-3"><a href="#cb18-3" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;agenda_ids&quot;</span><span class="fu">:</span> <span class="ot">[]</span><span class="fu">,</span></span>
+<span id="cb18-4"><a href="#cb18-4" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;live_source_id&quot;</span><span class="fu">:</span> <span class="st">&quot;chamber&quot;</span><span class="fu">,</span></span>
+<span id="cb18-5"><a href="#cb18-5" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;civiccast_feed_id&quot;</span><span class="fu">:</span> <span class="st">&quot;peg&quot;</span><span class="fu">,</span></span>
+<span id="cb18-6"><a href="#cb18-6" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;idempotency_key&quot;</span><span class="fu">:</span> <span class="st">&quot;council-live-2026-10-30&quot;</span></span>
+<span id="cb18-7"><a href="#cb18-7" aria-hidden="true" tabindex="-1"></a><span class="fu">}</span></span></code></pre></div>
+<div class="sourceCode" id="cb19"><pre
+class="sourceCode json"><code class="sourceCode json"><span id="cb19-1"><a href="#cb19-1" aria-hidden="true" tabindex="-1"></a><span class="fu">{</span></span>
+<span id="cb19-2"><a href="#cb19-2" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;title&quot;</span><span class="fu">:</span> <span class="st">&quot;City council meeting — 30 October 2026&quot;</span><span class="fu">,</span></span>
+<span id="cb19-3"><a href="#cb19-3" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;privacy&quot;</span><span class="fu">:</span> <span class="st">&quot;private&quot;</span><span class="fu">,</span></span>
+<span id="cb19-4"><a href="#cb19-4" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;approval_note&quot;</span><span class="fu">:</span> <span class="st">&quot;Reviewed completed recording for upload&quot;</span><span class="fu">,</span></span>
+<span id="cb19-5"><a href="#cb19-5" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;idempotency_key&quot;</span><span class="fu">:</span> <span class="st">&quot;council-vod-2026-10-30&quot;</span></span>
+<span id="cb19-6"><a href="#cb19-6" aria-hidden="true" tabindex="-1"></a><span class="fu">}</span></span></code></pre></div>
+<p>Upload titles are 1–100 characters; control characters and angle
+brackets are rejected. Visibility is private/unlisted/public; approval
+note 3–500 characters; key 1–100 characters. Repeating the same key
+returns the same intent, a changed request conflicts, and another key
+cannot duplicate an existing recording upload. A
+missing/uncompleted/tampered recording is rejected before upload
+admission; the worker independently verifies the recording hash before
+remuxing/sending. Retained receipts include approving actor, note/time,
+recording hash, MP4 path/ hash/size, chosen title/privacy and provider
+video ID/URL after acknowledgement. No OAuth token, passphrase or donor
+credential pointer is stored in receipts.</p>
+<h3 id="recovery-and-limits">Recovery and limits</h3>
+<p>A failed preparation (for example missing Station OAuth configuration
+or failed remux) is <code>failed</code>; correct the cause and
+explicitly call its retry route. The prior attempt files remain
+retained. Once any external request begins, an error is conservatively
+<code>needs-reconciliation</code>. A worker restart also moves
+interrupted <code>running</code> uploads to that state. There is no
+automatic retry that could create a duplicate YouTube video. Check
+YouTube Studio and the retained job before a human chooses another
+external action. This increment provides no automatic remote
+reconciliation/delete/reupload control. A valid uploaded link is
+retained even if the capture worker is restarted. The existing
+recording/Records path does not depend on the external upload
+succeeding.</p>
+<p>Live sender state is in the recording’s
+<code>details.civiccast_delivery</code>; its final byte count and
+per-attempt status/log files stay with the private recording. On
+capture-worker restart, an interrupted feed is marked interrupted rather
+than left appearing to send. Stop/reap is bounded even if the network
+child hangs. No feed is automatically re-aired after recovery.</p>
+<h3 id="verification-and-release-status">Verification and release
+status</h3>
+<p><code>tests/accept_deliveries.py</code> exercises the real Station
+API/store/media/remux, CivicCast’s pinned SRT source adapter and real
+YouTube file-upload client using a disposable PostgreSQL cluster,
+generated audio/video, synthetic staff authority and
+<code>httpx.MockTransport</code> for Google. No city systems or external
+publication are involved. <code>tests/accept_delivery_ui.cjs</code>
+drives the actual compiled operator controls in headless Chromium with
+synthetic API responses. Existing boundary/ operations checks and
+TypeScript compilation also apply.</p>
+<p>Example invocation from a development environment with existing
+dependencies:</p>
+<div class="sourceCode" id="cb20"><pre
+class="sourceCode powershell"><code class="sourceCode powershell"><span id="cb20-1"><a href="#cb20-1" aria-hidden="true" tabindex="-1"></a><span class="va">$env</span><span class="op">:</span><span class="va">PYTHONPATH</span> <span class="op">=</span> <span class="op">(</span><span class="fu">Resolve-Path</span> <span class="op">./</span>beta-1<span class="op">).</span><span class="fu">Path</span></span>
+<span id="cb20-2"><a href="#cb20-2" aria-hidden="true" tabindex="-1"></a><span class="va">$env</span><span class="op">:</span><span class="va">STATION_TEST_PG_BIN</span> <span class="op">=</span> <span class="st">&#39;C:/test-tools/postgres/bin&#39;</span></span>
+<span id="cb20-3"><a href="#cb20-3" aria-hidden="true" tabindex="-1"></a><span class="va">$env</span><span class="op">:</span><span class="va">STATION_TEST_MEDIA_RUNTIME</span> <span class="op">=</span> <span class="st">&#39;C:/test-tools/station-media-runtime&#39;</span></span>
+<span id="cb20-4"><a href="#cb20-4" aria-hidden="true" tabindex="-1"></a>python <span class="op">-</span>B <span class="op">./</span>beta-1<span class="op">/</span>tests<span class="op">/</span>accept_deliveries<span class="op">.</span><span class="fu">py</span> C<span class="op">:/</span>test-output<span class="op">/</span>station-deliveries-new</span></code></pre></div>
+<p>Use a <strong>new</strong> output directory; the script starts/stops
+only its owned disposable cluster and children. See the task’s retained
+acceptance receipts for actual results. This evidence establishes the
+new source wiring synthetically. It does not replace CivicCast’s already
+established real YouTube delivery evidence, nor claim a new real YouTube
+upload, physical cable broadcast, signed installer or Sandbox acceptance
+of this extension. Published Beta 1 artifacts stay unchanged.</p>
+<h2 id="delivery-subject-index">Delivery subject index</h2>
+<ul>
+<li><a
+href="#completed-recordings-on-youtube-and-live-civiccast-coverage">CivicCast
+live feed</a></li>
+<li>YouTube: explicit completed recording upload; visibility; receipt
+and reconciliation.</li>
+<li>Schema4: durable upload intent; existing evidence retained.</li>
 </ul></article></div></main><footer><span>Townlight Beta 1 · Local private-beta documentation · AGPL-3.0-only</span><span><a href="../versions.html">Exact versions and candidate</a> · CivicCast remains separate</span></footer>
 <script>const search=document.getElementById('find-section');if(search)search.addEventListener('input',()=>{const q=search.value.toLowerCase();let n=0;document.querySelectorAll('.toc li').forEach(li=>{const match=li.textContent.toLowerCase().includes(q);li.hidden=!match;if(match)n++;});document.querySelector('.search-status').textContent=q?n+' matching entries':'';});</script></body></html>

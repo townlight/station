@@ -1,0 +1,119 @@
+{
+  "edition": "Townlight Beta 1",
+  "tag": "townlight-beta-1-station-delivery",
+  "installer_sha256": "173c032b874e2cf4091cd79213f53c0663d272070fc11712701892d490e09883",
+  "source_archive_sha256": "18d94a23b1a5d9f4ee6ecddb0e581f194c90ac8306b01b06d6534d86c2e2220d",
+  "signing_run": "41163156492",
+  "installed_files": 23716,
+  "installed_station_checks": 13,
+  "synthetic_only": true,
+  "native_inputs_unchanged": 893,
+  "source_identity_note": "Integrated publication commits are separate from the original local build identity. Exact accepted source archive bytes are retained. Standalone CivicCast is unchanged.",
+  "station_archive_files": [
+    {
+      "archive": "installed-owned-source/townlight_station/__init__.py",
+      "path": "beta-1/townlight_station/__init__.py",
+      "sha256": "0e4ae6948a7b82358592fa123efcb0f2f19edd0322d93e8077da9db1dcde1ccc"
+    },
+    {
+      "archive": "installed-owned-source/townlight_station/air.py",
+      "path": "beta-1/townlight_station/air.py",
+      "sha256": "07bbb24d673c73ecb17274965c3aeefaca4b904c2a16af772009088c65b37cb5"
+    },
+    {
+      "archive": "installed-owned-source/townlight_station/airplay.py",
+      "path": "beta-1/townlight_station/airplay.py",
+      "sha256": "1a55dd17541478f97a86d7ff4e3054c6d998c95070bf86bb0d27fa5eeea1d231"
+    },
+    {
+      "archive": "installed-owned-source/townlight_station/api.py",
+      "path": "beta-1/townlight_station/api.py",
+      "sha256": "fa99dd6f913fb5020ce4790db6043bd080424bcd99f2e8d97e576daa96432a36"
+    },
+    {
+      "archive": "installed-owned-source/townlight_station/boundary.py",
+      "path": "beta-1/townlight_station/boundary.py",
+      "sha256": "700a35e89a4e0292a5e10e53957cda336fdfd1419ade5041982c653cc6af81a3"
+    },
+    {
+      "archive": "installed-owned-source/townlight_station/cli.py",
+      "path": "beta-1/townlight_station/cli.py",
+      "sha256": "b67d712170f08a90e3477d2c12b04ecef0581e6844f6ad79c661bf0e8f86b722"
+    },
+    {
+      "archive": "installed-owned-source/townlight_station/delivery.py",
+      "path": "beta-1/townlight_station/delivery.py",
+      "sha256": "833cd92f0f9cbd3016b3733b46f1787aa393d4dc8d5dde770d54d56c14c3487f"
+    },
+    {
+      "archive": "installed-owned-source/townlight_station/feed_job.py",
+      "path": "beta-1/townlight_station/feed_job.py",
+      "sha256": "be6d90c6140d5ed096e8b9c251d8ab45748dd01e1db2295a3c1e8af2a797d712"
+    },
+    {
+      "archive": "installed-owned-source/townlight_station/live.py",
+      "path": "beta-1/townlight_station/live.py",
+      "sha256": "5f32afd8d2b5e74296a083436b367fec3940da6ae33123fc17842bf0c6c05cce"
+    },
+    {
+      "archive": "installed-owned-source/townlight_station/media-lock.json",
+      "path": "beta-1/townlight_station/media-lock.json",
+      "sha256": "df53ec1559329e1c10c49febd38664a7ced17831bd346044145155d2b3600064"
+    },
+    {
+      "archive": "installed-owned-source/townlight_station/media_job.py",
+      "path": "beta-1/townlight_station/media_job.py",
+      "sha256": "15237eaa872c9772c548aaf57dced25ec51a343489b894a462d95de19507e59b"
+    },
+    {
+      "archive": "installed-owned-source/townlight_station/operations.py",
+      "path": "beta-1/townlight_station/operations.py",
+      "sha256": "69019673d277ee4850d4dd1789e0576b6883d684b0f1ead2be9f965cfdf7b7d2"
+    },
+    {
+      "archive": "installed-owned-source/townlight_station/operator.py",
+      "path": "beta-1/townlight_station/operator.py",
+      "sha256": "6471894a1240b611a2bf006867ce79848630f6dc69270e29e54b71dbb26f3837"
+    },
+    {
+      "archive": "installed-owned-source/townlight_station/packaging.py",
+      "path": "beta-1/townlight_station/packaging.py",
+      "sha256": "e53a0b87870b728f6ee5015672e08f9ca05eab0e3c33f5d4c8ecb08b88d92158"
+    },
+    {
+      "archive": "installed-owned-source/townlight_station/store.py",
+      "path": "beta-1/townlight_station/store.py",
+      "sha256": "a075061d7de057e3dbc523ae499ff4160e9ea8db65e6a2816ec2b7bfda62a313"
+    },
+    {
+      "archive": "installed-owned-source/townlight_station/ui/index.html",
+      "path": "beta-1/townlight_station/ui/index.html",
+      "sha256": "daee739a12f0e6a5d19a14003a06c0a963baf759030e83a33ed91e596d308f6e"
+    },
+    {
+      "archive": "installed-owned-source/townlight_station/ui/operator.css",
+      "path": "beta-1/townlight_station/ui/operator.css",
+      "sha256": "ed573b2adfc6c99e8cc8ce68f3318beadfe09e779711be6624717fb57914388c"
+    },
+    {
+      "archive": "installed-owned-source/townlight_station/ui/operator.js",
+      "path": "beta-1/townlight_station/ui/operator.js",
+      "sha256": "49c475f42856d91b9f8a0db7395bdf07dcb7bcf26965bea0543b0c82075cf3b3"
+    },
+    {
+      "archive": "installed-owned-source/townlight_station/vod_job.py",
+      "path": "beta-1/townlight_station/vod_job.py",
+      "sha256": "d55a20bdf377142d6acd857aaca86d17468837ee638311dd3ac0fb76b571821d"
+    },
+    {
+      "archive": "installed-owned-source/townlight_station/windows_service.py",
+      "path": "beta-1/townlight_station/windows_service.py",
+      "sha256": "8eebfbe5d14fcae26cbd67ff712e7980444b9ae2a2e600283dc577025552a050"
+    },
+    {
+      "archive": "installed-owned-source/townlight_station/worker.py",
+      "path": "beta-1/townlight_station/worker.py",
+      "sha256": "dd69aaf49e1af7a887a104b1aee7c5a0f459dc95d6a3d520bacb88ad82748e32"
+    }
+  ]
+}

@@ -39,6 +39,8 @@ def run(once=False):
                     if detail['attempts']:
                         detail['attempts'][-1].update(status='interrupted',
                             finished_at=datetime.now(timezone.utc).isoformat())
+                    if detail.get('civiccast_delivery'):
+                        detail['civiccast_delivery']['state'] = 'interrupted'
                     conn.execute(recordings.update().where(recordings.c.id == stale['id'])
                         .values(status='interrupted', details=detail))
                 for stale in conn.execute(sa.select(playouts).where(playouts.c.status == 'running')).mappings():
@@ -149,6 +151,8 @@ def process(cfg, store, row):
     output = folder / (attempt['id'] + '.ts')
     log = output.with_suffix('.log')
     child = None
+    feed_child = feed_stream = None
+    feed_status = output.with_suffix('.feed.json')
     try:
         live = details.get('live_source')
         if not live and sha256(folder / 'source.media') != details['input_sha256']:
@@ -160,6 +164,25 @@ def process(cfg, store, row):
             child = subprocess.Popen([str(cfg.media_python), '-B', str(Path(__file__).with_name('media_job.py')),
                 str(cfg.media_source), str(folder), str(output), json.dumps(details['encoding_profile']), json.dumps(live)], env=cfg.worker_environment(),
                 stdout=stream, stderr=subprocess.STDOUT, creationflags=subprocess.CREATE_NO_WINDOW)
+            # A separate child tails retained TS bytes: no network sink shares
+            # the recorder's pipeline or blocks its disk output.
+            feed = details.get('civiccast_feed')
+            if live and feed:
+                try:
+                    secret = os.environ.get(feed['secret_env'], '')
+                    if not 10 <= len(secret) <= 79:
+                        raise ValueError('Station SRT secret missing or invalid')
+                    env = cfg.worker_environment()
+                    env['TOWNLIGHT_STATION_FEED_SECRET'] = secret
+                    feed_stream = output.with_suffix('.feed.log').open('xb')
+                    feed_child = subprocess.Popen([str(cfg.media_python), '-B',
+                        str(Path(__file__).with_name('feed_job.py')), str(cfg.media_source),
+                        str(output), str(feed_status), json.dumps(feed)], env=env,
+                        stdout=feed_stream, stderr=subprocess.STDOUT,
+                        creationflags=subprocess.CREATE_NO_WINDOW)
+                    details['civiccast_delivery'] = {'state': 'waiting-for-receiver', 'bytes_sent': 0}
+                except Exception as exc:
+                    details['civiccast_delivery'] = {'state': 'failed', 'error': type(exc).__name__}
             attempt['pid'] = child.pid
             store.update(identity, 'running', details)
             if not live:
@@ -173,6 +196,8 @@ def process(cfg, store, row):
                     current_size = output.stat().st_size if output.exists() else 0
                     if current_size > size:
                         size, progress = current_size, now
+                    if feed_child:
+                        _feed_progress(store, identity, details, feed_child, feed_status)
                     current = store.get(identity)
                     if not stopping and (current['control'].get('stop_requested_at') or now-started >= cfg.max_seconds):
                         attempt['end_reason'] = 'operator-stop' if current['control'].get('stop_requested_at') else 'duration-limit'
@@ -186,6 +211,7 @@ def process(cfg, store, row):
                         raise RuntimeError('Live input absent or stalled; partial evidence retained')
                     time.sleep(.2)
                 code = child.returncode
+        _stop_feed(store, identity, details, feed_child, feed_status, output)
         attempt['exit_code'] = code
         if code or not output.is_file():
             raise RuntimeError('Media worker failed; retained attempt log requires review')
@@ -209,13 +235,49 @@ def process(cfg, store, row):
         if child and child.poll() is None:
             child.kill()
             child.wait(timeout=10)
+        _stop_feed(store, identity, details, feed_child, feed_status, output)
         attempt.update(status='failed', error=type(exc).__name__, finished_at=datetime.now(timezone.utc).isoformat())
         store.update(identity, 'failed', details)
         print(f'Station recording {identity} failed: {exc}', file=sys.stderr, flush=True)
     finally:
+        _stop_feed(store, identity, details, feed_child, feed_status, output)
+        if feed_stream:
+            feed_stream.close()
         if child and child.poll() is None:
             child.kill()
             child.wait(timeout=10)
+
+
+def _feed_progress(store, identity, details, child, status):
+    try:
+        state = json.loads(status.read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        state = details.get('civiccast_delivery', {'state': 'waiting-for-receiver', 'bytes_sent': 0})
+    if child.poll() is not None and state['state'] not in ('stopped', 'failed'):
+        state = {**state, 'state': 'failed', 'error': 'SRT sender exited'}
+    if state != details.get('civiccast_delivery'):
+        details['civiccast_delivery'] = state
+        store.update(identity, 'running', details)
+
+
+def _stop_feed(store, identity, details, child, status, output):
+    if child is None:
+        return
+    if child.poll() is None:
+        output.with_suffix('.feed-stop').write_text('stop', encoding='ascii')
+        try:
+            child.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            child.kill()
+            child.wait(timeout=5)
+    # Do not overwrite a terminal recording status when called from finally.
+    try:
+        state = json.loads(status.read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        state = {'state': 'failed', 'error': 'No final SRT receipt'}
+    if state['state'] not in ('failed', 'stopped'):
+        state.update(state='failed', error='SRT sender did not stop cleanly')
+    details['civiccast_delivery'] = state
 
 
 def _probe(cfg, path):

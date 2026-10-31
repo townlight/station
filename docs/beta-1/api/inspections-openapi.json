@@ -1,0 +1,1361 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Townlight Records",
+    "description": "Townlight Beta 1 documentation view of the installed desktop domain schema. Component API version is unchanged. Exported without lifespan or database access; schema generation is not endpoint acceptance.",
+    "version": "1.8.0.dev1"
+  },
+  "paths": {
+    "/desktop/v1/inspections/repeat-cases": {
+      "post": {
+        "tags": [
+          "native-inspections"
+        ],
+        "summary": "Repeat Cases",
+        "operationId": "repeat_cases_desktop_v1_inspections_repeat_cases_post",
+        "parameters": [
+          {
+            "name": "X-Townlight-Session",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Townlight-Session"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RepeatLookup"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/desktop/v1/inspections/notice-draft": {
+      "post": {
+        "tags": [
+          "native-inspections"
+        ],
+        "summary": "Notice",
+        "operationId": "notice_desktop_v1_inspections_notice_draft_post",
+        "parameters": [
+          {
+            "name": "X-Townlight-Session",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Townlight-Session"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InspectionInput"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/desktop/v1/inspections/cases": {
+      "get": {
+        "tags": [
+          "native-inspections"
+        ],
+        "summary": "Cases",
+        "operationId": "cases_desktop_v1_inspections_cases_get",
+        "parameters": [
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 100000,
+              "minimum": 0,
+              "default": 0,
+              "title": "Offset"
+            }
+          },
+          {
+            "name": "X-Townlight-Session",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Townlight-Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "native-inspections"
+        ],
+        "summary": "Create Case",
+        "operationId": "create_case_desktop_v1_inspections_cases_post",
+        "parameters": [
+          {
+            "name": "X-Townlight-Session",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Townlight-Session"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InspectionInput"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/desktop/v1/inspections/cases/{case_id}": {
+      "get": {
+        "tags": [
+          "native-inspections"
+        ],
+        "summary": "Case",
+        "operationId": "case_desktop_v1_inspections_cases__case_id__get",
+        "parameters": [
+          {
+            "name": "case_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Case Id"
+            }
+          },
+          {
+            "name": "X-Townlight-Session",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Townlight-Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/desktop/v1/inspections/cases/{case_id}/revisions": {
+      "post": {
+        "tags": [
+          "native-inspections"
+        ],
+        "summary": "Revise",
+        "operationId": "revise_desktop_v1_inspections_cases__case_id__revisions_post",
+        "parameters": [
+          {
+            "name": "case_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Case Id"
+            }
+          },
+          {
+            "name": "X-Townlight-Session",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Townlight-Session"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InspectionInput"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/desktop/v1/inspections/cases/{case_id}/history": {
+      "get": {
+        "tags": [
+          "native-inspections"
+        ],
+        "summary": "History",
+        "operationId": "history_desktop_v1_inspections_cases__case_id__history_get",
+        "parameters": [
+          {
+            "name": "case_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Case Id"
+            }
+          },
+          {
+            "name": "X-Townlight-Session",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Townlight-Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/desktop/v1/inspections/cases/{case_id}/packets": {
+      "post": {
+        "tags": [
+          "native-inspections"
+        ],
+        "summary": "Packet",
+        "operationId": "packet_desktop_v1_inspections_cases__case_id__packets_post",
+        "parameters": [
+          {
+            "name": "case_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Case Id"
+            }
+          },
+          {
+            "name": "X-Townlight-Session",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Townlight-Session"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Packet"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/desktop/v1/inspections/packets/{packet_id}": {
+      "get": {
+        "tags": [
+          "native-inspections"
+        ],
+        "summary": "Document",
+        "operationId": "document_desktop_v1_inspections_packets__packet_id__get",
+        "parameters": [
+          {
+            "name": "packet_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Packet Id"
+            }
+          },
+          {
+            "name": "X-Townlight-Session",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Townlight-Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/desktop/v1/inspections/evidence/supported-types": {
+      "get": {
+        "tags": [
+          "native-inspections"
+        ],
+        "summary": "Supported Types",
+        "description": "The media types this deployment's product model actually accepts.",
+        "operationId": "supported_types_desktop_v1_inspections_evidence_supported_types_get",
+        "parameters": [
+          {
+            "name": "X-Townlight-Session",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Townlight-Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/desktop/v1/inspections/evidence/retain": {
+      "post": {
+        "tags": [
+          "native-inspections"
+        ],
+        "summary": "Retain",
+        "operationId": "retain_desktop_v1_inspections_evidence_retain_post",
+        "parameters": [
+          {
+            "name": "X-Townlight-Session",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Townlight-Session"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EvidenceItems"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/desktop/v1/inspections/media/analyse": {
+      "post": {
+        "tags": [
+          "native-inspections"
+        ],
+        "summary": "Media Analyse",
+        "description": "Run the configured adapters over retained originals; draft only.\n\nThe result carries the same observations/citations the product route returns\nplus ``analysis_record``: the exact ``AnalysisRecord`` the caller puts on its\ncase payload, so the reviewed draft is the analysed one.",
+        "operationId": "media_analyse_desktop_v1_inspections_media_analyse_post",
+        "parameters": [
+          {
+            "name": "X-Townlight-Session",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Townlight-Session"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MediaAnalysis"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/desktop/v1/inspections/connections/search": {
+      "post": {
+        "tags": [
+          "native-inspections"
+        ],
+        "summary": "Connections",
+        "operationId": "connections_desktop_v1_inspections_connections_search_post",
+        "parameters": [
+          {
+            "name": "X-Townlight-Session",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Townlight-Session"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/civicsuite_runtime__inspections_bridge__Search"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "AnalysisObservation": {
+        "properties": {
+          "source": {
+            "type": "string",
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Source"
+          },
+          "filename": {
+            "type": "string",
+            "maxLength": 160,
+            "title": "Filename",
+            "default": ""
+          },
+          "media_type": {
+            "type": "string",
+            "maxLength": 80,
+            "title": "Media Type",
+            "default": ""
+          },
+          "text": {
+            "type": "string",
+            "maxLength": 4000,
+            "minLength": 1,
+            "title": "Text"
+          },
+          "adapter": {
+            "type": "string",
+            "maxLength": 120,
+            "title": "Adapter",
+            "default": ""
+          },
+          "citation_source_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "maxItems": 30,
+            "title": "Citation Source Ids"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "source",
+          "text"
+        ],
+        "title": "AnalysisObservation",
+        "description": "One draft observation, named with the adapter that actually produced it."
+      },
+      "AnalysisRecord": {
+        "properties": {
+          "observations": {
+            "items": {
+              "$ref": "#/components/schemas/AnalysisObservation"
+            },
+            "type": "array",
+            "maxItems": 30,
+            "title": "Observations"
+          },
+          "cited_sections": {
+            "items": {
+              "$ref": "#/components/schemas/CitedSection"
+            },
+            "type": "array",
+            "maxItems": 30,
+            "title": "Cited Sections"
+          },
+          "unavailable": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "maxItems": 30,
+            "title": "Unavailable"
+          },
+          "runtime": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Runtime"
+          },
+          "review_required": {
+            "type": "boolean",
+            "title": "Review Required",
+            "default": true
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "AnalysisRecord",
+        "description": "The adapter output that accompanies a saved inspection draft."
+      },
+      "CitedSection": {
+        "properties": {
+          "source_id": {
+            "type": "string",
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Source Id"
+          },
+          "citation": {
+            "type": "string",
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Citation"
+          },
+          "title": {
+            "type": "string",
+            "maxLength": 500,
+            "title": "Title",
+            "default": ""
+          },
+          "version": {
+            "type": "string",
+            "maxLength": 80,
+            "title": "Version",
+            "default": ""
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "source_id",
+          "citation"
+        ],
+        "title": "CitedSection",
+        "description": "One resolved public Code section; never a caller-supplied quotation."
+      },
+      "CodeLink": {
+        "properties": {
+          "provider": {
+            "type": "string",
+            "const": "code",
+            "title": "Provider",
+            "default": "code"
+          },
+          "source_id": {
+            "type": "string",
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Source Id"
+          },
+          "expected_sha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$",
+            "title": "Expected Sha256"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "source_id",
+          "expected_sha256"
+        ],
+        "title": "CodeLink"
+      },
+      "Evidence": {
+        "properties": {
+          "filename": {
+            "type": "string",
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,150}$",
+            "title": "Filename"
+          },
+          "description": {
+            "type": "string",
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Description"
+          },
+          "media_type": {
+            "type": "string",
+            "enum": [
+              "text/plain",
+              "image/jpeg",
+              "image/png",
+              "image/webp",
+              "application/pdf",
+              "audio/webm",
+              "audio/ogg",
+              "audio/wav",
+              "audio/mpeg",
+              "audio/mp4"
+            ],
+            "title": "Media Type"
+          },
+          "content_base64": {
+            "type": "string",
+            "maxLength": 14000000,
+            "minLength": 1,
+            "title": "Content Base64"
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$",
+            "title": "Sha256"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "filename",
+          "description",
+          "media_type",
+          "content_base64",
+          "sha256"
+        ],
+        "title": "Evidence"
+      },
+      "EvidenceItem": {
+        "properties": {
+          "filename": {
+            "type": "string",
+            "maxLength": 151,
+            "minLength": 1,
+            "title": "Filename"
+          },
+          "media_type": {
+            "type": "string",
+            "maxLength": 80,
+            "minLength": 1,
+            "title": "Media Type"
+          },
+          "description": {
+            "type": "string",
+            "maxLength": 2000,
+            "title": "Description",
+            "default": ""
+          },
+          "content_base64": {
+            "type": "string",
+            "maxLength": 14000000,
+            "minLength": 1,
+            "title": "Content Base64"
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$",
+            "title": "Sha256"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "filename",
+          "media_type",
+          "content_base64",
+          "sha256"
+        ],
+        "title": "EvidenceItem"
+      },
+      "EvidenceItems": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/EvidenceItem"
+            },
+            "type": "array",
+            "maxItems": 10,
+            "minItems": 1,
+            "title": "Items"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "title": "EvidenceItems"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "type": "array",
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "title": "HTTPValidationError"
+      },
+      "InspectionInput": {
+        "properties": {
+          "expected_revision": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Revision"
+          },
+          "title": {
+            "type": "string",
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Title"
+          },
+          "property_reference": {
+            "type": "string",
+            "maxLength": 1000,
+            "minLength": 1,
+            "title": "Property Reference"
+          },
+          "inspection_reference": {
+            "type": "string",
+            "maxLength": 160,
+            "minLength": 1,
+            "title": "Inspection Reference"
+          },
+          "dataset_kind": {
+            "type": "string",
+            "enum": [
+              "municipal",
+              "fictional"
+            ],
+            "title": "Dataset Kind"
+          },
+          "inspector_notes": {
+            "type": "string",
+            "maxLength": 10000,
+            "minLength": 1,
+            "title": "Inspector Notes"
+          },
+          "photo_observations": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "maxItems": 30,
+            "title": "Photo Observations"
+          },
+          "voice_notes": {
+            "type": "string",
+            "maxLength": 10000,
+            "title": "Voice Notes",
+            "default": ""
+          },
+          "evidence": {
+            "items": {
+              "$ref": "#/components/schemas/Evidence"
+            },
+            "type": "array",
+            "maxItems": 10,
+            "title": "Evidence"
+          },
+          "linked_sources": {
+            "items": {
+              "$ref": "#/components/schemas/civicinspect__workflow_models__SourceLink"
+            },
+            "type": "array",
+            "maxItems": 30,
+            "title": "Linked Sources"
+          },
+          "assigned_to": {
+            "type": "string",
+            "maxLength": 255,
+            "title": "Assigned To",
+            "default": ""
+          },
+          "staff_notes": {
+            "type": "string",
+            "maxLength": 10000,
+            "title": "Staff Notes",
+            "default": ""
+          },
+          "notice_draft": {
+            "type": "string",
+            "maxLength": 10000,
+            "title": "Notice Draft",
+            "default": ""
+          },
+          "review_state": {
+            "type": "string",
+            "enum": [
+              "draft",
+              "follow_up",
+              "reviewed"
+            ],
+            "title": "Review State",
+            "default": "draft"
+          },
+          "review_notes": {
+            "type": "string",
+            "maxLength": 4000,
+            "title": "Review Notes",
+            "default": ""
+          },
+          "public_summary": {
+            "type": "string",
+            "maxLength": 10000,
+            "title": "Public Summary",
+            "default": ""
+          },
+          "analysis": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AnalysisRecord"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "title",
+          "property_reference",
+          "inspection_reference",
+          "dataset_kind",
+          "inspector_notes"
+        ],
+        "title": "InspectionInput"
+      },
+      "MediaAnalysis": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/EvidenceItem"
+            },
+            "type": "array",
+            "maxItems": 10,
+            "minItems": 1,
+            "title": "Items"
+          },
+          "code_links": {
+            "items": {
+              "$ref": "#/components/schemas/CodeLink"
+            },
+            "type": "array",
+            "maxItems": 30,
+            "title": "Code Links"
+          },
+          "inspector_supplied_text": {
+            "type": "string",
+            "maxLength": 10000,
+            "title": "Inspector Supplied Text",
+            "default": ""
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "title": "MediaAnalysis"
+      },
+      "Packet": {
+        "properties": {
+          "expected_revision": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Expected Revision"
+          },
+          "visibility": {
+            "type": "string",
+            "enum": [
+              "staff_only",
+              "records_copy"
+            ],
+            "title": "Visibility"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "expected_revision",
+          "visibility"
+        ],
+        "title": "Packet"
+      },
+      "RepeatLookup": {
+        "properties": {
+          "property_reference": {
+            "type": "string",
+            "maxLength": 1000,
+            "minLength": 1,
+            "title": "Property Reference"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "property_reference"
+        ],
+        "title": "RepeatLookup"
+      },
+      "ValidationError": {
+        "properties": {
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "type": "array",
+            "title": "Location"
+          },
+          "msg": {
+            "type": "string",
+            "title": "Message"
+          },
+          "type": {
+            "type": "string",
+            "title": "Error Type"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "ctx": {
+            "type": "object",
+            "title": "Context"
+          }
+        },
+        "type": "object",
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError"
+      },
+      "civicinspect__workflow_models__SourceLink": {
+        "properties": {
+          "provider": {
+            "type": "string",
+            "const": "code",
+            "title": "Provider",
+            "default": "code"
+          },
+          "source_id": {
+            "type": "string",
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Source Id"
+          },
+          "expected_sha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$",
+            "title": "Expected Sha256"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "source_id",
+          "expected_sha256"
+        ],
+        "title": "SourceLink"
+      },
+      "civicsuite_runtime__inspections_bridge__Search": {
+        "properties": {
+          "provider": {
+            "type": "string",
+            "const": "code",
+            "title": "Provider"
+          },
+          "query": {
+            "type": "string",
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Query"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "provider",
+          "query"
+        ],
+        "title": "Search"
+      }
+    },
+    "securitySchemes": {
+      "OAuth2PasswordBearer": {
+        "type": "oauth2",
+        "flows": {
+          "password": {
+            "scopes": {},
+            "tokenUrl": "auth/jwt/login"
+          }
+        }
+      }
+    }
+  }
+}

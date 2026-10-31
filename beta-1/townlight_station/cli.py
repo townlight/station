@@ -6,7 +6,7 @@ from .store import Store
 
 def main():
     parser = argparse.ArgumentParser(prog='townlight-station')
-    parser.add_argument('command', choices=['migrate', 'serve', 'worker', 'air', 'operator'])
+    parser.add_argument('command', choices=['migrate', 'serve', 'worker', 'air', 'operator', 'uploads'])
     parser.add_argument('--port', type=int, default=8756)
     parser.add_argument('--once', action='store_true')
     parser.add_argument('--profile-root', type=str)
@@ -23,6 +23,9 @@ def main():
         import uvicorn
         from .api import create_app
         uvicorn.run(create_app(cfg), host='127.0.0.1', port=args.port, access_log=False)
+    elif args.command == 'uploads':
+        from .delivery import run_uploads
+        run_uploads(once=args.once)
     elif args.command == 'air':
         # The on-air program itself: a real emitted output kept in step with the
         # durable on-air decision the serve/worker processes write.

@@ -1,0 +1,3282 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="description" content=""><title>Townlight
+Meetings API Reference | Townlight Beta 1</title><style>
+:root{--ink:#182f3a;--muted:#526775;--accent:#006b64;--paper:#fff;--wash:#f1f6f5;--line:#cfdddf;--warm:#dceab2}
+*{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;background:var(--paper);color:var(--ink);font:17px/1.65 "Segoe UI",Arial,sans-serif}a{color:#006b64;text-underline-offset:3px}a:hover{text-decoration-thickness:2px}a:focus-visible,button:focus-visible,input:focus-visible{outline:3px solid #a25900;outline-offset:4px}.skip{position:absolute;left:-9999px}.skip:focus{left:1rem;top:1rem;background:white;padding:1rem;z-index:20}header{border-bottom:1px solid var(--line);padding:1.1rem 5vw;display:flex;align-items:center;gap:1.5rem;flex-wrap:wrap}header .brand{font-size:1.3rem;font-weight:750;letter-spacing:-.04em;text-decoration:none;color:var(--ink)}header nav{margin-left:auto;display:flex;gap:1.25rem;flex-wrap:wrap;font-size:.88rem}.edition{font:700 .72rem/1.5 "Segoe UI",sans-serif;letter-spacing:.12em;text-transform:uppercase;color:var(--accent)}.wrap{max-width:1240px;margin:auto;padding:0 4vw}.hero{padding:5rem 0 3.2rem;max-width:950px}.hero h1{font-size:clamp(2.5rem,5vw,4.7rem);line-height:1.08;letter-spacing:-.045em;margin:1rem 0 1.5rem;font-weight:650}.hero .lead{font-size:1.26rem;max-width:780px;color:var(--muted)}.actions{display:flex;gap:.8rem;flex-wrap:wrap;margin:1.8rem 0}.button{display:inline-block;padding:.7rem 1.15rem;border:1px solid var(--accent);border-radius:4px;text-decoration:none;font-weight:650}.button.primary{background:var(--accent);color:#fff}.facts{display:flex;gap:1.5rem;flex-wrap:wrap;font-size:.85rem;color:var(--muted)}.section{padding:3rem 0;border-top:1px solid var(--line)}h2{font-size:1.8rem;line-height:1.3;letter-spacing:-.025em;margin:2.5rem 0 1rem}h3{font-size:1.18rem;line-height:1.45;margin:1.8rem 0 .7rem}h4{font-size:1rem;margin:1.3rem 0 .6rem}p{margin:.85rem 0 1rem}ul,ol{padding-left:1.6rem}li{margin:.4rem 0}strong{font-weight:650}.grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:1.6rem}.product{border-top:3px solid var(--accent);padding:1.4rem 0}.product h3{font-size:1.65rem;margin:.4rem 0}.product p{color:var(--muted)}.number{font-size:.76rem;letter-spacing:.1em}.split{display:grid;grid-template-columns:1fr 1fr;gap:3rem}.flow{width:100%;height:auto;display:block;margin:1.8rem 0}.caption{font-size:.85rem;color:var(--muted)}.reading{max-width:860px}.doclayout{display:grid;grid-template-columns:245px minmax(0,1fr);gap:3rem;max-width:1320px;margin:auto;padding:2rem 4vw}.toc{font-size:.84rem;align-self:start;position:sticky;top:1rem;max-height:90vh;overflow:auto;padding-right:.8rem}.toc ul{list-style:none;padding:0}.toc li{margin:.5rem 0}.toc li li{padding-left:.8rem}.toc a{text-decoration:none}.docbody{min-width:0}.docbody h1{font-size:2.7rem;line-height:1.1;letter-spacing:-.04em}.docbody h2{border-top:1px solid var(--line);padding-top:1.8rem}.docbody img{max-width:100%;height:auto}.docmeta{color:var(--muted);font-size:.9rem}.docbody section{scroll-margin-top:1rem}table{width:100%;border-collapse:collapse;font-size:.87rem;line-height:1.5;margin:1.3rem 0;table-layout:auto}th{text-align:left;background:var(--wash);font-weight:650}th,td{padding:.65rem .7rem;border-bottom:1px solid var(--line);vertical-align:top;overflow-wrap:anywhere}thead{display:table-header-group}pre{background:#f2f5f6;padding:1rem;border:1px solid #dfe7e8;white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;font:13px/1.6 Consolas,monospace}code{font: .85em/1.6 Consolas,monospace;overflow-wrap:anywhere}pre code{font-size:inherit}blockquote{border-left:3px solid var(--accent);padding-left:1rem;margin-left:0;color:var(--muted)}.search{padding:.65rem;border:1px solid #789399;border-radius:4px;width:100%;font:inherit}.search-status{font-size:.8rem;color:var(--muted)}footer{border-top:1px solid var(--line);padding:2rem 5vw;margin-top:3rem;font-size:.85rem;color:var(--muted);display:flex;gap:2rem;justify-content:space-between;flex-wrap:wrap}.small{font-size:.9rem;color:var(--muted)}.api-entry{padding:1.2rem 0;border-top:1px solid var(--line)}.api-entry h3{overflow-wrap:anywhere}.method{font-size:.76rem;font-weight:750;color:var(--accent)}details{margin:1rem 0}summary{cursor:pointer;font-weight:650}.index-columns{columns:2;column-gap:2rem}.index-columns li{break-inside:avoid}
+@media(max-width:850px){.grid{grid-template-columns:1fr 1fr}.split{grid-template-columns:1fr}.doclayout{grid-template-columns:1fr;gap:1rem}.toc{position:static;max-height:none}.hero{padding-top:3rem}header nav{margin-left:0}.docbody h1{font-size:2.2rem}}
+@media(max-width:520px){.grid{grid-template-columns:1fr}.wrap{padding:0 6vw}header{padding:1rem 6vw}.hero h1{font-size:2.6rem}.index-columns{columns:1}table{font-size:.78rem}th,td{padding:.45rem}.doclayout{padding:1rem 6vw}.facts{gap:.5rem}}
+main,.toc a,.hero h1{overflow-wrap:anywhere}
+@page{size:Letter;margin:.7in .65in .75in}
+@media print{html{scroll-behavior:auto}body{font:10.5pt/1.45 Arial,sans-serif;color:#172f39}header,footer,.search-area,.screen-only{display:none}.doclayout{display:block;padding:0;max-width:none}.toc{position:static;max-height:none;overflow:visible;font-size:10pt;break-after:page}.toc>h2{border:0}.toc ul{columns:2;column-gap:.3in}.toc li{break-inside:avoid}.docbody h1{font-size:30pt}.docbody h2{font-size:19pt;break-after:avoid;padding-top:.15in;margin-top:.35in}.docbody h3{font-size:12pt;break-after:avoid}.docbody h4{break-after:avoid}p{orphans:3;widows:3}pre{font-size:8.2pt;line-height:1.4;padding:.1in;break-inside:auto}table{font-size:8.4pt;line-height:1.35}th,td{padding:.06in .07in}tr{break-inside:avoid}.flow{max-height:6in;object-fit:contain;break-inside:avoid}a{color:#172f39;text-decoration:underline}.cover{break-after:page;padding-top:1in}.cover .edition{font-size:11pt}.cover h1{font-size:32pt}.cover .lead{font-size:14pt}.api-entry{break-inside:auto}.api-entry h3{break-after:avoid}.index-columns{columns:2}}
+</style></head><body><a class="skip" href="#main">Skip to content</a><aside aria-label="Beta download" style="padding:1rem 5%;background:#e5f3ec;color:#123b30"><strong>Townlight Beta 1</strong> · <a href="https://github.com/townlight/townlight/releases/tag/townlight-beta-1-station-delivery">Signed Windows installer, source, documentation and acceptance</a>. Updated Station live feed and recorded-video delivery; existing component versions retained. <a href="https://townlight.github.io/versions.html">Candidate identity and retained baseline evidence</a>.</aside><header><a class="brand" href="../index.html">townlight<span aria-hidden="true"> ·</span></a><span class="edition">Townlight Beta 1</span><nav aria-label="Main"><a href="../index.html#products">Products</a><a href="../manuals/suite.html">Suite manual</a><a href="../reference/index.html">Technical reference</a><a href="../terms.html">Terms and license</a></nav></header>
+<main id="main"><div class="cover wrap"><div class="hero"><div class="edition">Townlight Beta 1</div><h1>Townlight
+Meetings API
+Reference</h1><p class="lead">Staff guide and technical reference</p><p class="docmeta">Documentation edition 30 October 2026<br>Existing component versions retained<br>Signed suite installer 1.6.0.1<br>Private beta documentation companion</p></div></div><div class="doclayout"><aside class="toc" aria-label="Table of contents"><h2>Contents</h2><div class="search-area"><label for="find-section">Find a section</label><input class="search" id="find-section" type="search" placeholder="Type a heading"><p class="search-status" aria-live="polite"></p></div><ul>
+<li><a href="#api-reference-scope" id="toc-api-reference-scope">API
+reference scope</a></li>
+<li><a href="#installed-desktop-http-operations"
+id="toc-installed-desktop-http-operations">Installed desktop HTTP
+operations</a></li>
+<li><a href="#request-and-response-data-dictionary"
+id="toc-request-and-response-data-dictionary">Request and response data
+dictionary</a></li>
+<li><a href="#source-route-and-validation-supplement"
+id="toc-source-route-and-validation-supplement">Source route and
+validation supplement</a></li>
+<li><a href="#alphabetical-contract-index"
+id="toc-alphabetical-contract-index">Alphabetical contract
+index</a></li>
+</ul></aside><article class="docbody"><h2 id="api-reference-scope">API
+reference scope</h2>
+<p>This is the <strong>Townlight Beta 1</strong> technical contract for
+Meetings. The desktop-domain entries below come from the installed
+candidate’s generated OpenAPI schema. Export did not start a server,
+enter application lifespan, run migrations or contact a database. It is
+schema evidence, not proof of every endpoint’s runtime behavior. The
+acceptance section of the operating manual identifies exercised
+paths.</p>
+<p>The complete filtered <a href="meetings-openapi.json">OpenAPI
+JSON</a> preserves request bodies, parameters, response declarations,
+constraints and referenced schemas. An empty response schema means that
+this application did not declare a structured response model; do not
+infer a stronger contract from a green HTTP status. HTTP authorization
+enforced inside dependencies is still required when an automatically
+generated header parameter says optional.</p>
+<h3 id="origins-and-authentication">Origins and authentication</h3>
+<p>The canonical native domain transport uses
+<code>http://127.0.0.1:15480</code>. The native shell supplies
+<code>X-Townlight-Session</code> and maps it to a persisted SQL
+identity; browser code must not invent an actor or role. A trusted local
+integration must protect that proof as a credential and revalidate
+current authority. Standalone <code>/auth/jwt/login</code> uses the
+existing bearer-token flow; that token is not interchangeable with
+native proof. Public routes have their own permission and deployment
+gates. Do not bind the native domain runtime to a non-loopback
+interface.</p>
+<p>Station defaults to explicit loopback port <code>8756</code>. Its
+service revalidates Townlight authority. Its browser exchanges a one-use
+60-second ticket for a 900-second HttpOnly SameSite Strict operator
+cookie. Browser mutations require the exact Origin and
+<code>X-Station-UI: 1</code>. Native session proof must not be put in a
+URL or shipped to an MCP client.</p>
+<h3 id="failure-and-retry-contract">Failure and retry contract</h3>
+<p><code>401</code> means missing/expired identity; <code>403</code>
+means permission or origin denial; <code>404</code> means a missing or
+unavailable resource; <code>409</code> commonly means revision,
+source-hash, lifecycle or idempotency conflict; <code>422</code> means
+invalid input; <code>429</code> means a bounded rate/capacity refusal;
+<code>503</code> means an unavailable dependency, configuration or
+schema. Individual routes may use only a subset and source-derived
+checks can add errors absent from generated response declarations.
+Preserve edits, read the detail and inspect current state before
+retrying a write. Neither a retry nor an idempotency key authorizes a
+changed payload.</p>
+<h3 id="effective-installed-runtime-contract">Effective installed
+runtime contract</h3>
+<p>The inner domain export in
+<code>reference/desktop-domain-openapi.json</code> has 243 paths and 245
+schemas. The installed host is a second FastAPI application: it
+registers <strong>GET /health</strong>, <strong>GET /modules</strong>
+and <strong>GET /ready</strong> before mounting that domain application
+at <code>/</code>. Its <code>/health</code> therefore
+<strong>overrides</strong> the inner <code>app.main.health</code> at the
+installed origin. The effective composition has 245 unique URI paths.
+The filtered downloads for Suite, Core and Records compose those real
+outer routes over their inner-domain selection; the original inner and
+outer exports remain separate evidence files.</p>
+<table>
+<colgroup>
+<col style="width: 50%" />
+<col style="width: 50%" />
+</colgroup>
+<thead>
+<tr>
+<th>Outer operation</th>
+<th>Actual response and use</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>GET /health</code></td>
+<td>Runtime <code>status</code> (<code>ok</code> or
+<code>degraded</code>), service/version, product profile, module checks,
+database check and <code>local_only</code>. HTTP 200 when healthy,
+otherwise 503. This is not the inner app’s simple status/version
+handler.</td>
+</tr>
+<tr>
+<td><code>GET /modules</code></td>
+<td>The same runtime health payload and HTTP status as
+<code>/health</code>; not a second independent readiness proof.</td>
+</tr>
+<tr>
+<td><code>GET /ready</code></td>
+<td><code>status</code> (<code>ready</code> or <code>not-ready</code>)
+and <code>reason</code>; HTTP 200/503 after the applicable activation,
+schema and provider checks. Use this for domain readiness.</td>
+</tr>
+</tbody>
+</table>
+<p>For example, a ready result has shape
+<code>{"status":"ready","reason":"&lt;actual profile-specific readiness reason&gt;"}</code>;
+an inactive domain returns
+<code>{"status":"not-ready","reason":"domain-inactive"}</code> with 503.
+These are source-derived shapes, not new execution receipts. Read the
+actual reason rather than treating a listening process or
+<code>/health</code> alone as canonical readiness.</p>
+<p>The native origin remains <code>http://127.0.0.1:15480</code>.
+Station’s separately paired suite process can use another explicitly
+configured loopback port; its Station origin and the Station service’s
+suite origin must agree. The Station operating guide supplies that setup
+without disabling normal activation.</p>
+<h2 id="installed-desktop-http-operations">Installed desktop HTTP
+operations</h2>
+<h3 id="post-desktopv1meetingsmeetingsmeeting_idstages">POST
+/desktop/v1/meetings/meetings/{meeting_id}/stages</h3>
+<p>Record Meeting Stage</p>
+<p>Operation ID:
+<code>record_meeting_stage_desktop_v1_meetings_meetings__meeting_id__stages_post</code>.
+Tags: native-meetings.</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Location</th>
+<th>Required</th>
+<th>Type and constraints</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>meeting_id</code></td>
+<td>path</td>
+<td>yes</td>
+<td>string; format=uuid</td>
+</tr>
+<tr>
+<td><code>X-Townlight-Session</code></td>
+<td>header</td>
+<td>no at schema level</td>
+<td>string or null</td>
+</tr>
+</tbody>
+</table>
+<p>Request body: <code>application/json</code>; required. Model:
+<code>MeetingStageInput</code>.</p>
+<table>
+<thead>
+<tr>
+<th>Declared status</th>
+<th>Description</th>
+<th>Response model</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>200</td>
+<td>Successful Response</td>
+<td>application/json: Unspecified JSON shape</td>
+</tr>
+<tr>
+<td>422</td>
+<td>Validation Error</td>
+<td>application/json: HTTPValidationError</td>
+</tr>
+</tbody>
+</table>
+<h3 id="post-desktopv1meetingsmeetings">POST
+/desktop/v1/meetings/meetings</h3>
+<p>Create Meeting</p>
+<p>Operation ID:
+<code>create_meeting_desktop_v1_meetings_meetings_post</code>. Tags:
+native-meetings.</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Location</th>
+<th>Required</th>
+<th>Type and constraints</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>X-Townlight-Session</code></td>
+<td>header</td>
+<td>no at schema level</td>
+<td>string or null</td>
+</tr>
+</tbody>
+</table>
+<p>Request body: <code>application/json</code>; required. Model:
+<code>MeetingInput</code>.</p>
+<table>
+<thead>
+<tr>
+<th>Declared status</th>
+<th>Description</th>
+<th>Response model</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>201</td>
+<td>Successful Response</td>
+<td>application/json: Unspecified JSON shape</td>
+</tr>
+<tr>
+<td>422</td>
+<td>Validation Error</td>
+<td>application/json: HTTPValidationError</td>
+</tr>
+</tbody>
+</table>
+<h3 id="get-desktopv1meetingsmeetingsmeeting_id">GET
+/desktop/v1/meetings/meetings/{meeting_id}</h3>
+<p>Get Meeting</p>
+<p>Operation ID:
+<code>get_meeting_desktop_v1_meetings_meetings__meeting_id__get</code>.
+Tags: native-meetings.</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Location</th>
+<th>Required</th>
+<th>Type and constraints</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>meeting_id</code></td>
+<td>path</td>
+<td>yes</td>
+<td>string; format=uuid</td>
+</tr>
+<tr>
+<td><code>X-Townlight-Session</code></td>
+<td>header</td>
+<td>no at schema level</td>
+<td>string or null</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>Declared status</th>
+<th>Description</th>
+<th>Response model</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>200</td>
+<td>Successful Response</td>
+<td>application/json: Unspecified JSON shape</td>
+</tr>
+<tr>
+<td>422</td>
+<td>Validation Error</td>
+<td>application/json: HTTPValidationError</td>
+</tr>
+</tbody>
+</table>
+<h3 id="post-desktopv1meetingsagenda-items">POST
+/desktop/v1/meetings/agenda-items</h3>
+<p>Create Agenda Item</p>
+<p>Operation ID:
+<code>create_agenda_item_desktop_v1_meetings_agenda_items_post</code>.
+Tags: native-meetings.</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Location</th>
+<th>Required</th>
+<th>Type and constraints</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>X-Townlight-Session</code></td>
+<td>header</td>
+<td>no at schema level</td>
+<td>string or null</td>
+</tr>
+</tbody>
+</table>
+<p>Request body: <code>application/json</code>; required. Model:
+<code>AgendaInput</code>.</p>
+<table>
+<thead>
+<tr>
+<th>Declared status</th>
+<th>Description</th>
+<th>Response model</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>201</td>
+<td>Successful Response</td>
+<td>application/json: Unspecified JSON shape</td>
+</tr>
+<tr>
+<td>422</td>
+<td>Validation Error</td>
+<td>application/json: HTTPValidationError</td>
+</tr>
+</tbody>
+</table>
+<h3 id="get-desktopv1meetingsagenda-itemsitem_id">GET
+/desktop/v1/meetings/agenda-items/{item_id}</h3>
+<p>Get Agenda Item</p>
+<p>Operation ID:
+<code>get_agenda_item_desktop_v1_meetings_agenda_items__item_id__get</code>.
+Tags: native-meetings.</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Location</th>
+<th>Required</th>
+<th>Type and constraints</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>item_id</code></td>
+<td>path</td>
+<td>yes</td>
+<td>string; format=uuid</td>
+</tr>
+<tr>
+<td><code>X-Townlight-Session</code></td>
+<td>header</td>
+<td>no at schema level</td>
+<td>string or null</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>Declared status</th>
+<th>Description</th>
+<th>Response model</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>200</td>
+<td>Successful Response</td>
+<td>application/json: Unspecified JSON shape</td>
+</tr>
+<tr>
+<td>422</td>
+<td>Validation Error</td>
+<td>application/json: HTTPValidationError</td>
+</tr>
+</tbody>
+</table>
+<h3 id="post-desktopv1meetingsagenda-itemsitem_idreviews">POST
+/desktop/v1/meetings/agenda-items/{item_id}/reviews</h3>
+<p>Record Agenda Review</p>
+<p>Operation ID:
+<code>record_agenda_review_desktop_v1_meetings_agenda_items__item_id__reviews_post</code>.
+Tags: native-meetings.</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Location</th>
+<th>Required</th>
+<th>Type and constraints</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>item_id</code></td>
+<td>path</td>
+<td>yes</td>
+<td>string; format=uuid</td>
+</tr>
+<tr>
+<td><code>X-Townlight-Session</code></td>
+<td>header</td>
+<td>no at schema level</td>
+<td>string or null</td>
+</tr>
+</tbody>
+</table>
+<p>Request body: <code>application/json</code>; required. Model:
+<code>AgendaReviewInput</code>.</p>
+<table>
+<thead>
+<tr>
+<th>Declared status</th>
+<th>Description</th>
+<th>Response model</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>200</td>
+<td>Successful Response</td>
+<td>application/json: Unspecified JSON shape</td>
+</tr>
+<tr>
+<td>422</td>
+<td>Validation Error</td>
+<td>application/json: HTTPValidationError</td>
+</tr>
+</tbody>
+</table>
+<h3 id="post-desktopv1meetingsagenda-itemsitem_idmeeting">POST
+/desktop/v1/meetings/agenda-items/{item_id}/meeting</h3>
+<p>Assign Agenda</p>
+<p>Operation ID:
+<code>assign_agenda_desktop_v1_meetings_agenda_items__item_id__meeting_post</code>.
+Tags: native-meetings.</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Location</th>
+<th>Required</th>
+<th>Type and constraints</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>item_id</code></td>
+<td>path</td>
+<td>yes</td>
+<td>string; format=uuid</td>
+</tr>
+<tr>
+<td><code>X-Townlight-Session</code></td>
+<td>header</td>
+<td>no at schema level</td>
+<td>string or null</td>
+</tr>
+</tbody>
+</table>
+<p>Request body: <code>application/json</code>; required. Model:
+<code>AgendaAssignment</code>.</p>
+<table>
+<thead>
+<tr>
+<th>Declared status</th>
+<th>Description</th>
+<th>Response model</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>200</td>
+<td>Successful Response</td>
+<td>application/json: Unspecified JSON shape</td>
+</tr>
+<tr>
+<td>422</td>
+<td>Validation Error</td>
+<td>application/json: HTTPValidationError</td>
+</tr>
+</tbody>
+</table>
+<h3 id="get-desktopv1meetingsnoticesnotice_idtemplate">GET
+/desktop/v1/meetings/notices/{notice_id}/template</h3>
+<p>Notice Template</p>
+<p>Operation ID:
+<code>notice_template_desktop_v1_meetings_notices__notice_id__template_get</code>.
+Tags: native-meetings.</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Location</th>
+<th>Required</th>
+<th>Type and constraints</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>notice_id</code></td>
+<td>path</td>
+<td>yes</td>
+<td>string; format=uuid</td>
+</tr>
+<tr>
+<td><code>X-Townlight-Session</code></td>
+<td>header</td>
+<td>no at schema level</td>
+<td>string or null</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>Declared status</th>
+<th>Description</th>
+<th>Response model</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>200</td>
+<td>Successful Response</td>
+<td>application/json: Unspecified JSON shape</td>
+</tr>
+<tr>
+<td>422</td>
+<td>Validation Error</td>
+<td>application/json: HTTPValidationError</td>
+</tr>
+</tbody>
+</table>
+<h3 id="post-desktopv1meetingsnoticesnotice_iddocument">POST
+/desktop/v1/meetings/notices/{notice_id}/document</h3>
+<p>Notice Document</p>
+<p>Operation ID:
+<code>notice_document_desktop_v1_meetings_notices__notice_id__document_post</code>.
+Tags: native-meetings.</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Location</th>
+<th>Required</th>
+<th>Type and constraints</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>notice_id</code></td>
+<td>path</td>
+<td>yes</td>
+<td>string; format=uuid</td>
+</tr>
+<tr>
+<td><code>X-Townlight-Session</code></td>
+<td>header</td>
+<td>no at schema level</td>
+<td>string or null</td>
+</tr>
+</tbody>
+</table>
+<p>Request body: <code>application/json</code>; required. Model:
+<code>NoticeDocumentInput</code>.</p>
+<table>
+<thead>
+<tr>
+<th>Declared status</th>
+<th>Description</th>
+<th>Response model</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>200</td>
+<td>Successful Response</td>
+<td>application/json: Unspecified JSON shape</td>
+</tr>
+<tr>
+<td>422</td>
+<td>Validation Error</td>
+<td>application/json: HTTPValidationError</td>
+</tr>
+</tbody>
+</table>
+<h3 id="post-desktopv1meetingsmeetingsmeeting_idnotice-checks">POST
+/desktop/v1/meetings/meetings/{meeting_id}/notice-checks</h3>
+<p>Check Notice</p>
+<p>Operation ID:
+<code>check_notice_desktop_v1_meetings_meetings__meeting_id__notice_checks_post</code>.
+Tags: native-meetings.</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Location</th>
+<th>Required</th>
+<th>Type and constraints</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>meeting_id</code></td>
+<td>path</td>
+<td>yes</td>
+<td>string; format=uuid</td>
+</tr>
+<tr>
+<td><code>X-Townlight-Session</code></td>
+<td>header</td>
+<td>no at schema level</td>
+<td>string or null</td>
+</tr>
+</tbody>
+</table>
+<p>Request body: <code>application/json</code>; required. Model:
+<code>NoticeInput</code>.</p>
+<table>
+<thead>
+<tr>
+<th>Declared status</th>
+<th>Description</th>
+<th>Response model</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>201</td>
+<td>Successful Response</td>
+<td>application/json: Unspecified JSON shape</td>
+</tr>
+<tr>
+<td>422</td>
+<td>Validation Error</td>
+<td>application/json: HTTPValidationError</td>
+</tr>
+</tbody>
+</table>
+<h3 id="post-desktopv1meetingsnoticesnotice_idproof">POST
+/desktop/v1/meetings/notices/{notice_id}/proof</h3>
+<p>Record Notice Proof</p>
+<p>Operation ID:
+<code>record_notice_proof_desktop_v1_meetings_notices__notice_id__proof_post</code>.
+Tags: native-meetings.</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Location</th>
+<th>Required</th>
+<th>Type and constraints</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>notice_id</code></td>
+<td>path</td>
+<td>yes</td>
+<td>string; format=uuid</td>
+</tr>
+<tr>
+<td><code>X-Townlight-Session</code></td>
+<td>header</td>
+<td>no at schema level</td>
+<td>string or null</td>
+</tr>
+</tbody>
+</table>
+<p>Request body: <code>application/json</code>; required. Model:
+<code>NoticeProofInput</code>.</p>
+<table>
+<thead>
+<tr>
+<th>Declared status</th>
+<th>Description</th>
+<th>Response model</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>200</td>
+<td>Successful Response</td>
+<td>application/json: Unspecified JSON shape</td>
+</tr>
+<tr>
+<td>422</td>
+<td>Validation Error</td>
+<td>application/json: HTTPValidationError</td>
+</tr>
+</tbody>
+</table>
+<h3 id="post-desktopv1meetingsmeetingsmeeting_idtranscripts">POST
+/desktop/v1/meetings/meetings/{meeting_id}/transcripts</h3>
+<p>Capture Transcript</p>
+<p>Operation ID:
+<code>capture_transcript_desktop_v1_meetings_meetings__meeting_id__transcripts_post</code>.
+Tags: native-meetings.</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Location</th>
+<th>Required</th>
+<th>Type and constraints</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>meeting_id</code></td>
+<td>path</td>
+<td>yes</td>
+<td>string; format=uuid</td>
+</tr>
+<tr>
+<td><code>X-Townlight-Session</code></td>
+<td>header</td>
+<td>no at schema level</td>
+<td>string or null</td>
+</tr>
+</tbody>
+</table>
+<p>Request body: <code>application/json</code>; required. Model:
+<code>TranscriptInput</code>.</p>
+<table>
+<thead>
+<tr>
+<th>Declared status</th>
+<th>Description</th>
+<th>Response model</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>201</td>
+<td>Successful Response</td>
+<td>application/json: Unspecified JSON shape</td>
+</tr>
+<tr>
+<td>422</td>
+<td>Validation Error</td>
+<td>application/json: HTTPValidationError</td>
+</tr>
+</tbody>
+</table>
+<h3 id="post-desktopv1meetingsmeetingsmeeting_idaction-items">POST
+/desktop/v1/meetings/meetings/{meeting_id}/action-items</h3>
+<p>Capture Action Item</p>
+<p>Operation ID:
+<code>capture_action_item_desktop_v1_meetings_meetings__meeting_id__action_items_post</code>.
+Tags: native-meetings.</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Location</th>
+<th>Required</th>
+<th>Type and constraints</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>meeting_id</code></td>
+<td>path</td>
+<td>yes</td>
+<td>string; format=uuid</td>
+</tr>
+<tr>
+<td><code>X-Townlight-Session</code></td>
+<td>header</td>
+<td>no at schema level</td>
+<td>string or null</td>
+</tr>
+</tbody>
+</table>
+<p>Request body: <code>application/json</code>; required. Model:
+<code>ActionItemInput</code>.</p>
+<table>
+<thead>
+<tr>
+<th>Declared status</th>
+<th>Description</th>
+<th>Response model</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>201</td>
+<td>Successful Response</td>
+<td>application/json: Unspecified JSON shape</td>
+</tr>
+<tr>
+<td>422</td>
+<td>Validation Error</td>
+<td>application/json: HTTPValidationError</td>
+</tr>
+</tbody>
+</table>
+<h3 id="post-desktopv1meetingsmeetingsmeeting_idarchive">POST
+/desktop/v1/meetings/meetings/{meeting_id}/archive</h3>
+<p>Archive Meeting</p>
+<p>Operation ID:
+<code>archive_meeting_desktop_v1_meetings_meetings__meeting_id__archive_post</code>.
+Tags: native-meetings.</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Location</th>
+<th>Required</th>
+<th>Type and constraints</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>meeting_id</code></td>
+<td>path</td>
+<td>yes</td>
+<td>string; format=uuid</td>
+</tr>
+<tr>
+<td><code>X-Townlight-Session</code></td>
+<td>header</td>
+<td>no at schema level</td>
+<td>string or null</td>
+</tr>
+</tbody>
+</table>
+<p>Request body: <code>application/json</code>; required. Model:
+<code>ArchiveInput</code>.</p>
+<table>
+<thead>
+<tr>
+<th>Declared status</th>
+<th>Description</th>
+<th>Response model</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>201</td>
+<td>Successful Response</td>
+<td>application/json: Unspecified JSON shape</td>
+</tr>
+<tr>
+<td>422</td>
+<td>Validation Error</td>
+<td>application/json: HTTPValidationError</td>
+</tr>
+</tbody>
+</table>
+<h3 id="post-desktopv1meetingsmeetingsmeeting_idpacket-snapshots">POST
+/desktop/v1/meetings/meetings/{meeting_id}/packet-snapshots</h3>
+<p>Capture Packet</p>
+<p>Operation ID:
+<code>capture_packet_desktop_v1_meetings_meetings__meeting_id__packet_snapshots_post</code>.
+Tags: native-meetings.</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Location</th>
+<th>Required</th>
+<th>Type and constraints</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>meeting_id</code></td>
+<td>path</td>
+<td>yes</td>
+<td>string; format=uuid</td>
+</tr>
+<tr>
+<td><code>X-Townlight-Session</code></td>
+<td>header</td>
+<td>no at schema level</td>
+<td>string or null</td>
+</tr>
+</tbody>
+</table>
+<p>Request body: <code>application/json</code>; required. Model:
+<code>PacketInput</code>.</p>
+<table>
+<thead>
+<tr>
+<th>Declared status</th>
+<th>Description</th>
+<th>Response model</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>201</td>
+<td>Successful Response</td>
+<td>application/json: Unspecified JSON shape</td>
+</tr>
+<tr>
+<td>422</td>
+<td>Validation Error</td>
+<td>application/json: HTTPValidationError</td>
+</tr>
+</tbody>
+</table>
+<h3 id="post-desktopv1meetingspacketspacket_iddeliver">POST
+/desktop/v1/meetings/packets/{packet_id}/deliver</h3>
+<p>Export Packet</p>
+<p>Operation ID:
+<code>export_packet_desktop_v1_meetings_packets__packet_id__deliver_post</code>.
+Tags: native-meetings.</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Location</th>
+<th>Required</th>
+<th>Type and constraints</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>packet_id</code></td>
+<td>path</td>
+<td>yes</td>
+<td>string; format=uuid</td>
+</tr>
+<tr>
+<td><code>X-Townlight-Session</code></td>
+<td>header</td>
+<td>no at schema level</td>
+<td>string or null</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>Declared status</th>
+<th>Description</th>
+<th>Response model</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>200</td>
+<td>Successful Response</td>
+<td>application/json: Unspecified JSON shape</td>
+</tr>
+<tr>
+<td>422</td>
+<td>Validation Error</td>
+<td>application/json: HTTPValidationError</td>
+</tr>
+</tbody>
+</table>
+<h3 id="post-desktopv1meetingsminutesdraft_iddecisions">POST
+/desktop/v1/meetings/minutes/{draft_id}/decisions</h3>
+<p>Decide Minutes</p>
+<p>Operation ID:
+<code>decide_minutes_desktop_v1_meetings_minutes__draft_id__decisions_post</code>.
+Tags: native-meetings.</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Location</th>
+<th>Required</th>
+<th>Type and constraints</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>draft_id</code></td>
+<td>path</td>
+<td>yes</td>
+<td>string; format=uuid</td>
+</tr>
+<tr>
+<td><code>X-Townlight-Session</code></td>
+<td>header</td>
+<td>no at schema level</td>
+<td>string or null</td>
+</tr>
+</tbody>
+</table>
+<p>Request body: <code>application/json</code>; required. Model:
+<code>MinutesDecision</code>.</p>
+<table>
+<thead>
+<tr>
+<th>Declared status</th>
+<th>Description</th>
+<th>Response model</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>200</td>
+<td>Successful Response</td>
+<td>application/json: Unspecified JSON shape</td>
+</tr>
+<tr>
+<td>422</td>
+<td>Validation Error</td>
+<td>application/json: HTTPValidationError</td>
+</tr>
+</tbody>
+</table>
+<h3 id="post-desktopv1meetingsmeetingsmeeting_idmotions">POST
+/desktop/v1/meetings/meetings/{meeting_id}/motions</h3>
+<p>Capture Motion</p>
+<p>Operation ID:
+<code>capture_motion_desktop_v1_meetings_meetings__meeting_id__motions_post</code>.
+Tags: native-meetings.</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Location</th>
+<th>Required</th>
+<th>Type and constraints</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>meeting_id</code></td>
+<td>path</td>
+<td>yes</td>
+<td>string; format=uuid</td>
+</tr>
+<tr>
+<td><code>X-Townlight-Session</code></td>
+<td>header</td>
+<td>no at schema level</td>
+<td>string or null</td>
+</tr>
+</tbody>
+</table>
+<p>Request body: <code>application/json</code>; required. Model:
+<code>MotionInput</code>.</p>
+<table>
+<thead>
+<tr>
+<th>Declared status</th>
+<th>Description</th>
+<th>Response model</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>201</td>
+<td>Successful Response</td>
+<td>application/json: Unspecified JSON shape</td>
+</tr>
+<tr>
+<td>422</td>
+<td>Validation Error</td>
+<td>application/json: HTTPValidationError</td>
+</tr>
+</tbody>
+</table>
+<h3 id="post-desktopv1meetingsmotionsmotion_idcorrections">POST
+/desktop/v1/meetings/motions/{motion_id}/corrections</h3>
+<p>Correct Motion</p>
+<p>Operation ID:
+<code>correct_motion_desktop_v1_meetings_motions__motion_id__corrections_post</code>.
+Tags: native-meetings.</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Location</th>
+<th>Required</th>
+<th>Type and constraints</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>motion_id</code></td>
+<td>path</td>
+<td>yes</td>
+<td>string; format=uuid</td>
+</tr>
+<tr>
+<td><code>X-Townlight-Session</code></td>
+<td>header</td>
+<td>no at schema level</td>
+<td>string or null</td>
+</tr>
+</tbody>
+</table>
+<p>Request body: <code>application/json</code>; required. Model:
+<code>MotionCorrection</code>.</p>
+<table>
+<thead>
+<tr>
+<th>Declared status</th>
+<th>Description</th>
+<th>Response model</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>201</td>
+<td>Successful Response</td>
+<td>application/json: Unspecified JSON shape</td>
+</tr>
+<tr>
+<td>422</td>
+<td>Validation Error</td>
+<td>application/json: HTTPValidationError</td>
+</tr>
+</tbody>
+</table>
+<h3 id="post-desktopv1meetingsmotionsmotion_idvotes">POST
+/desktop/v1/meetings/motions/{motion_id}/votes</h3>
+<p>Capture Vote</p>
+<p>Operation ID:
+<code>capture_vote_desktop_v1_meetings_motions__motion_id__votes_post</code>.
+Tags: native-meetings.</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Location</th>
+<th>Required</th>
+<th>Type and constraints</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>motion_id</code></td>
+<td>path</td>
+<td>yes</td>
+<td>string; format=uuid</td>
+</tr>
+<tr>
+<td><code>X-Townlight-Session</code></td>
+<td>header</td>
+<td>no at schema level</td>
+<td>string or null</td>
+</tr>
+</tbody>
+</table>
+<p>Request body: <code>application/json</code>; required. Model:
+<code>VoteInput</code>.</p>
+<table>
+<thead>
+<tr>
+<th>Declared status</th>
+<th>Description</th>
+<th>Response model</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>201</td>
+<td>Successful Response</td>
+<td>application/json: Unspecified JSON shape</td>
+</tr>
+<tr>
+<td>422</td>
+<td>Validation Error</td>
+<td>application/json: HTTPValidationError</td>
+</tr>
+</tbody>
+</table>
+<h3 id="post-desktopv1meetingsvotesvote_idcorrections">POST
+/desktop/v1/meetings/votes/{vote_id}/corrections</h3>
+<p>Correct Vote</p>
+<p>Operation ID:
+<code>correct_vote_desktop_v1_meetings_votes__vote_id__corrections_post</code>.
+Tags: native-meetings.</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Location</th>
+<th>Required</th>
+<th>Type and constraints</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>vote_id</code></td>
+<td>path</td>
+<td>yes</td>
+<td>string; format=uuid</td>
+</tr>
+<tr>
+<td><code>X-Townlight-Session</code></td>
+<td>header</td>
+<td>no at schema level</td>
+<td>string or null</td>
+</tr>
+</tbody>
+</table>
+<p>Request body: <code>application/json</code>; required. Model:
+<code>VoteCorrection</code>.</p>
+<table>
+<thead>
+<tr>
+<th>Declared status</th>
+<th>Description</th>
+<th>Response model</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>201</td>
+<td>Successful Response</td>
+<td>application/json: Unspecified JSON shape</td>
+</tr>
+<tr>
+<td>422</td>
+<td>Validation Error</td>
+<td>application/json: HTTPValidationError</td>
+</tr>
+</tbody>
+</table>
+<h3 id="post-desktopv1meetingsmeetingsmeeting_idminutesdrafts">POST
+/desktop/v1/meetings/meetings/{meeting_id}/minutes/drafts</h3>
+<p>Create Minutes</p>
+<p>Operation ID:
+<code>create_minutes_desktop_v1_meetings_meetings__meeting_id__minutes_drafts_post</code>.
+Tags: native-meetings.</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Location</th>
+<th>Required</th>
+<th>Type and constraints</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>meeting_id</code></td>
+<td>path</td>
+<td>yes</td>
+<td>string; format=uuid</td>
+</tr>
+<tr>
+<td><code>X-Townlight-Session</code></td>
+<td>header</td>
+<td>no at schema level</td>
+<td>string or null</td>
+</tr>
+</tbody>
+</table>
+<p>Request body: <code>application/json</code>; required. Model:
+<code>DraftInput</code>.</p>
+<table>
+<thead>
+<tr>
+<th>Declared status</th>
+<th>Description</th>
+<th>Response model</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>201</td>
+<td>Successful Response</td>
+<td>application/json: Unspecified JSON shape</td>
+</tr>
+<tr>
+<td>422</td>
+<td>Validation Error</td>
+<td>application/json: HTTPValidationError</td>
+</tr>
+</tbody>
+</table>
+<h3 id="get-desktopv1meetingsmeetingsmeeting_idproceedings">GET
+/desktop/v1/meetings/meetings/{meeting_id}/proceedings</h3>
+<p>Proceedings</p>
+<p>Operation ID:
+<code>proceedings_desktop_v1_meetings_meetings__meeting_id__proceedings_get</code>.
+Tags: native-meetings.</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Location</th>
+<th>Required</th>
+<th>Type and constraints</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>meeting_id</code></td>
+<td>path</td>
+<td>yes</td>
+<td>string; format=uuid</td>
+</tr>
+<tr>
+<td><code>X-Townlight-Session</code></td>
+<td>header</td>
+<td>no at schema level</td>
+<td>string or null</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>Declared status</th>
+<th>Description</th>
+<th>Response model</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>200</td>
+<td>Successful Response</td>
+<td>application/json: Unspecified JSON shape</td>
+</tr>
+<tr>
+<td>422</td>
+<td>Validation Error</td>
+<td>application/json: HTTPValidationError</td>
+</tr>
+</tbody>
+</table>
+<h3 id="get-desktopv1meetingsstationcatalog">GET
+/desktop/v1/meetings/station/catalog</h3>
+<p>Station Catalog</p>
+<p>Authorized name-based operator selection from canonical Meetings
+data.</p>
+<p>Operation ID:
+<code>station_catalog_desktop_v1_meetings_station_catalog_get</code>.
+Tags: native-meetings.</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Location</th>
+<th>Required</th>
+<th>Type and constraints</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>X-Townlight-Session</code></td>
+<td>header</td>
+<td>no at schema level</td>
+<td>string or null</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>Declared status</th>
+<th>Description</th>
+<th>Response model</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>200</td>
+<td>Successful Response</td>
+<td>application/json: Unspecified JSON shape</td>
+</tr>
+<tr>
+<td>422</td>
+<td>Validation Error</td>
+<td>application/json: HTTPValidationError</td>
+</tr>
+</tbody>
+</table>
+<h3 id="get-publicmeetings">GET /public/meetings</h3>
+<p>Public Archive Index</p>
+<p>Operation ID: <code>public_archive_index_public_meetings_get</code>.
+Tags: public-meetings.</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Location</th>
+<th>Required</th>
+<th>Type and constraints</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>q</code></td>
+<td>query</td>
+<td>no at schema level</td>
+<td>string</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>Declared status</th>
+<th>Description</th>
+<th>Response model</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>200</td>
+<td>Successful Response</td>
+<td>text/html: string</td>
+</tr>
+<tr>
+<td>422</td>
+<td>Validation Error</td>
+<td>application/json: HTTPValidationError</td>
+</tr>
+</tbody>
+</table>
+<h3 id="get-publicmeetingsrecord_id">GET
+/public/meetings/{record_id}</h3>
+<p>Public Archive Detail</p>
+<p>Operation ID:
+<code>public_archive_detail_public_meetings__record_id__get</code>.
+Tags: public-meetings.</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Location</th>
+<th>Required</th>
+<th>Type and constraints</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>record_id</code></td>
+<td>path</td>
+<td>yes</td>
+<td>string; format=uuid</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>Declared status</th>
+<th>Description</th>
+<th>Response model</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>200</td>
+<td>Successful Response</td>
+<td>text/html: string</td>
+</tr>
+<tr>
+<td>422</td>
+<td>Validation Error</td>
+<td>application/json: HTTPValidationError</td>
+</tr>
+</tbody>
+</table>
+<h3 id="get-publicmeetingsrecord_idkind.txt">GET
+/public/meetings/{record_id}/{kind}.txt</h3>
+<p>Public Archive Download</p>
+<p>Operation ID:
+<code>public_archive_download_public_meetings__record_id___kind__txt_get</code>.
+Tags: public-meetings.</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Location</th>
+<th>Required</th>
+<th>Type and constraints</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>record_id</code></td>
+<td>path</td>
+<td>yes</td>
+<td>string; format=uuid</td>
+</tr>
+<tr>
+<td><code>kind</code></td>
+<td>path</td>
+<td>yes</td>
+<td>string; values agenda, packet, minutes</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>Declared status</th>
+<th>Description</th>
+<th>Response model</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>200</td>
+<td>Successful Response</td>
+<td>application/json: Unspecified JSON shape</td>
+</tr>
+<tr>
+<td>422</td>
+<td>Validation Error</td>
+<td>application/json: HTTPValidationError</td>
+</tr>
+</tbody>
+</table>
+<h3 id="get-desktopv1meetingscode-connections">GET
+/desktop/v1/meetings/code-connections</h3>
+<p>List Code Connections</p>
+<p>Operation ID:
+<code>list_code_connections_desktop_v1_meetings_code_connections_get</code>.
+Tags: .</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Location</th>
+<th>Required</th>
+<th>Type and constraints</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>X-Townlight-Session</code></td>
+<td>header</td>
+<td>no at schema level</td>
+<td>string or null</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>Declared status</th>
+<th>Description</th>
+<th>Response model</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>200</td>
+<td>Successful Response</td>
+<td>application/json: Unspecified JSON shape</td>
+</tr>
+<tr>
+<td>422</td>
+<td>Validation Error</td>
+<td>application/json: HTTPValidationError</td>
+</tr>
+</tbody>
+</table>
+<h3 id="get-desktopv1meetingscode-connectionsconnection_id">GET
+/desktop/v1/meetings/code-connections/{connection_id}</h3>
+<p>Get Code Connection</p>
+<p>Operation ID:
+<code>get_code_connection_desktop_v1_meetings_code_connections__connection_id__get</code>.
+Tags: .</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Location</th>
+<th>Required</th>
+<th>Type and constraints</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>connection_id</code></td>
+<td>path</td>
+<td>yes</td>
+<td>string; pattern=<a href="#fn1" class="footnote-ref" id="fnref1"
+role="doc-noteref"><sup>1</sup></a>{1,64}$</td>
+</tr>
+<tr>
+<td><code>X-Townlight-Session</code></td>
+<td>header</td>
+<td>no at schema level</td>
+<td>string or null</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>Declared status</th>
+<th>Description</th>
+<th>Response model</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>200</td>
+<td>Successful Response</td>
+<td>application/json: Unspecified JSON shape</td>
+</tr>
+<tr>
+<td>422</td>
+<td>Validation Error</td>
+<td>application/json: HTTPValidationError</td>
+</tr>
+</tbody>
+</table>
+<h3
+id="post-desktopv1meetingscode-connectionsconnection_iddecisions">POST
+/desktop/v1/meetings/code-connections/{connection_id}/decisions</h3>
+<p>Record Decision</p>
+<p>Operation ID:
+<code>record_decision_desktop_v1_meetings_code_connections__connection_id__decisions_post</code>.
+Tags: .</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Location</th>
+<th>Required</th>
+<th>Type and constraints</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>connection_id</code></td>
+<td>path</td>
+<td>yes</td>
+<td>string; pattern=<a href="#fn2" class="footnote-ref" id="fnref2"
+role="doc-noteref"><sup>2</sup></a>{1,64}$</td>
+</tr>
+<tr>
+<td><code>X-Townlight-Session</code></td>
+<td>header</td>
+<td>no at schema level</td>
+<td>string or null</td>
+</tr>
+</tbody>
+</table>
+<p>Request body: <code>application/json</code>; required. Model:
+<code>Decision</code>.</p>
+<table>
+<thead>
+<tr>
+<th>Declared status</th>
+<th>Description</th>
+<th>Response model</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>200</td>
+<td>Successful Response</td>
+<td>application/json: Unspecified JSON shape</td>
+</tr>
+<tr>
+<td>422</td>
+<td>Validation Error</td>
+<td>application/json: HTTPValidationError</td>
+</tr>
+</tbody>
+</table>
+<h2 id="request-and-response-data-dictionary">Request and response data
+dictionary</h2>
+<p>Fields below retain the actual schema requirements and constraints.
+<code>null</code> and omitted are distinct where a model distinguishes
+them. Additional-property rules apply per schema. Full discriminators,
+nested definitions and defaults are retained in the JSON.</p>
+<h3 id="actioniteminput">ActionItemInput</h3>
+<p>Additional properties: false.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Required</th>
+<th>Type and constraints</th>
+<th>Default or description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>description</code></td>
+<td>yes</td>
+<td>string; minLength=1</td>
+<td></td>
+</tr>
+<tr>
+<td><code>assigned_to</code></td>
+<td>no</td>
+<td>string or null</td>
+<td></td>
+</tr>
+<tr>
+<td><code>source_motion_id</code></td>
+<td>no</td>
+<td>string; format=uuid or null</td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<h3 id="agendaassignment">AgendaAssignment</h3>
+<p>Additional properties: false.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Required</th>
+<th>Type and constraints</th>
+<th>Default or description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>meeting_id</code></td>
+<td>yes</td>
+<td>string; format=uuid</td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<h3 id="agendainput">AgendaInput</h3>
+<p>Additional properties: false.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Required</th>
+<th>Type and constraints</th>
+<th>Default or description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>title</code></td>
+<td>yes</td>
+<td>string; minLength=1; maxLength=500</td>
+<td></td>
+</tr>
+<tr>
+<td><code>department_name</code></td>
+<td>yes</td>
+<td>string; minLength=1; maxLength=255</td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<h3 id="agendareviewinput">AgendaReviewInput</h3>
+<p>Additional properties: false.</p>
+<table>
+<colgroup>
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+</colgroup>
+<thead>
+<tr>
+<th>Field</th>
+<th>Required</th>
+<th>Type and constraints</th>
+<th>Default or description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>to_status</code></td>
+<td>yes</td>
+<td>string; values DRAFTED, SUBMITTED, DEPT_APPROVED, LEGAL_REVIEWED,
+CLERK_ACCEPTED, ON_AGENDA, IN_PACKET, POSTED, HEARD, DISPOSED,
+ARCHIVED</td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<h3 id="archiveinput">ArchiveInput</h3>
+<p>Additional properties: false.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Required</th>
+<th>Type and constraints</th>
+<th>Default or description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>visibility</code></td>
+<td>yes</td>
+<td>string; values public, closed_session</td>
+<td></td>
+</tr>
+<tr>
+<td><code>packet_id</code></td>
+<td>no</td>
+<td>string; format=uuid or null</td>
+<td></td>
+</tr>
+<tr>
+<td><code>minutes_id</code></td>
+<td>no</td>
+<td>string; format=uuid or null</td>
+<td></td>
+</tr>
+<tr>
+<td><code>plain_language_summary</code></td>
+<td>no</td>
+<td>string</td>
+<td>default ““.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="decision">Decision</h3>
+<p>Additional properties: false.</p>
+<table>
+<colgroup>
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+</colgroup>
+<thead>
+<tr>
+<th>Field</th>
+<th>Required</th>
+<th>Type and constraints</th>
+<th>Default or description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>id</code></td>
+<td>yes</td>
+<td>string; pattern=<a href="#fn3" class="footnote-ref" id="fnref3"
+role="doc-noteref"><sup>3</sup></a>{1,64}$</td>
+<td></td>
+</tr>
+<tr>
+<td><code>outcome</code></td>
+<td>yes</td>
+<td>string; values adopted, not_adopted, deferred, withdrawn</td>
+<td></td>
+</tr>
+<tr>
+<td><code>decided_at</code></td>
+<td>no</td>
+<td>string; format=date-time or null</td>
+<td></td>
+</tr>
+<tr>
+<td><code>decision_text</code></td>
+<td>yes</td>
+<td>string; minLength=1; maxLength=1000000</td>
+<td></td>
+</tr>
+<tr>
+<td><code>supporting_references</code></td>
+<td>no</td>
+<td>array of string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>supersedes_decision_id</code></td>
+<td>no</td>
+<td>string; pattern=<a href="#fn4" class="footnote-ref" id="fnref4"
+role="doc-noteref"><sup>4</sup></a>{1,64}$ or null</td>
+<td></td>
+</tr>
+<tr>
+<td><code>reconciliation_note</code></td>
+<td>no</td>
+<td>string or null</td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<h3 id="draftinput">DraftInput</h3>
+<p>Additional properties: false.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Required</th>
+<th>Type and constraints</th>
+<th>Default or description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>source_materials</code></td>
+<td>no</td>
+<td>array of SourceInput</td>
+<td></td>
+</tr>
+<tr>
+<td><code>sentences</code></td>
+<td>yes</td>
+<td>array of SentenceInput; minItems=1</td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<h3 id="httpvalidationerror">HTTPValidationError</h3>
+<p>Additional properties: not explicitly declared.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Required</th>
+<th>Type and constraints</th>
+<th>Default or description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>detail</code></td>
+<td>no</td>
+<td>array of ValidationError</td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<h3 id="managedsource">ManagedSource</h3>
+<p>Additional properties: false.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Required</th>
+<th>Type and constraints</th>
+<th>Default or description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>original_path</code></td>
+<td>yes</td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>stored_path</code></td>
+<td>yes</td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>file_name</code></td>
+<td>yes</td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>sha256</code></td>
+<td>yes</td>
+<td>string; pattern=<a href="#fn5" class="footnote-ref" id="fnref5"
+role="doc-noteref"><sup>5</sup></a>{64}$</td>
+<td></td>
+</tr>
+<tr>
+<td><code>size_bytes</code></td>
+<td>yes</td>
+<td>integer; minimum=0.0</td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<h3 id="meetinginput">MeetingInput</h3>
+<p>Additional properties: false.</p>
+<table>
+<colgroup>
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+</colgroup>
+<thead>
+<tr>
+<th>Field</th>
+<th>Required</th>
+<th>Type and constraints</th>
+<th>Default or description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>title</code></td>
+<td>yes</td>
+<td>string; minLength=1; maxLength=255</td>
+<td></td>
+</tr>
+<tr>
+<td><code>scheduled_start</code></td>
+<td>yes</td>
+<td>string; format=date-time</td>
+<td></td>
+</tr>
+<tr>
+<td><code>location</code></td>
+<td>yes</td>
+<td>string; minLength=1; maxLength=255</td>
+<td></td>
+</tr>
+<tr>
+<td><code>meeting_type</code></td>
+<td>no</td>
+<td>string; values regular, special, emergency, closed_session,
+executive</td>
+<td>default “regular”.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="meetingstageinput">MeetingStageInput</h3>
+<p>Additional properties: false.</p>
+<table>
+<colgroup>
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+</colgroup>
+<thead>
+<tr>
+<th>Field</th>
+<th>Required</th>
+<th>Type and constraints</th>
+<th>Default or description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>to_status</code></td>
+<td>yes</td>
+<td>string; values SCHEDULED, NOTICED, PACKET_POSTED, IN_PROGRESS,
+RECESSED, ADJOURNED, TRANSCRIPT_READY, MINUTES_DRAFTED, MINUTES_POSTED,
+MINUTES_ADOPTED, MINUTES_SIGNED, ARCHIVED, CANCELLED</td>
+<td></td>
+</tr>
+<tr>
+<td><code>statutory_basis</code></td>
+<td>no</td>
+<td>string or null</td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<h3 id="minutesdecision">MinutesDecision</h3>
+<p>Additional properties: false.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Required</th>
+<th>Type and constraints</th>
+<th>Default or description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>action</code></td>
+<td>yes</td>
+<td>string; values post, adopt, sign</td>
+<td></td>
+</tr>
+<tr>
+<td><code>note</code></td>
+<td>no</td>
+<td>string</td>
+<td>default ““.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="motioncorrection">MotionCorrection</h3>
+<p>Additional properties: false.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Required</th>
+<th>Type and constraints</th>
+<th>Default or description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>text</code></td>
+<td>yes</td>
+<td>string; minLength=1</td>
+<td></td>
+</tr>
+<tr>
+<td><code>reason</code></td>
+<td>yes</td>
+<td>string; minLength=1</td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<h3 id="motioninput">MotionInput</h3>
+<p>Additional properties: false.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Required</th>
+<th>Type and constraints</th>
+<th>Default or description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>text</code></td>
+<td>yes</td>
+<td>string; minLength=1</td>
+<td></td>
+</tr>
+<tr>
+<td><code>seconded_by</code></td>
+<td>no</td>
+<td>string; minLength=1 or null</td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<h3 id="noticedocumentinput">NoticeDocumentInput</h3>
+<p>Additional properties: false.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Required</th>
+<th>Type and constraints</th>
+<th>Default or description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>text</code></td>
+<td>yes</td>
+<td>string; minLength=1</td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<h3 id="noticeinput">NoticeInput</h3>
+<p>Additional properties: false.</p>
+<table>
+<colgroup>
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+</colgroup>
+<thead>
+<tr>
+<th>Field</th>
+<th>Required</th>
+<th>Type and constraints</th>
+<th>Default or description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>notice_type</code></td>
+<td>yes</td>
+<td>string; values regular, special, emergency, closed_session,
+executive</td>
+<td></td>
+</tr>
+<tr>
+<td><code>posted_at</code></td>
+<td>yes</td>
+<td>string; format=date-time</td>
+<td></td>
+</tr>
+<tr>
+<td><code>minimum_notice_hours</code></td>
+<td>yes</td>
+<td>integer; minimum=0.0</td>
+<td></td>
+</tr>
+<tr>
+<td><code>statutory_basis</code></td>
+<td>no</td>
+<td>string or null</td>
+<td></td>
+</tr>
+<tr>
+<td><code>approved_by</code></td>
+<td>no</td>
+<td>string or null</td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<h3 id="noticeproofinput">NoticeProofInput</h3>
+<p>Additional properties: false.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Required</th>
+<th>Type and constraints</th>
+<th>Default or description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>location</code></td>
+<td>yes</td>
+<td>string; minLength=1</td>
+<td></td>
+</tr>
+<tr>
+<td><code>note</code></td>
+<td>no</td>
+<td>string</td>
+<td>default ““.</td>
+</tr>
+<tr>
+<td><code>document_delivery_id</code></td>
+<td>no</td>
+<td>string or null</td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<h3 id="packetinput">PacketInput</h3>
+<p>Additional properties: false.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Required</th>
+<th>Type and constraints</th>
+<th>Default or description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>agenda_item_ids</code></td>
+<td>yes</td>
+<td>array of string; format=uuid</td>
+<td></td>
+</tr>
+<tr>
+<td><code>source_files</code></td>
+<td>no</td>
+<td>array of ManagedSource</td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<h3 id="sentenceinput">SentenceInput</h3>
+<p>Additional properties: false.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Required</th>
+<th>Type and constraints</th>
+<th>Default or description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>text</code></td>
+<td>yes</td>
+<td>string; minLength=1</td>
+<td></td>
+</tr>
+<tr>
+<td><code>citations</code></td>
+<td>no</td>
+<td>array of string</td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<h3 id="sourceinput">SourceInput</h3>
+<p>Additional properties: false.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Required</th>
+<th>Type and constraints</th>
+<th>Default or description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>source_id</code></td>
+<td>yes</td>
+<td>string; minLength=1</td>
+<td></td>
+</tr>
+<tr>
+<td><code>label</code></td>
+<td>yes</td>
+<td>string; minLength=1</td>
+<td></td>
+</tr>
+<tr>
+<td><code>text</code></td>
+<td>yes</td>
+<td>string; minLength=1</td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<h3 id="transcriptinput">TranscriptInput</h3>
+<p>Additional properties: false.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Required</th>
+<th>Type and constraints</th>
+<th>Default or description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>source_label</code></td>
+<td>yes</td>
+<td>string; minLength=1</td>
+<td></td>
+</tr>
+<tr>
+<td><code>transcript_text</code></td>
+<td>yes</td>
+<td>string; minLength=1</td>
+<td></td>
+</tr>
+<tr>
+<td><code>correction_of_id</code></td>
+<td>no</td>
+<td>string; format=uuid or null</td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<h3 id="validationerror">ValidationError</h3>
+<p>Additional properties: not explicitly declared.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Required</th>
+<th>Type and constraints</th>
+<th>Default or description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>loc</code></td>
+<td>yes</td>
+<td>array of string or integer</td>
+<td></td>
+</tr>
+<tr>
+<td><code>msg</code></td>
+<td>yes</td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>type</code></td>
+<td>yes</td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>input</code></td>
+<td>no</td>
+<td>object</td>
+<td></td>
+</tr>
+<tr>
+<td><code>ctx</code></td>
+<td>no</td>
+<td>object</td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<h3 id="votecorrection">VoteCorrection</h3>
+<p>Additional properties: false.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Required</th>
+<th>Type and constraints</th>
+<th>Default or description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>vote</code></td>
+<td>yes</td>
+<td>string; minLength=1</td>
+<td></td>
+</tr>
+<tr>
+<td><code>reason</code></td>
+<td>yes</td>
+<td>string; minLength=1</td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<h3 id="voteinput">VoteInput</h3>
+<p>Additional properties: false.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Required</th>
+<th>Type and constraints</th>
+<th>Default or description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>voter_name</code></td>
+<td>yes</td>
+<td>string; minLength=1</td>
+<td></td>
+</tr>
+<tr>
+<td><code>vote</code></td>
+<td>yes</td>
+<td>string; minLength=1</td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<h2 id="source-route-and-validation-supplement">Source route and
+validation supplement</h2>
+<p>These declarations are extracted from the immutable candidate source.
+Package standalone routes are <strong>a different deployment
+surface</strong> from the mounted installed domain. They are listed to
+document existing code, not to claim they all have installed or city
+acceptance. A source declaration without a resolved include-router mount
+is identified as such. Full signatures, direct HTTP refusals and schema
+fields are retained in the <a
+href="../reference/source-inventory.json">source inventory</a>.</p>
+<h3 id="main.py">main.py</h3>
+<p>Candidate source:
+<code>installed-owned-source/civicclerk/main.py</code>.</p>
+<p><strong>GET <code>/</code></strong> — handler <code>root</code>, line
+492. Declared router prefix included.</p>
+<div class="sourceCode" id="cb1"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a>root() <span class="op">-&gt;</span> <span class="bu">dict</span>[<span class="bu">str</span>, <span class="bu">str</span>]</span></code></pre></div>
+<p><strong>GET <code>/health</code></strong> — handler
+<code>health</code>, line 550. Declared router prefix included.</p>
+<div class="sourceCode" id="cb2"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a>health() <span class="op">-&gt;</span> <span class="bu">dict</span>[<span class="bu">str</span>, <span class="bu">str</span>]</span></code></pre></div>
+<p><strong>GET <code>/favicon.ico</code></strong> — handler
+<code>favicon</code>, line 561. Declared router prefix included.</p>
+<div class="sourceCode" id="cb3"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb3-1"><a href="#cb3-1" aria-hidden="true" tabindex="-1"></a>favicon() <span class="op">-&gt;</span> Response</span></code></pre></div>
+<p><strong>GET <code>/staff</code></strong> — handler
+<code>staff_dashboard</code>, line 567. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb4"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb4-1"><a href="#cb4-1" aria-hidden="true" tabindex="-1"></a>staff_dashboard() <span class="op">-&gt;</span> <span class="bu">str</span></span></code></pre></div>
+<p><strong>GET <code>/public</code></strong> — handler
+<code>public_portal</code>, line 617. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb5"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb5-1"><a href="#cb5-1" aria-hidden="true" tabindex="-1"></a>public_portal() <span class="op">-&gt;</span> <span class="bu">str</span></span></code></pre></div>
+<p><strong>GET <code>/staff/session</code></strong> — handler
+<code>staff_session</code>, line 623. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb6"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb6-1"><a href="#cb6-1" aria-hidden="true" tabindex="-1"></a>staff_session(request: Request) <span class="op">-&gt;</span> <span class="bu">dict</span>[<span class="bu">str</span>, <span class="bu">object</span>]</span></code></pre></div>
+<p>Direct handler refusals:
+<code>HTTPException(status_code=401, detail={'message': 'Staff authentication is required.', 'fix': f'The default {STAFF_AUTH_MODE_ENV_VAR}={STAFF_PROTECTED_MODE} denies anonymous staff writes. Configure bearer, trusted-header, or OIDC staff auth, or explicitly set {STAFF_AUTH_MODE_ENV_VAR}={STAFF_OPEN_MODE} only for local rehearsal.'}, headers={'WWW-Authenticate': 'Bearer'})</code>;
+<code>HTTPException(status_code=500, detail={'message': 'Staff session principal is missing.', 'fix': 'Retry the request with a configured bearer token or review staff auth middleware setup.'})</code>.</p>
+<p><strong>GET <code>/staff/login</code></strong> — handler
+<code>staff_login</code>, line 705. Declared router prefix included.</p>
+<div class="sourceCode" id="cb7"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb7-1"><a href="#cb7-1" aria-hidden="true" tabindex="-1"></a>staff_login(request: Request) <span class="op">-&gt;</span> RedirectResponse</span></code></pre></div>
+<p>Direct handler refusals:
+<code>HTTPException(status_code=400, detail={'message': 'OIDC browser sign-in is available only when staff auth mode is oidc.', 'fix': f'Set {STAFF_AUTH_MODE_ENV_VAR}={STAFF_OIDC_MODE} before using /staff/login.'})</code>;
+<code>HTTPException(status_code=503, detail={'message': 'OIDC browser sign-in is not fully configured.', 'fix': _oidc_browser_login_fix(missing)})</code>.</p>
+<p><strong>GET <code>/staff/oidc/callback</code></strong> — handler
+<code>staff_oidc_callback</code>, line 763. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb8"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb8-1"><a href="#cb8-1" aria-hidden="true" tabindex="-1"></a>staff_oidc_callback(request: Request) <span class="op">-&gt;</span> RedirectResponse</span></code></pre></div>
+<p>Direct handler refusals:
+<code>HTTPException(status_code=400, detail={'message': 'OIDC callback received while staff auth mode is not oidc.', 'fix': f'Set {STAFF_AUTH_MODE_ENV_VAR}={STAFF_OIDC_MODE}, then restart sign-in from /staff/login.'})</code>;
+<code>HTTPException(status_code=400, detail={'message': 'OIDC provider returned a sign-in error.', 'fix': f"Review the provider response '{callback_error}', then restart sign-in from /staff/login."})</code>;
+<code>HTTPException(status_code=400, detail={'message': 'OIDC sign-in state did not match.', 'fix': 'Restart sign-in from /staff/login. If this repeats, confirm cookies are allowed for the CivicMeetings host.'})</code>;
+<code>HTTPException(status_code=400, detail={'message': 'OIDC sign-in PKCE verifier is missing.', 'fix': 'Restart sign-in from /staff/login. If this repeats, confirm cookies are allowed for the CivicMeetings host.'})</code>;
+<code>HTTPException(status_code=400, detail={'message': 'OIDC callback did not include an authorization code.', 'fix': 'Restart sign-in from /staff/login and confirm the provider uses authorization-code flow.'})</code>;
+<code>HTTPException(status_code=503, detail={'message': 'OIDC browser sign-in is not fully configured.', 'fix': _oidc_browser_login_fix(missing)})</code>;
+<code>HTTPException(status_code=502, detail={'message': 'OIDC token response did not include an ID token or access token.', 'fix': 'Confirm the provider app registration issues an ID token or API access token for CivicMeetings.'})</code>.</p>
+<p><strong>GET <code>/staff/logout</code></strong> — handler
+<code>staff_logout</code>, line 861. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb9"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb9-1"><a href="#cb9-1" aria-hidden="true" tabindex="-1"></a>staff_logout(request: Request) <span class="op">-&gt;</span> RedirectResponse</span></code></pre></div>
+<p><strong>POST <code>/staff/logout</code></strong> — handler
+<code>staff_logout</code>, line 861. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb10"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb10-1"><a href="#cb10-1" aria-hidden="true" tabindex="-1"></a>staff_logout(request: Request) <span class="op">-&gt;</span> RedirectResponse</span></code></pre></div>
+<p><strong>GET <code>/staff/auth-readiness</code></strong> — handler
+<code>staff_auth_readiness</code>, line 873. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb11"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb11-1"><a href="#cb11-1" aria-hidden="true" tabindex="-1"></a>staff_auth_readiness() <span class="op">-&gt;</span> <span class="bu">dict</span>[<span class="bu">str</span>, <span class="bu">object</span>]</span></code></pre></div>
+<p><strong>GET <code>/admin/config</code></strong> — handler
+<code>admin_config</code>, line 935. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb12"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb12-1"><a href="#cb12-1" aria-hidden="true" tabindex="-1"></a>admin_config() <span class="op">-&gt;</span> <span class="bu">dict</span>[<span class="bu">str</span>, <span class="bu">object</span>]</span></code></pre></div>
+<p><strong>GET <code>/integrations/readiness</code></strong> — handler
+<code>integrations_readiness</code>, line 968. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb13"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb13-1"><a href="#cb13-1" aria-hidden="true" tabindex="-1"></a>integrations_readiness() <span class="op">-&gt;</span> <span class="bu">dict</span>[<span class="bu">str</span>, <span class="bu">object</span>]</span></code></pre></div>
+<p><strong>GET <code>/admin/prompts</code></strong> — handler
+<code>admin_prompts</code>, line 975. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb14"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb14-1"><a href="#cb14-1" aria-hidden="true" tabindex="-1"></a>admin_prompts() <span class="op">-&gt;</span> <span class="bu">dict</span>[<span class="bu">str</span>, <span class="bu">object</span>]</span></code></pre></div>
+<p><strong>POST <code>/agenda-items</code></strong> — handler
+<code>create_agenda_item</code>, line 1009. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb15"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb15-1"><a href="#cb15-1" aria-hidden="true" tabindex="-1"></a>create_agenda_item(payload: AgendaItemCreate) <span class="op">-&gt;</span> <span class="bu">dict</span>[<span class="bu">str</span>, <span class="bu">str</span>]</span></code></pre></div>
+<p><strong>GET <code>/agenda-items/{item_id}</code></strong> — handler
+<code>get_agenda_item</code>, line 1018. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb16"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb16-1"><a href="#cb16-1" aria-hidden="true" tabindex="-1"></a>get_agenda_item(item_id: <span class="bu">str</span>) <span class="op">-&gt;</span> <span class="bu">dict</span>[<span class="bu">str</span>, <span class="bu">str</span>]</span></code></pre></div>
+<p>Direct handler refusals:
+<code>HTTPException(status_code=404, detail='Agenda item not found.')</code>.</p>
+<p><strong>POST
+<code>/agenda-items/{item_id}/transitions</code></strong> — handler
+<code>transition_agenda_item</code>, line 1027. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb17"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb17-1"><a href="#cb17-1" aria-hidden="true" tabindex="-1"></a>transition_agenda_item(item_id: <span class="bu">str</span>, payload: AgendaItemTransitionRequest) <span class="op">-&gt;</span> <span class="bu">dict</span>[<span class="bu">str</span>, <span class="bu">str</span>]</span></code></pre></div>
+<p>Direct handler refusals:
+<code>HTTPException(status_code=404, detail='Agenda item not found.')</code>;
+<code>HTTPException(status_code=result.http_status, detail={'message': result.message, 'fix': result.fix, 'current_status': item.status, 'requested_status': payload.to_status})</code>.</p>
+<p><strong>GET <code>/agenda-items/{item_id}/audit</code></strong> —
+handler <code>get_agenda_item_audit</code>, line 1058. Declared router
+prefix included.</p>
+<div class="sourceCode" id="cb18"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb18-1"><a href="#cb18-1" aria-hidden="true" tabindex="-1"></a>get_agenda_item_audit(item_id: <span class="bu">str</span>) <span class="op">-&gt;</span> <span class="bu">dict</span>[<span class="bu">str</span>, <span class="bu">list</span>[<span class="bu">dict</span>[<span class="bu">str</span>, <span class="bu">object</span>]]]</span></code></pre></div>
+<p>Direct handler refusals:
+<code>HTTPException(status_code=404, detail='Agenda item not found.')</code>.</p>
+<p><strong>POST <code>/agenda-intake</code></strong> — handler
+<code>submit_agenda_intake_item</code>, line 1067. Declared router
+prefix included.</p>
+<div class="sourceCode" id="cb19"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb19-1"><a href="#cb19-1" aria-hidden="true" tabindex="-1"></a>submit_agenda_intake_item(payload: AgendaIntakeCreate) <span class="op">-&gt;</span> <span class="bu">dict</span></span></code></pre></div>
+<p><strong>GET <code>/agenda-intake</code></strong> — handler
+<code>list_agenda_intake_items</code>, line 1080. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb20"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb20-1"><a href="#cb20-1" aria-hidden="true" tabindex="-1"></a>list_agenda_intake_items(readiness_status: <span class="bu">str</span> <span class="op">|</span> <span class="va">None</span><span class="op">=</span><span class="va">None</span>) <span class="op">-&gt;</span> <span class="bu">dict</span>[<span class="bu">str</span>, <span class="bu">list</span>[<span class="bu">dict</span>]]</span></code></pre></div>
+<p><strong>POST <code>/agenda-intake/{item_id}/review</code></strong> —
+handler <code>review_agenda_intake_item</code>, line 1093. Declared
+router prefix included.</p>
+<div class="sourceCode" id="cb21"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb21-1"><a href="#cb21-1" aria-hidden="true" tabindex="-1"></a>review_agenda_intake_item(item_id: <span class="bu">str</span>, payload: AgendaIntakeReviewRequest) <span class="op">-&gt;</span> <span class="bu">dict</span></span></code></pre></div>
+<p>Direct handler refusals:
+<code>HTTPException(status_code=404, detail={'message': 'Agenda intake item not found.', 'fix': 'Submit the agenda item into the intake queue before review.'})</code>.</p>
+<p><strong>POST <code>/agenda-intake/{item_id}/promote</code></strong> —
+handler <code>promote_agenda_intake_item</code>, line 1116. Declared
+router prefix included.</p>
+<div class="sourceCode" id="cb22"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb22-1"><a href="#cb22-1" aria-hidden="true" tabindex="-1"></a>promote_agenda_intake_item(item_id: <span class="bu">str</span>, payload: AgendaIntakePromoteRequest, response: Response) <span class="op">-&gt;</span> <span class="bu">dict</span></span></code></pre></div>
+<p>Direct handler refusals:
+<code>HTTPException(status_code=404, detail={'message': 'Agenda intake item not found.', 'fix': 'Submit the agenda item into intake, then complete clerk review before promotion.'})</code>;
+<code>HTTPException(status_code=409, detail={'message': 'Agenda intake item is not ready for agenda promotion.', 'current_readiness_status': intake_item.readiness_status, 'fix': 'Mark the item ready in the clerk review queue, then promote it to agenda work.'})</code>;
+<code>HTTPException(status_code=404, detail={'message': 'Agenda intake item disappeared during promotion.', 'fix': 'Reload the intake queue and retry promotion from the current record.'})</code>;
+<code>HTTPException(status_code=500, detail={'message': 'Agenda item promotion could not complete its lifecycle transitions.', 'fix': 'Retry promotion after confirming the agenda lifecycle service is available.'})</code>.</p>
+<p><strong>POST
+<code>/meetings/{meeting_id}/staff-reports</code></strong> — handler
+<code>create_staff_report</code>, line 1193. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb23"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb23-1"><a href="#cb23-1" aria-hidden="true" tabindex="-1"></a>create_staff_report(meeting_id: <span class="bu">str</span>, payload: StaffReportCreate) <span class="op">-&gt;</span> <span class="bu">dict</span>[<span class="bu">str</span>, <span class="bu">object</span>]</span></code></pre></div>
+<p><strong>GET
+<code>/meetings/{meeting_id}/staff-reports</code></strong> — handler
+<code>list_staff_reports</code>, line 1222. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb24"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb24-1"><a href="#cb24-1" aria-hidden="true" tabindex="-1"></a>list_staff_reports(meeting_id: <span class="bu">str</span>) <span class="op">-&gt;</span> <span class="bu">dict</span>[<span class="bu">str</span>, <span class="bu">object</span>]</span></code></pre></div>
+<p><strong>POST <code>/meeting-bodies</code></strong> — handler
+<code>create_meeting_body</code>, line 1246. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb25"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb25-1"><a href="#cb25-1" aria-hidden="true" tabindex="-1"></a>create_meeting_body(payload: MeetingBodyCreate) <span class="op">-&gt;</span> <span class="bu">dict</span>[<span class="bu">str</span>, <span class="bu">str</span> <span class="op">|</span> <span class="bu">bool</span>]</span></code></pre></div>
+<p><strong>GET <code>/meeting-bodies</code></strong> — handler
+<code>list_meeting_bodies</code>, line 1257. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb26"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb26-1"><a href="#cb26-1" aria-hidden="true" tabindex="-1"></a>list_meeting_bodies(active_only: <span class="bu">bool</span><span class="op">=</span><span class="va">False</span>) <span class="op">-&gt;</span> <span class="bu">dict</span>[<span class="bu">str</span>, <span class="bu">int</span> <span class="op">|</span> <span class="bu">list</span>[<span class="bu">dict</span>[<span class="bu">str</span>, <span class="bu">str</span> <span class="op">|</span> <span class="bu">bool</span>]]]</span></code></pre></div>
+<p><strong>GET <code>/meeting-bodies/{body_id}</code></strong> — handler
+<code>get_meeting_body</code>, line 1268. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb27"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb27-1"><a href="#cb27-1" aria-hidden="true" tabindex="-1"></a>get_meeting_body(body_id: <span class="bu">str</span>) <span class="op">-&gt;</span> <span class="bu">dict</span>[<span class="bu">str</span>, <span class="bu">str</span> <span class="op">|</span> <span class="bu">bool</span>]</span></code></pre></div>
+<p>Direct handler refusals:
+<code>HTTPException(status_code=404, detail='Meeting body not found.')</code>.</p>
+<p><strong>PATCH <code>/meeting-bodies/{body_id}</code></strong> —
+handler <code>update_meeting_body</code>, line 1278. Declared router
+prefix included.</p>
+<div class="sourceCode" id="cb28"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb28-1"><a href="#cb28-1" aria-hidden="true" tabindex="-1"></a>update_meeting_body(body_id: <span class="bu">str</span>, payload: MeetingBodyUpdate) <span class="op">-&gt;</span> <span class="bu">dict</span>[<span class="bu">str</span>, <span class="bu">str</span> <span class="op">|</span> <span class="bu">bool</span>]</span></code></pre></div>
+<p>Direct handler refusals:
+<code>HTTPException(status_code=404, detail='Meeting body not found.')</code>.</p>
+<p><strong>DELETE <code>/meeting-bodies/{body_id}</code></strong> —
+handler <code>deactivate_meeting_body</code>, line 1296. Declared router
+prefix included.</p>
+<div class="sourceCode" id="cb29"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb29-1"><a href="#cb29-1" aria-hidden="true" tabindex="-1"></a>deactivate_meeting_body(body_id: <span class="bu">str</span>) <span class="op">-&gt;</span> <span class="bu">dict</span>[<span class="bu">str</span>, <span class="bu">str</span> <span class="op">|</span> <span class="bu">bool</span>]</span></code></pre></div>
+<p>Direct handler refusals:
+<code>HTTPException(status_code=404, detail='Meeting body not found.')</code>.</p>
+<p><strong>POST <code>/meetings</code></strong> — handler
+<code>create_meeting</code>, line 1306. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb30"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb30-1"><a href="#cb30-1" aria-hidden="true" tabindex="-1"></a>create_meeting(payload: MeetingCreate) <span class="op">-&gt;</span> <span class="bu">dict</span>[<span class="bu">str</span>, <span class="bu">str</span>]</span></code></pre></div>
+<p><strong>GET <code>/meetings</code></strong> — handler
+<code>list_meetings</code>, line 1322. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb31"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb31-1"><a href="#cb31-1" aria-hidden="true" tabindex="-1"></a>list_meetings() <span class="op">-&gt;</span> <span class="bu">dict</span>[<span class="bu">str</span>, <span class="bu">int</span> <span class="op">|</span> <span class="bu">list</span>[<span class="bu">dict</span>[<span class="bu">str</span>, <span class="bu">str</span> <span class="op">|</span> <span class="va">None</span>]]]</span></code></pre></div>
+<p><strong>GET <code>/meetings/{meeting_id}</code></strong> — handler
+<code>get_meeting</code>, line 1329. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb32"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb32-1"><a href="#cb32-1" aria-hidden="true" tabindex="-1"></a>get_meeting(meeting_id: <span class="bu">str</span>) <span class="op">-&gt;</span> <span class="bu">dict</span>[<span class="bu">str</span>, <span class="bu">str</span>]</span></code></pre></div>
+<p>Direct handler refusals:
+<code>HTTPException(status_code=404, detail='Meeting not found.')</code>.</p>
+<p><strong>PATCH <code>/meetings/{meeting_id}</code></strong> — handler
+<code>update_meeting_schedule</code>, line 1338. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb33"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb33-1"><a href="#cb33-1" aria-hidden="true" tabindex="-1"></a>update_meeting_schedule(meeting_id: <span class="bu">str</span>, payload: MeetingUpdate) <span class="op">-&gt;</span> <span class="bu">dict</span>[<span class="bu">str</span>, <span class="bu">str</span>]</span></code></pre></div>
+<p>Direct handler refusals:
+<code>HTTPException(status_code=422, detail={'message': 'Meeting update did not include any schedule fields.', 'fix': 'Send at least one of title, meeting_type, scheduled_start, meeting_body_id, or location.'})</code>;
+<code>HTTPException(status_code=404, detail='Meeting not found.')</code>;
+<code>HTTPException(status_code=409, detail={'message': exc.message, 'fix': exc.fix})</code>.</p>
+<p><strong>POST <code>/meetings/{meeting_id}/transitions</code></strong>
+— handler <code>transition_meeting</code>, line 1391. Declared router
+prefix included.</p>
+<div class="sourceCode" id="cb34"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb34-1"><a href="#cb34-1" aria-hidden="true" tabindex="-1"></a>transition_meeting(meeting_id: <span class="bu">str</span>, payload: MeetingTransitionRequest) <span class="op">-&gt;</span> <span class="bu">dict</span>[<span class="bu">str</span>, <span class="bu">str</span>]</span></code></pre></div>
+<p>Direct handler refusals:
+<code>HTTPException(status_code=404, detail='Meeting not found.')</code>;
+<code>HTTPException(status_code=result.http_status, detail={'message': result.message, 'fix': result.fix, 'current_status': meeting.status, 'requested_status': payload.to_status})</code>.</p>
+<p><strong>GET <code>/meetings/{meeting_id}/audit</code></strong> —
+handler <code>get_meeting_audit</code>, line 1424. Declared router
+prefix included.</p>
+<div class="sourceCode" id="cb35"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb35-1"><a href="#cb35-1" aria-hidden="true" tabindex="-1"></a>get_meeting_audit(meeting_id: <span class="bu">str</span>) <span class="op">-&gt;</span> <span class="bu">dict</span>[<span class="bu">str</span>, <span class="bu">list</span>[<span class="bu">dict</span>[<span class="bu">str</span>, <span class="bu">object</span>]]]</span></code></pre></div>
+<p>Direct handler refusals:
+<code>HTTPException(status_code=404, detail='Meeting not found.')</code>.</p>
+<p><strong>POST
+<code>/meetings/{meeting_id}/packet-snapshots</code></strong> — handler
+<code>create_packet_snapshot</code>, line 1433. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb36"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb36-1"><a href="#cb36-1" aria-hidden="true" tabindex="-1"></a>create_packet_snapshot(meeting_id: <span class="bu">str</span>, payload: PacketSnapshotCreate) <span class="op">-&gt;</span> <span class="bu">dict</span></span></code></pre></div>
+<p>Direct handler refusals:
+<code>HTTPException(status_code=404, detail='Meeting not found.')</code>.</p>
+<p><strong>GET
+<code>/meetings/{meeting_id}/packet-snapshots</code></strong> — handler
+<code>list_packet_snapshots</code>, line 1449. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb37"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb37-1"><a href="#cb37-1" aria-hidden="true" tabindex="-1"></a>list_packet_snapshots(meeting_id: <span class="bu">str</span>) <span class="op">-&gt;</span> <span class="bu">dict</span>[<span class="bu">str</span>, <span class="bu">list</span>[<span class="bu">dict</span>]]</span></code></pre></div>
+<p>Direct handler refusals:
+<code>HTTPException(status_code=404, detail='Meeting not found.')</code>.</p>
+<p><strong>POST
+<code>/meetings/{meeting_id}/packet-assemblies</code></strong> — handler
+<code>create_packet_assembly_record</code>, line 1463. Declared router
+prefix included.</p>
+<div class="sourceCode" id="cb38"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb38-1"><a href="#cb38-1" aria-hidden="true" tabindex="-1"></a>create_packet_assembly_record(meeting_id: <span class="bu">str</span>, payload: PacketAssemblyCreate) <span class="op">-&gt;</span> <span class="bu">dict</span></span></code></pre></div>
+<p>Direct handler refusals:
+<code>HTTPException(status_code=404, detail='Meeting not found.')</code>.</p>
+<p><strong>GET
+<code>/meetings/{meeting_id}/packet-assemblies</code></strong> — handler
+<code>list_packet_assembly_records</code>, line 1489. Declared router
+prefix included.</p>
+<div class="sourceCode" id="cb39"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb39-1"><a href="#cb39-1" aria-hidden="true" tabindex="-1"></a>list_packet_assembly_records(meeting_id: <span class="bu">str</span>) <span class="op">-&gt;</span> <span class="bu">dict</span>[<span class="bu">str</span>, <span class="bu">list</span>[<span class="bu">dict</span>]]</span></code></pre></div>
+<p>Direct handler refusals:
+<code>HTTPException(status_code=404, detail='Meeting not found.')</code>.</p>
+<p><strong>POST
+<code>/packet-assemblies/{record_id}/finalize</code></strong> — handler
+<code>finalize_packet_assembly_record</code>, line 1503. Declared router
+prefix included.</p>
+<div class="sourceCode" id="cb40"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb40-1"><a href="#cb40-1" aria-hidden="true" tabindex="-1"></a>finalize_packet_assembly_record(record_id: <span class="bu">str</span>, payload: PacketAssemblyFinalizeRequest) <span class="op">-&gt;</span> <span class="bu">dict</span></span></code></pre></div>
+<p>Direct handler refusals:
+<code>HTTPException(status_code=404, detail={'message': 'Packet assembly record not found.', 'fix': 'Create the packet assembly record before finalizing it.'})</code>.</p>
+<p><strong>POST
+<code>/meetings/{meeting_id}/export-bundle</code></strong> — handler
+<code>create_packet_export_bundle</code>, line 1524. Declared router
+prefix included.</p>
+<div class="sourceCode" id="cb41"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb41-1"><a href="#cb41-1" aria-hidden="true" tabindex="-1"></a>create_packet_export_bundle(meeting_id: <span class="bu">str</span>, payload: PacketExportCreate) <span class="op">-&gt;</span> <span class="bu">dict</span></span></code></pre></div>
+<p>Direct handler refusals:
+<code>HTTPException(status_code=404, detail='Meeting not found.')</code>;
+<code>HTTPException(status_code=error.http_status, detail=error.public_dict())</code>.</p>
+<p><strong>POST
+<code>/meetings/{meeting_id}/notices/check</code></strong> — handler
+<code>check_notice_compliance</code>, line 1559. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb42"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb42-1"><a href="#cb42-1" aria-hidden="true" tabindex="-1"></a>check_notice_compliance(meeting_id: <span class="bu">str</span>, payload: NoticeComplianceRequest) <span class="op">-&gt;</span> <span class="bu">dict</span></span></code></pre></div>
+<p>Direct handler refusals:
+<code>HTTPException(status_code=result.http_status, detail={'message': 'Notice is not ready for public posting. Review the warnings and fix each item.', 'warnings': result.warnings})</code>.</p>
+<p><strong>POST
+<code>/meetings/{meeting_id}/notice-checklists</code></strong> — handler
+<code>create_notice_checklist_record</code>, line 1577. Declared router
+prefix included.</p>
+<div class="sourceCode" id="cb43"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb43-1"><a href="#cb43-1" aria-hidden="true" tabindex="-1"></a>create_notice_checklist_record(meeting_id: <span class="bu">str</span>, payload: NoticeChecklistCreate) <span class="op">-&gt;</span> <span class="bu">dict</span></span></code></pre></div>
+<p><strong>GET
+<code>/meetings/{meeting_id}/notice-checklists</code></strong> — handler
+<code>list_notice_checklist_records</code>, line 1599. Declared router
+prefix included.</p>
+<div class="sourceCode" id="cb44"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb44-1"><a href="#cb44-1" aria-hidden="true" tabindex="-1"></a>list_notice_checklist_records(meeting_id: <span class="bu">str</span>) <span class="op">-&gt;</span> <span class="bu">dict</span>[<span class="bu">str</span>, <span class="bu">list</span>[<span class="bu">dict</span>]]</span></code></pre></div>
+<p>Direct handler refusals:
+<code>HTTPException(status_code=404, detail='Meeting not found.')</code>.</p>
+<p><strong>POST
+<code>/notice-checklists/{record_id}/posting-proof</code></strong> —
+handler <code>attach_notice_posting_proof</code>, line 1613. Declared
+router prefix included.</p>
+<div class="sourceCode" id="cb45"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb45-1"><a href="#cb45-1" aria-hidden="true" tabindex="-1"></a>attach_notice_posting_proof(record_id: <span class="bu">str</span>, payload: NoticePostingProofCreate) <span class="op">-&gt;</span> <span class="bu">dict</span></span></code></pre></div>
+<p>Direct handler refusals:
+<code>HTTPException(status_code=404, detail={'message': 'Notice checklist record not found.', 'fix': 'Create the notice checklist record before attaching posting proof.'})</code>.</p>
+<p><strong>POST
+<code>/meetings/{meeting_id}/notices/post</code></strong> — handler
+<code>post_notice</code>, line 1635. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb46"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb46-1"><a href="#cb46-1" aria-hidden="true" tabindex="-1"></a>post_notice(meeting_id: <span class="bu">str</span>, payload: NoticeComplianceRequest) <span class="op">-&gt;</span> <span class="bu">dict</span></span></code></pre></div>
+<p>Direct handler refusals:
+<code>HTTPException(status_code=result.http_status, detail={'message': 'Notice cannot be posted publicly. Review the warnings and fix each item.', 'warnings': result.warnings})</code>.</p>
+<p><strong>POST <code>/meetings/{meeting_id}/motions</code></strong> —
+handler <code>capture_motion</code>, line 1653. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb47"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb47-1"><a href="#cb47-1" aria-hidden="true" tabindex="-1"></a>capture_motion(meeting_id: <span class="bu">str</span>, payload: MotionCreate) <span class="op">-&gt;</span> <span class="bu">dict</span></span></code></pre></div>
+<p>Direct handler refusals:
+<code>HTTPException(status_code=404, detail='Meeting not found.')</code>.</p>
+<p><strong>GET <code>/meetings/{meeting_id}/motions</code></strong> —
+handler <code>list_motions</code>, line 1668. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb48"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb48-1"><a href="#cb48-1" aria-hidden="true" tabindex="-1"></a>list_motions(meeting_id: <span class="bu">str</span>) <span class="op">-&gt;</span> <span class="bu">dict</span>[<span class="bu">str</span>, <span class="bu">list</span>[<span class="bu">dict</span>]]</span></code></pre></div>
+<p>Direct handler refusals:
+<code>HTTPException(status_code=404, detail='Meeting not found.')</code>.</p>
+<p><strong>PUT <code>/motions/{motion_id}</code></strong> — handler
+<code>reject_motion_mutation</code>, line 1683. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb49"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb49-1"><a href="#cb49-1" aria-hidden="true" tabindex="-1"></a>reject_motion_mutation(motion_id: <span class="bu">str</span>) <span class="op">-&gt;</span> <span class="va">None</span></span></code></pre></div>
+<p>Direct handler refusals:
+<code>HTTPException(status_code=409, detail={'message': 'Captured motions are immutable.', 'fix': 'Use POST /motions/{motion_id}/corrections to add a correction record that references the original motion.'})</code>;
+<code>HTTPException(status_code=404, detail='Motion not found.')</code>.</p>
+<p><strong>PATCH <code>/motions/{motion_id}</code></strong> — handler
+<code>reject_motion_mutation</code>, line 1683. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb50"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb50-1"><a href="#cb50-1" aria-hidden="true" tabindex="-1"></a>reject_motion_mutation(motion_id: <span class="bu">str</span>) <span class="op">-&gt;</span> <span class="va">None</span></span></code></pre></div>
+<p>Direct handler refusals:
+<code>HTTPException(status_code=409, detail={'message': 'Captured motions are immutable.', 'fix': 'Use POST /motions/{motion_id}/corrections to add a correction record that references the original motion.'})</code>;
+<code>HTTPException(status_code=404, detail='Motion not found.')</code>.</p>
+<p><strong>POST <code>/motions/{motion_id}/corrections</code></strong> —
+handler <code>correct_motion</code>, line 1697. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb51"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb51-1"><a href="#cb51-1" aria-hidden="true" tabindex="-1"></a>correct_motion(motion_id: <span class="bu">str</span>, payload: MotionCorrectionCreate) <span class="op">-&gt;</span> <span class="bu">dict</span></span></code></pre></div>
+<p>Direct handler refusals:
+<code>HTTPException(status_code=404, detail='Motion not found.')</code>.</p>
+<p><strong>POST <code>/motions/{motion_id}/votes</code></strong> —
+handler <code>capture_vote</code>, line 1711. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb52"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb52-1"><a href="#cb52-1" aria-hidden="true" tabindex="-1"></a>capture_vote(motion_id: <span class="bu">str</span>, payload: VoteCreate) <span class="op">-&gt;</span> <span class="bu">dict</span></span></code></pre></div>
+<p>Direct handler refusals:
+<code>HTTPException(status_code=404, detail='Motion not found.')</code>.</p>
+<p><strong>GET <code>/motions/{motion_id}/votes</code></strong> —
+handler <code>list_votes</code>, line 1728. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb53"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb53-1"><a href="#cb53-1" aria-hidden="true" tabindex="-1"></a>list_votes(motion_id: <span class="bu">str</span>) <span class="op">-&gt;</span> <span class="bu">dict</span>[<span class="bu">str</span>, <span class="bu">list</span>[<span class="bu">dict</span>]]</span></code></pre></div>
+<p>Direct handler refusals:
+<code>HTTPException(status_code=404, detail='Motion not found.')</code>.</p>
+<p><strong>PUT <code>/votes/{vote_id}</code></strong> — handler
+<code>reject_vote_mutation</code>, line 1743. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb54"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb54-1"><a href="#cb54-1" aria-hidden="true" tabindex="-1"></a>reject_vote_mutation(vote_id: <span class="bu">str</span>) <span class="op">-&gt;</span> <span class="va">None</span></span></code></pre></div>
+<p>Direct handler refusals:
+<code>HTTPException(status_code=409, detail={'message': 'Captured votes are immutable.', 'fix': 'Use POST /votes/{vote_id}/corrections to add a correction record that references the original vote.'})</code>;
+<code>HTTPException(status_code=404, detail='Vote not found.')</code>.</p>
+<p><strong>PATCH <code>/votes/{vote_id}</code></strong> — handler
+<code>reject_vote_mutation</code>, line 1743. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb55"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb55-1"><a href="#cb55-1" aria-hidden="true" tabindex="-1"></a>reject_vote_mutation(vote_id: <span class="bu">str</span>) <span class="op">-&gt;</span> <span class="va">None</span></span></code></pre></div>
+<p>Direct handler refusals:
+<code>HTTPException(status_code=409, detail={'message': 'Captured votes are immutable.', 'fix': 'Use POST /votes/{vote_id}/corrections to add a correction record that references the original vote.'})</code>;
+<code>HTTPException(status_code=404, detail='Vote not found.')</code>.</p>
+<p><strong>POST <code>/votes/{vote_id}/corrections</code></strong> —
+handler <code>correct_vote</code>, line 1757. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb56"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb56-1"><a href="#cb56-1" aria-hidden="true" tabindex="-1"></a>correct_vote(vote_id: <span class="bu">str</span>, payload: VoteCorrectionCreate) <span class="op">-&gt;</span> <span class="bu">dict</span></span></code></pre></div>
+<p>Direct handler refusals:
+<code>HTTPException(status_code=404, detail='Vote not found.')</code>.</p>
+<p><strong>POST
+<code>/meetings/{meeting_id}/action-items</code></strong> — handler
+<code>create_action_item</code>, line 1771. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb57"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb57-1"><a href="#cb57-1" aria-hidden="true" tabindex="-1"></a>create_action_item(meeting_id: <span class="bu">str</span>, payload: ActionItemCreate) <span class="op">-&gt;</span> <span class="bu">dict</span></span></code></pre></div>
+<p>Direct handler refusals:
+<code>HTTPException(status_code=404, detail='Meeting not found.')</code>;
+<code>HTTPException(status_code=422, detail={'message': 'Action items must reference a captured meeting outcome.', 'fix': 'Capture the related motion first, then send its id as source_motion_id.'})</code>;
+<code>HTTPException(status_code=404, detail='Source motion not found.')</code>;
+<code>HTTPException(status_code=422, detail={'message': 'Action item source motion belongs to a different meeting.', 'fix': 'Use a motion captured for this meeting as source_motion_id.'})</code>.</p>
+<p><strong>GET <code>/meetings/{meeting_id}/action-items</code></strong>
+— handler <code>list_action_items</code>, line 1809. Declared router
+prefix included.</p>
+<div class="sourceCode" id="cb58"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb58-1"><a href="#cb58-1" aria-hidden="true" tabindex="-1"></a>list_action_items(meeting_id: <span class="bu">str</span>) <span class="op">-&gt;</span> <span class="bu">dict</span>[<span class="bu">str</span>, <span class="bu">list</span>[<span class="bu">dict</span>]]</span></code></pre></div>
+<p>Direct handler refusals:
+<code>HTTPException(status_code=404, detail='Meeting not found.')</code>.</p>
+<p><strong>POST
+<code>/meetings/{meeting_id}/ordinance-resolution-handoff</code></strong>
+— handler <code>create_ordinance_resolution_handoff</code>, line 2063.
+Declared router prefix included.</p>
+<div class="sourceCode" id="cb59"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb59-1"><a href="#cb59-1" aria-hidden="true" tabindex="-1"></a>create_ordinance_resolution_handoff(meeting_id: <span class="bu">str</span>, payload: OrdinanceResolutionHandoffCreate) <span class="op">-&gt;</span> <span class="bu">dict</span>[<span class="bu">str</span>, <span class="bu">object</span>]</span></code></pre></div>
+<p>Direct handler refusals:
+<code>HTTPException(status_code=404, detail='Source motion not found.')</code>;
+<code>HTTPException(status_code=422, detail={'message': 'Ordinance or resolution source motion belongs to a different meeting.', 'fix': 'Use a motion captured for this meeting, then retry the handoff.'})</code>.</p>
+<p><strong>GET
+<code>/meetings/{meeting_id}/ordinance-resolution-handoff</code></strong>
+— handler <code>list_ordinance_resolution_handoffs</code>, line 2112.
+Declared router prefix included.</p>
+<div class="sourceCode" id="cb60"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb60-1"><a href="#cb60-1" aria-hidden="true" tabindex="-1"></a>list_ordinance_resolution_handoffs(meeting_id: <span class="bu">str</span>) <span class="op">-&gt;</span> <span class="bu">dict</span>[<span class="bu">str</span>, <span class="bu">object</span>]</span></code></pre></div>
+<p><strong>POST
+<code>/meetings/{meeting_id}/ordinance-resolution-handoff/retry</code></strong>
+— handler <code>retry_ordinance_resolution_handoff</code>, line 2125.
+Declared router prefix included.</p>
+<div class="sourceCode" id="cb61"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb61-1"><a href="#cb61-1" aria-hidden="true" tabindex="-1"></a>retry_ordinance_resolution_handoff(meeting_id: <span class="bu">str</span>, payload: OrdinanceResolutionHandoffRetry <span class="op">|</span> <span class="va">None</span><span class="op">=</span><span class="va">None</span>) <span class="op">-&gt;</span> <span class="bu">dict</span>[<span class="bu">str</span>, <span class="bu">object</span>]</span></code></pre></div>
+<p>Direct handler refusals:
+<code>HTTPException(status_code=404, detail='Handoff not found.')</code>.</p>
+<p><strong>POST
+<code>/meetings/{meeting_id}/minutes/drafts</code></strong> — handler
+<code>create_minutes_draft</code>, line 2159. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb62"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb62-1"><a href="#cb62-1" aria-hidden="true" tabindex="-1"></a>create_minutes_draft(meeting_id: <span class="bu">str</span>, payload: MinutesDraftCreate) <span class="op">-&gt;</span> <span class="bu">dict</span></span></code></pre></div>
+<p>Direct handler refusals:
+<code>HTTPException(status_code=404, detail='Meeting not found.')</code>;
+<code>HTTPException(status_code=422, detail={'message': result.message, 'fix': result.fix})</code>.</p>
+<p><strong>POST
+<code>/meetings/{meeting_id}/minutes/ai-assist</code></strong> — handler
+<code>create_minutes_ai_assist</code>, line 2197. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb63"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb63-1"><a href="#cb63-1" aria-hidden="true" tabindex="-1"></a>create_minutes_ai_assist(meeting_id: <span class="bu">str</span>, payload: MinutesAiAssistCreate) <span class="op">-&gt;</span> <span class="bu">dict</span></span></code></pre></div>
+<p>Direct handler refusals:
+<code>HTTPException(status_code=404, detail='Meeting not found.')</code>;
+<code>HTTPException(status_code=422, detail={'message': result.message, 'fix': result.fix})</code>;
+<code>HTTPException(status_code=503, detail=_minutes_ai_unavailable_detail(str(exc)))</code>.</p>
+<p><strong>GET
+<code>/meetings/{meeting_id}/minutes/drafts</code></strong> — handler
+<code>list_minutes_drafts</code>, line 2243. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb64"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb64-1"><a href="#cb64-1" aria-hidden="true" tabindex="-1"></a>list_minutes_drafts(meeting_id: <span class="bu">str</span>) <span class="op">-&gt;</span> <span class="bu">dict</span>[<span class="bu">str</span>, <span class="bu">list</span>[<span class="bu">dict</span>]]</span></code></pre></div>
+<p>Direct handler refusals:
+<code>HTTPException(status_code=404, detail='Meeting not found.')</code>.</p>
+<p><strong>POST <code>/minutes/{minute_id}/post</code></strong> —
+handler <code>reject_automatic_minutes_posting</code>, line 2257.
+Declared router prefix included.</p>
+<div class="sourceCode" id="cb65"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb65-1"><a href="#cb65-1" aria-hidden="true" tabindex="-1"></a>reject_automatic_minutes_posting(minute_id: <span class="bu">str</span>) <span class="op">-&gt;</span> <span class="va">None</span></span></code></pre></div>
+<p>Direct handler refusals:
+<code>HTTPException(status_code=409, detail={'message': 'AI-drafted minutes cannot be posted automatically.', 'fix': 'Review, cite-check, and adopt minutes through a human approval workflow before public posting.'})</code>;
+<code>HTTPException(status_code=404, detail='Minutes draft not found.')</code>.</p>
+<p><strong>POST <code>/meetings/{meeting_id}/transcripts</code></strong>
+— handler <code>create_transcript_record</code>, line 2271. Declared
+router prefix included.</p>
+<div class="sourceCode" id="cb66"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb66-1"><a href="#cb66-1" aria-hidden="true" tabindex="-1"></a>create_transcript_record(meeting_id: <span class="bu">str</span>, payload: TranscriptCreate) <span class="op">-&gt;</span> <span class="bu">dict</span>[<span class="bu">str</span>, <span class="bu">object</span>]</span></code></pre></div>
+<p><strong>GET <code>/meetings/{meeting_id}/transcripts</code></strong>
+— handler <code>list_transcript_records</code>, line 2295. Declared
+router prefix included.</p>
+<div class="sourceCode" id="cb67"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb67-1"><a href="#cb67-1" aria-hidden="true" tabindex="-1"></a>list_transcript_records(meeting_id: <span class="bu">str</span>) <span class="op">-&gt;</span> <span class="bu">dict</span>[<span class="bu">str</span>, <span class="bu">object</span>]</span></code></pre></div>
+<p><strong>POST
+<code>/meetings/{meeting_id}/public-record</code></strong> — handler
+<code>publish_public_record</code>, line 2309. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb68"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb68-1"><a href="#cb68-1" aria-hidden="true" tabindex="-1"></a>publish_public_record(meeting_id: <span class="bu">str</span>, payload: PublicMeetingRecordCreate) <span class="op">-&gt;</span> <span class="bu">dict</span></span></code></pre></div>
+<p>Direct handler refusals:
+<code>HTTPException(status_code=404, detail='Meeting not found.')</code>;
+<code>HTTPException(status_code=404, detail={'message': 'Meeting not found in the public archive database.', 'fix': 'Point CIVICCLERK_PUBLIC_ARCHIVE_DB_URL at the same database as CIVICCLERK_MEETING_DB_URL so published records reference real meetings.'})</code>.</p>
+<p><strong>POST <code>/imports/{connector_name}/meetings</code></strong>
+— handler <code>import_connector_meeting</code>, line 2347. Declared
+router prefix included.</p>
+<div class="sourceCode" id="cb69"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb69-1"><a href="#cb69-1" aria-hidden="true" tabindex="-1"></a>import_connector_meeting(connector_name: <span class="bu">str</span>, payload: <span class="bu">dict</span>) <span class="op">-&gt;</span> <span class="bu">dict</span></span></code></pre></div>
+<p>Direct handler refusals:
+<code>HTTPException(status_code=status_code, detail=error.public_dict())</code>.</p>
+<p><strong>POST <code>/vendor-live-sync/sources</code></strong> —
+handler <code>create_vendor_live_sync_source</code>, line 2365. Declared
+router prefix included.</p>
+<div class="sourceCode" id="cb70"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb70-1"><a href="#cb70-1" aria-hidden="true" tabindex="-1"></a>create_vendor_live_sync_source(payload: VendorSyncSourceCreate) <span class="op">-&gt;</span> <span class="bu">dict</span></span></code></pre></div>
+<p>Direct handler refusals:
+<code>HTTPException(status_code=422, detail=error.public_dict())</code>.</p>
+<p><strong>GET <code>/vendor-live-sync/sources</code></strong> — handler
+<code>list_vendor_live_sync_sources</code>, line 2386. Declared router
+prefix included.</p>
+<div class="sourceCode" id="cb71"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb71-1"><a href="#cb71-1" aria-hidden="true" tabindex="-1"></a>list_vendor_live_sync_sources() <span class="op">-&gt;</span> <span class="bu">dict</span>[<span class="bu">str</span>, <span class="bu">object</span>]</span></code></pre></div>
+<p><strong>POST
+<code>/vendor-live-sync/sources/{source_id}/cursor-reset</code></strong>
+— handler <code>reset_vendor_live_sync_cursor</code>, line 2398.
+Declared router prefix included.</p>
+<div class="sourceCode" id="cb72"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb72-1"><a href="#cb72-1" aria-hidden="true" tabindex="-1"></a>reset_vendor_live_sync_cursor(source_id: <span class="bu">str</span>, payload: VendorSyncCursorReset) <span class="op">-&gt;</span> <span class="bu">dict</span>[<span class="bu">str</span>, <span class="bu">object</span>]</span></code></pre></div>
+<p>Direct handler refusals:
+<code>HTTPException(status_code=404, detail={'message': 'Vendor live-sync source not found.', 'fix': 'Create the source with POST /vendor-live-sync/sources before resetting its cursor.'})</code>.</p>
+<p><strong>POST
+<code>/vendor-live-sync/sources/{source_id}/run-log</code></strong> —
+handler <code>record_vendor_live_sync_run</code>, line 2431. Declared
+router prefix included.</p>
+<div class="sourceCode" id="cb73"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb73-1"><a href="#cb73-1" aria-hidden="true" tabindex="-1"></a>record_vendor_live_sync_run(source_id: <span class="bu">str</span>, payload: VendorSyncRunRecordCreate) <span class="op">-&gt;</span> <span class="bu">dict</span></span></code></pre></div>
+<p>Direct handler refusals:
+<code>HTTPException(status_code=404, detail={'message': 'Vendor live-sync source not found.', 'fix': 'Create the source with POST /vendor-live-sync/sources before recording a run outcome.'})</code>.</p>
+<p><strong>GET
+<code>/vendor-live-sync/sources/{source_id}/run-log</code></strong> —
+handler <code>list_vendor_live_sync_runs</code>, line 2463. Declared
+router prefix included.</p>
+<div class="sourceCode" id="cb74"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb74-1"><a href="#cb74-1" aria-hidden="true" tabindex="-1"></a>list_vendor_live_sync_runs(source_id: <span class="bu">str</span>) <span class="op">-&gt;</span> <span class="bu">dict</span>[<span class="bu">str</span>, <span class="bu">object</span>]</span></code></pre></div>
+<p>Direct handler refusals:
+<code>HTTPException(status_code=404, detail={'message': 'Vendor live-sync source not found.', 'fix': 'Create the source with POST /vendor-live-sync/sources before viewing run history.'})</code>.</p>
+<p><strong>GET <code>/public/meetings</code></strong> — handler
+<code>public_meetings</code>, line 2484. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb75"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb75-1"><a href="#cb75-1" aria-hidden="true" tabindex="-1"></a>public_meetings() <span class="op">-&gt;</span> <span class="bu">dict</span>[<span class="bu">str</span>, <span class="bu">int</span> <span class="op">|</span> <span class="bu">list</span>[<span class="bu">dict</span>]]</span></code></pre></div>
+<p><strong>GET <code>/public/meetings/{record_id}</code></strong> —
+handler <code>public_meeting_detail</code>, line 2494. Declared router
+prefix included.</p>
+<div class="sourceCode" id="cb76"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb76-1"><a href="#cb76-1" aria-hidden="true" tabindex="-1"></a>public_meeting_detail(record_id: <span class="bu">str</span>) <span class="op">-&gt;</span> <span class="bu">dict</span></span></code></pre></div>
+<p>Direct handler refusals:
+<code>HTTPException(status_code=404, detail='Public meeting record not found.')</code>.</p>
+<p><strong>GET
+<code>/public/meetings/{record_id}/{document_kind}.txt</code></strong> —
+handler <code>public_meeting_download</code>, line 2503. Declared router
+prefix included.</p>
+<div class="sourceCode" id="cb77"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb77-1"><a href="#cb77-1" aria-hidden="true" tabindex="-1"></a>public_meeting_download(record_id: <span class="bu">str</span>, document_kind: <span class="bu">str</span>) <span class="op">-&gt;</span> Response</span></code></pre></div>
+<p>Direct handler refusals:
+<code>HTTPException(status_code=404, detail='Public meeting record not found.')</code>;
+<code>HTTPException(status_code=404, detail={'message': 'Public meeting document not found.', 'fix': 'Use agenda.txt, packet.txt, or minutes.txt from the public meeting detail response.'})</code>.</p>
+<p><strong>POST
+<code>/public/meetings/{record_id}/comments</code></strong> — handler
+<code>submit_public_comment</code>, line 2530. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb78"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb78-1"><a href="#cb78-1" aria-hidden="true" tabindex="-1"></a>submit_public_comment(record_id: <span class="bu">str</span>, payload: PublicCommentCreate) <span class="op">-&gt;</span> <span class="bu">dict</span></span></code></pre></div>
+<p>Direct handler refusals:
+<code>HTTPException(status_code=404, detail='Public meeting record not found.')</code>;
+<code>HTTPException(status_code=409, detail={'message': 'Public comment intake is closed for this meeting record.', 'fix': 'Contact the clerk for the official comment method or check the posted agenda for comment instructions.'})</code>.</p>
+<p><strong>GET
+<code>/public/meetings/{record_id}/comments</code></strong> — handler
+<code>list_public_comments</code>, line 2557. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb79"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb79-1"><a href="#cb79-1" aria-hidden="true" tabindex="-1"></a>list_public_comments(record_id: <span class="bu">str</span>) <span class="op">-&gt;</span> <span class="bu">dict</span>[<span class="bu">str</span>, <span class="bu">int</span> <span class="op">|</span> <span class="bu">list</span>[<span class="bu">dict</span>]]</span></code></pre></div>
+<p>Direct handler refusals:
+<code>HTTPException(status_code=404, detail='Public meeting record not found.')</code>.</p>
+<p><strong>GET <code>/public-comments/review-queue</code></strong> —
+handler <code>list_public_comment_review_queue</code>, line 2567.
+Declared router prefix included.</p>
+<div class="sourceCode" id="cb80"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb80-1"><a href="#cb80-1" aria-hidden="true" tabindex="-1"></a>list_public_comment_review_queue() <span class="op">-&gt;</span> <span class="bu">dict</span>[<span class="bu">str</span>, <span class="bu">object</span>]</span></code></pre></div>
+<p><strong>GET <code>/public/archive/search</code></strong> — handler
+<code>public_archive_search</code>, line 2580. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb81"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb81-1"><a href="#cb81-1" aria-hidden="true" tabindex="-1"></a>public_archive_search(q: <span class="bu">str</span>, credentials: HTTPAuthorizationCredentials <span class="op">|</span> <span class="va">None</span><span class="op">=</span>Depends(_archive_search_bearer)) <span class="op">-&gt;</span> <span class="bu">dict</span>[<span class="bu">str</span>, <span class="bu">int</span> <span class="op">|</span> <span class="bu">list</span>[<span class="bu">dict</span>]]</span></code></pre></div>
+<h3 id="meetings_bridge.py">meetings_bridge.py</h3>
+<p>Candidate source:
+<code>installed-owned-source/civicsuite_runtime/meetings_bridge.py</code>.</p>
+<p><strong>POST
+<code>/desktop/v1/meetings/meetings/{meeting_id}/stages</code></strong>
+— handler <code>record_meeting_stage</code>, line 106. Declared router
+prefix included.</p>
+<div class="sourceCode" id="cb82"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb82-1"><a href="#cb82-1" aria-hidden="true" tabindex="-1"></a>record_meeting_stage(meeting_id: UUID, data: MeetingStageInput, actor_id: <span class="bu">str</span><span class="op">=</span>Depends(actor))</span></code></pre></div>
+<p><strong>POST <code>/desktop/v1/meetings/meetings</code></strong> —
+handler <code>create_meeting</code>, line 128. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb83"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb83-1"><a href="#cb83-1" aria-hidden="true" tabindex="-1"></a>create_meeting(data: MeetingInput, actor_id: <span class="bu">str</span><span class="op">=</span>Depends(actor))</span></code></pre></div>
+<p><strong>GET
+<code>/desktop/v1/meetings/meetings/{meeting_id}</code></strong> —
+handler <code>get_meeting</code>, line 136. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb84"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb84-1"><a href="#cb84-1" aria-hidden="true" tabindex="-1"></a>get_meeting(meeting_id: UUID, actor_id: <span class="bu">str</span><span class="op">=</span>Depends(actor))</span></code></pre></div>
+<p><strong>POST <code>/desktop/v1/meetings/agenda-items</code></strong>
+— handler <code>create_agenda_item</code>, line 141. Declared router
+prefix included.</p>
+<div class="sourceCode" id="cb85"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb85-1"><a href="#cb85-1" aria-hidden="true" tabindex="-1"></a>create_agenda_item(data: AgendaInput, actor_id: <span class="bu">str</span><span class="op">=</span>Depends(actor))</span></code></pre></div>
+<p><strong>GET
+<code>/desktop/v1/meetings/agenda-items/{item_id}</code></strong> —
+handler <code>get_agenda_item</code>, line 148. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb86"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb86-1"><a href="#cb86-1" aria-hidden="true" tabindex="-1"></a>get_agenda_item(item_id: UUID, actor_id: <span class="bu">str</span><span class="op">=</span>Depends(actor))</span></code></pre></div>
+<p><strong>POST
+<code>/desktop/v1/meetings/agenda-items/{item_id}/reviews</code></strong>
+— handler <code>record_agenda_review</code>, line 164. Declared router
+prefix included.</p>
+<div class="sourceCode" id="cb87"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb87-1"><a href="#cb87-1" aria-hidden="true" tabindex="-1"></a>record_agenda_review(item_id: UUID, data: AgendaReviewInput, actor_id: <span class="bu">str</span><span class="op">=</span>Depends(actor))</span></code></pre></div>
+<p><strong>POST
+<code>/desktop/v1/meetings/agenda-items/{item_id}/meeting</code></strong>
+— handler <code>assign_agenda</code>, line 170. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb88"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb88-1"><a href="#cb88-1" aria-hidden="true" tabindex="-1"></a>assign_agenda(item_id: UUID, data: AgendaAssignment, actor_id: <span class="bu">str</span><span class="op">=</span>Depends(actor))</span></code></pre></div>
+<p>Direct handler refusals:
+<code>HTTPException(409, str(error))</code>.</p>
+<p><strong>GET
+<code>/desktop/v1/meetings/notices/{notice_id}/template</code></strong>
+— handler <code>notice_template</code>, line 249. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb89"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb89-1"><a href="#cb89-1" aria-hidden="true" tabindex="-1"></a>notice_template(notice_id: UUID, actor_id: <span class="bu">str</span><span class="op">=</span>Depends(actor))</span></code></pre></div>
+<p><strong>POST
+<code>/desktop/v1/meetings/notices/{notice_id}/document</code></strong>
+— handler <code>notice_document</code>, line 264. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb90"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb90-1"><a href="#cb90-1" aria-hidden="true" tabindex="-1"></a>notice_document(notice_id: UUID, data: NoticeDocumentInput, actor_id: <span class="bu">str</span><span class="op">=</span>Depends(actor))</span></code></pre></div>
+<p>Direct handler refusals:
+<code>HTTPException(404, 'Notice not found.')</code>;
+<code>HTTPException(422, 'Notice delivery not confirmed; existing documents were retained.')</code>;
+<code>HTTPException(503, 'Notice history write not confirmed; read saved work before retrying.')</code>.</p>
+<p><strong>POST
+<code>/desktop/v1/meetings/meetings/{meeting_id}/notice-checks</code></strong>
+— handler <code>check_notice</code>, line 278. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb91"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb91-1"><a href="#cb91-1" aria-hidden="true" tabindex="-1"></a>check_notice(meeting_id: UUID, data: NoticeInput, actor_id: <span class="bu">str</span><span class="op">=</span>Depends(actor))</span></code></pre></div>
+<p>Direct handler refusals:
+<code>HTTPException(422, 'A scheduled start is needed to calculate a notice deadline.')</code>.</p>
+<p><strong>POST
+<code>/desktop/v1/meetings/notices/{notice_id}/proof</code></strong> —
+handler <code>record_notice_proof</code>, line 295. Declared router
+prefix included.</p>
+<div class="sourceCode" id="cb92"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb92-1"><a href="#cb92-1" aria-hidden="true" tabindex="-1"></a>record_notice_proof(notice_id: UUID, data: NoticeProofInput, actor_id: <span class="bu">str</span><span class="op">=</span>Depends(actor))</span></code></pre></div>
+<p>Direct handler refusals:
+<code>HTTPException(422, str(error))</code>.</p>
+<p><strong>POST
+<code>/desktop/v1/meetings/meetings/{meeting_id}/transcripts</code></strong>
+— handler <code>capture_transcript</code>, line 332. Declared router
+prefix included.</p>
+<div class="sourceCode" id="cb93"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb93-1"><a href="#cb93-1" aria-hidden="true" tabindex="-1"></a>capture_transcript(meeting_id: UUID, data: TranscriptInput, actor_id: <span class="bu">str</span><span class="op">=</span>Depends(actor))</span></code></pre></div>
+<p>Direct handler refusals:
+<code>HTTPException(422, str(error))</code>.</p>
+<p><strong>POST
+<code>/desktop/v1/meetings/meetings/{meeting_id}/action-items</code></strong>
+— handler <code>capture_action_item</code>, line 344. Declared router
+prefix included.</p>
+<div class="sourceCode" id="cb94"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb94-1"><a href="#cb94-1" aria-hidden="true" tabindex="-1"></a>capture_action_item(meeting_id: UUID, data: ActionItemInput, actor_id: <span class="bu">str</span><span class="op">=</span>Depends(actor))</span></code></pre></div>
+<p>Direct handler refusals:
+<code>HTTPException(422, 'Motion belongs to another meeting.')</code>.</p>
+<p><strong>POST
+<code>/desktop/v1/meetings/meetings/{meeting_id}/archive</code></strong>
+— handler <code>archive_meeting</code>, line 356. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb95"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb95-1"><a href="#cb95-1" aria-hidden="true" tabindex="-1"></a>archive_meeting(meeting_id: UUID, data: ArchiveInput, actor_id: <span class="bu">str</span><span class="op">=</span>Depends(actor))</span></code></pre></div>
+<p>Direct handler refusals:
+<code>HTTPException(422, 'Packet belongs to another meeting.')</code>;
+<code>HTTPException(422, 'Minutes belong to another meeting.')</code>.</p>
+<p><strong>GET <code>/public/meetings</code></strong> — handler
+<code>public_archive_index</code>, line 399. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb96"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb96-1"><a href="#cb96-1" aria-hidden="true" tabindex="-1"></a>public_archive_index(q: <span class="bu">str</span><span class="op">=</span><span class="st">&#39;&#39;</span>)</span></code></pre></div>
+<p><strong>GET <code>/public/meetings/{record_id}</code></strong> —
+handler <code>public_archive_detail</code>, line 407. Declared router
+prefix included.</p>
+<div class="sourceCode" id="cb97"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb97-1"><a href="#cb97-1" aria-hidden="true" tabindex="-1"></a>public_archive_detail(record_id: UUID)</span></code></pre></div>
+<p><strong>GET
+<code>/public/meetings/{record_id}/{kind}.txt</code></strong> — handler
+<code>public_archive_download</code>, line 417. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb98"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb98-1"><a href="#cb98-1" aria-hidden="true" tabindex="-1"></a>public_archive_download(record_id: UUID, kind: Literal[<span class="st">&#39;agenda&#39;</span>, <span class="st">&#39;packet&#39;</span>, <span class="st">&#39;minutes&#39;</span>])</span></code></pre></div>
+<p><strong>POST
+<code>/desktop/v1/meetings/meetings/{meeting_id}/packet-snapshots</code></strong>
+— handler <code>capture_packet</code>, line 441. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb99"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb99-1"><a href="#cb99-1" aria-hidden="true" tabindex="-1"></a>capture_packet(meeting_id: UUID, data: PacketInput, actor_id: <span class="bu">str</span><span class="op">=</span>Depends(actor))</span></code></pre></div>
+<p>Direct handler refusals:
+<code>HTTPException(422, str(error))</code>.</p>
+<p><strong>POST
+<code>/desktop/v1/meetings/packets/{packet_id}/deliver</code></strong> —
+handler <code>export_packet</code>, line 462. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb100"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb100-1"><a href="#cb100-1" aria-hidden="true" tabindex="-1"></a>export_packet(packet_id: UUID, actor_id: <span class="bu">str</span><span class="op">=</span>Depends(actor))</span></code></pre></div>
+<p>Direct handler refusals:
+<code>HTTPException(404, 'Packet not found.')</code>;
+<code>HTTPException(422, str(error))</code>;
+<code>HTTPException(503, 'Packet delivery not confirmed. Inspect saved work before retrying.')</code>.</p>
+<p><strong>POST
+<code>/desktop/v1/meetings/minutes/{draft_id}/decisions</code></strong>
+— handler <code>decide_minutes</code>, line 475. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb101"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb101-1"><a href="#cb101-1" aria-hidden="true" tabindex="-1"></a>decide_minutes(draft_id: UUID, data: MinutesDecision, actor_id: <span class="bu">str</span><span class="op">=</span>Depends(actor))</span></code></pre></div>
+<p><strong>POST
+<code>/desktop/v1/meetings/meetings/{meeting_id}/motions</code></strong>
+— handler <code>capture_motion</code>, line 498. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb102"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb102-1"><a href="#cb102-1" aria-hidden="true" tabindex="-1"></a>capture_motion(meeting_id: UUID, data: MotionInput, actor_id: <span class="bu">str</span><span class="op">=</span>Depends(actor))</span></code></pre></div>
+<p><strong>POST
+<code>/desktop/v1/meetings/motions/{motion_id}/corrections</code></strong>
+— handler <code>correct_motion</code>, line 505. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb103"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb103-1"><a href="#cb103-1" aria-hidden="true" tabindex="-1"></a>correct_motion(motion_id: UUID, data: MotionCorrection, actor_id: <span class="bu">str</span><span class="op">=</span>Depends(actor))</span></code></pre></div>
+<p><strong>POST
+<code>/desktop/v1/meetings/motions/{motion_id}/votes</code></strong> —
+handler <code>capture_vote</code>, line 511. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb104"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb104-1"><a href="#cb104-1" aria-hidden="true" tabindex="-1"></a>capture_vote(motion_id: UUID, data: VoteInput, actor_id: <span class="bu">str</span><span class="op">=</span>Depends(actor))</span></code></pre></div>
+<p><strong>POST
+<code>/desktop/v1/meetings/votes/{vote_id}/corrections</code></strong> —
+handler <code>correct_vote</code>, line 517. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb105"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb105-1"><a href="#cb105-1" aria-hidden="true" tabindex="-1"></a>correct_vote(vote_id: UUID, data: VoteCorrection, actor_id: <span class="bu">str</span><span class="op">=</span>Depends(actor))</span></code></pre></div>
+<p><strong>POST
+<code>/desktop/v1/meetings/meetings/{meeting_id}/minutes/drafts</code></strong>
+— handler <code>create_minutes</code>, line 523. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb106"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb106-1"><a href="#cb106-1" aria-hidden="true" tabindex="-1"></a>create_minutes(meeting_id: UUID, data: DraftInput, actor_id: <span class="bu">str</span><span class="op">=</span>Depends(actor))</span></code></pre></div>
+<p><strong>GET
+<code>/desktop/v1/meetings/meetings/{meeting_id}/proceedings</code></strong>
+— handler <code>proceedings</code>, line 532. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb107"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb107-1"><a href="#cb107-1" aria-hidden="true" tabindex="-1"></a>proceedings(meeting_id: UUID, actor_id: <span class="bu">str</span><span class="op">=</span>Depends(actor))</span></code></pre></div>
+<p><strong>GET
+<code>/desktop/v1/meetings/station/catalog</code></strong> — handler
+<code>station_catalog</code>, line 552. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb108"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb108-1"><a href="#cb108-1" aria-hidden="true" tabindex="-1"></a>station_catalog(actor_id: <span class="bu">str</span><span class="op">=</span>Depends(actor))</span></code></pre></div>
+<h2 id="alphabetical-contract-index">Alphabetical contract index</h2>
+<ul>
+<li><p><strong>ActionItemInput</strong> — request/response data
+dictionary.</p></li>
+<li><p><strong>AgendaAssignment</strong> — request/response data
+dictionary.</p></li>
+<li><p><strong>AgendaInput</strong> — request/response data
+dictionary.</p></li>
+<li><p><strong>AgendaReviewInput</strong> — request/response data
+dictionary.</p></li>
+<li><p><strong>ArchiveInput</strong> — request/response data
+dictionary.</p></li>
+<li><p><strong>Decision</strong> — request/response data
+dictionary.</p></li>
+<li><p><strong>DraftInput</strong> — request/response data
+dictionary.</p></li>
+<li><p><strong>HTTPValidationError</strong> — request/response data
+dictionary.</p></li>
+<li><p><strong>ManagedSource</strong> — request/response data
+dictionary.</p></li>
+<li><p><strong>MeetingInput</strong> — request/response data
+dictionary.</p></li>
+<li><p><strong>MeetingStageInput</strong> — request/response data
+dictionary.</p></li>
+<li><p><strong>MinutesDecision</strong> — request/response data
+dictionary.</p></li>
+<li><p><strong>MotionCorrection</strong> — request/response data
+dictionary.</p></li>
+<li><p><strong>MotionInput</strong> — request/response data
+dictionary.</p></li>
+<li><p><strong>NoticeDocumentInput</strong> — request/response data
+dictionary.</p></li>
+<li><p><strong>NoticeInput</strong> — request/response data
+dictionary.</p></li>
+<li><p><strong>NoticeProofInput</strong> — request/response data
+dictionary.</p></li>
+<li><p><strong>PacketInput</strong> — request/response data
+dictionary.</p></li>
+<li><p><strong>SentenceInput</strong> — request/response data
+dictionary.</p></li>
+<li><p><strong>SourceInput</strong> — request/response data
+dictionary.</p></li>
+<li><p><strong>TranscriptInput</strong> — request/response data
+dictionary.</p></li>
+<li><p><strong>ValidationError</strong> — request/response data
+dictionary.</p></li>
+<li><p><strong>VoteCorrection</strong> — request/response data
+dictionary.</p></li>
+<li><p><strong>VoteInput</strong> — request/response data
+dictionary.</p></li>
+<li><p>Authentication: Origins and authentication.</p></li>
+<li><p>Conflicts and retry: Failure and retry contract.</p></li>
+<li><p>Fields and validation: Request and response data
+dictionary.</p></li>
+<li><p>HTTP operations: Installed desktop HTTP operations.</p></li>
+<li><p>Standalone boundaries: Source route and validation
+supplement.</p></li>
+</ul>
+<section id="footnotes" class="footnotes footnotes-end-of-document"
+role="doc-endnotes">
+<hr />
+<ol>
+<li id="fn1"><p>A-Za-z0-9_-<a href="#fnref1" class="footnote-back"
+role="doc-backlink">↩︎</a></p></li>
+<li id="fn2"><p>A-Za-z0-9_-<a href="#fnref2" class="footnote-back"
+role="doc-backlink">↩︎</a></p></li>
+<li id="fn3"><p>A-Za-z0-9_-<a href="#fnref3" class="footnote-back"
+role="doc-backlink">↩︎</a></p></li>
+<li id="fn4"><p>A-Za-z0-9_-<a href="#fnref4" class="footnote-back"
+role="doc-backlink">↩︎</a></p></li>
+<li id="fn5"><p>0-9a-f<a href="#fnref5" class="footnote-back"
+role="doc-backlink">↩︎</a></p></li>
+</ol>
+</section></article></div></main><footer><span>Townlight Beta 1 · Townlight Beta 1 documentation · AGPL-3.0-only</span><span><a href="../versions.html">Exact versions and candidate</a> · CivicCast remains separate</span></footer>
+<script>const search=document.getElementById('find-section');if(search)search.addEventListener('input',()=>{const q=search.value.toLowerCase();let n=0;document.querySelectorAll('.toc li').forEach(li=>{const match=li.textContent.toLowerCase().includes(q);li.hidden=!match;if(match)n++;});document.querySelector('.search-status').textContent=q?n+' matching entries':'';});</script></body></html>

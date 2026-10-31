@@ -15,6 +15,7 @@ function App(){
  const [meeting,setMeeting]=useState(''),[agenda,setAgenda]=useState<string[]>([]),[source,setSource]=useState(''),[busy,setBusy]=useState(false);
  const [sourceFile,setSourceFile]=useState(''),[captionsFile,setCaptionsFile]=useState(''),[startsAt,setStartsAt]=useState('');
  const [onAirSource,setOnAirSource]=useState(''),[reason,setReason]=useState('');
+ const [feeds,setFeeds]=useState<any[]>([]),[feed,setFeed]=useState(''),[uploads,setUploads]=useState<any[]>([]);
  const pending=useRef<any>(null), refreshing=useRef(false);
  const tell=(text:string,bad=false)=>{setMessage(text);setError(bad);};
  const fail=(e:any)=>{tell(e.message,true);if(e.status===401)setConnected(false);};
@@ -33,18 +34,19 @@ function App(){
    const views=await Promise.all([api('/v1/recordings'),api('/v1/schedules'),api('/v1/playouts'),api('/v1/on-air')]);
    replace('records',views[0],setRecords);replace('schedules',views[1],setSchedules);
    replace('playouts',views[2],setPlayouts);replace('air',views[3],setAir);
+   const deliveries=await api('/v1/youtube-uploads');setUploads(deliveries);
   }catch(e){fail(e);}finally{refreshing.current=false;}
  }
  useEffect(()=>{let alive=true;(async()=>{try{
  const ticket=new URLSearchParams(location.hash.slice(1)).get('ticket');history.replaceState(null,'',location.pathname);
  if(ticket)await api('/operator/session',{ticket});await api('/v1/identity');const data=await api('/operator/catalog');
- if(!alive)return;setCatalog(data);if(data.can_capture){const inputs=await api('/v1/live-sources');setSources(inputs);setSource(inputs[0]?.id||'');setOnAirSource(inputs[0]?.id||'');}
+ if(!alive)return;setCatalog(data);if(data.can_capture){const inputs=await api('/v1/live-sources');setSources(inputs);setFeeds(await api("/v1/civiccast-feeds"));setSource(inputs[0]?.id||'');setOnAirSource(inputs[0]?.id||'');}
  setConnected(true);tell(data.can_capture?'Select a meeting and live input to begin.':'Select a completed recording and Records request.');
  await refresh();
  }catch(e){fail(e);}})();return()=>{alive=false;};},[]);
  useEffect(()=>{if(!connected)return;const timer=setInterval(refresh,2000);return()=>clearInterval(timer);},[connected]);
  async function start(e:React.FormEvent){e.preventDefault();if(busy)return;setBusy(true);try{
- const values={meeting_id:meeting,agenda_ids:agenda,live_source_id:source};
+ const values={meeting_id:meeting,agenda_ids:agenda,live_source_id:source,civiccast_feed_id:feed||null};
  if(!pending.current||JSON.stringify(pending.current.values)!==JSON.stringify(values))pending.current={values,key:crypto.randomUUID()};
  await api('/v1/recordings',{...values,idempotency_key:pending.current.key});pending.current=null;tell('Recording accepted. Watch its status below.');await refresh();
  }catch(e){fail(e);}finally{setBusy(false);}}
@@ -70,7 +72,7 @@ function App(){
  {!sources.length&&<p>No live input configured. Ask your Station administrator to configure the chamber feed.</p>}</section>}
  {connected&&catalog?.can_capture&&<section id="capture"><h2>Record a meeting</h2><p>Select the meeting and chamber feed. Recordings remain private for Records review.</p>
  <form id="capture-form" onSubmit={start}><label>Meeting<select id="meeting-id" required value={meeting} onChange={e=>{setMeeting(e.target.value);setAgenda([]);}}><option value="">Choose a meeting</option>{catalog.meetings.map(m=><option key={m.id} value={m.id}>{m.title}</option>)}</select></label>
- <label>Live input<select id="source" required value={source} onChange={e=>setSource(e.target.value)}>{sources.map(s=><option key={s.id} value={s.id}>{s.label}</option>)}</select></label><button id="start" disabled={!meeting||!source||active||busy}>Start recording</button></form>
+ <label>Live input<select id="source" required value={source} onChange={e=>setSource(e.target.value)}>{sources.map(s=><option key={s.id} value={s.id}>{s.label}</option>)}</select></label><label>CivicCast live feed<select id="civiccast-feed" value={feed} onChange={e=>setFeed(e.target.value)}><option value="">Recording only</option>{feeds.map(f=><option key={f.id} value={f.id}>{f.label}</option>)}</select></label><button id="start" disabled={!meeting||!source||active||busy}>Start recording</button></form>
  {catalog.agenda.filter(a=>a.meeting_id===meeting).map(a=><label className="agenda-choice" key={a.id}><input type="checkbox" checked={agenda.includes(a.id)} onChange={e=>setAgenda(e.target.checked?[...agenda,a.id]:agenda.filter(id=>id!==a.id))}/>{a.title}</label>)}
  {!sources.length&&<p>No live input configured. Ask your Station administrator to configure the chamber feed.</p>}
  <p>Automatic stop after {Math.round(catalog.max_seconds/60*10)/10} minutes. Start another recording if the meeting continues.</p></section>}
@@ -87,7 +89,7 @@ function App(){
  {s.status==='scheduled'&&<button disabled={busy} onClick={()=>act('cancel',`/v1/schedules/${s.id}/cancel`,{},'Schedule cancelled; it will not start.')}>Cancel schedule</button>}
  {s.status==='dispatched'&&s.details?.recording_id&&<p>Recording {s.details.recording_id}</p>}</article>)}</section>}
  {connected&&<section id="recordings"><div className="section-heading"><h2>Recordings</h2><button onClick={refresh}>Refresh</button></div><p>Status updates automatically. Stop finishes and verifies media before Records can accept it.</p>
- {!records.length&&<p>No recordings yet.</p>}{records.map(r=><Recording key={r.id} record={r} catalog={catalog!} stop={stop} attach={attach} play={play} busy={busy}/>)}</section>}
+ {!records.length&&<p>No recordings yet.</p>}{records.map(r=><Recording key={r.id} record={r} catalog={catalog!} stop={stop} attach={attach} play={play} busy={busy} uploads={uploads.filter(u=>u.recording_id===r.id)} upload={(body:any)=>act("upload",`/v1/recordings/${r.id}/youtube`,body,"YouTube upload queued. Watch its receipt below.")}/>)}</section>}
  {connected&&<section id="playouts"><div className="section-heading"><h2>Playout and playback</h2><button onClick={refresh}>Refresh</button></div>
  <p>A playout renders a completed recording for broadcast. Nothing becomes public until a supervisor approves it and a staff member explicitly publishes it; publication packages the program into a browser-playable MP4 (with the supplied captions as a WebVTT track).</p>
  {!playouts.length&&<p>No playouts yet.</p>}
@@ -107,15 +109,24 @@ function App(){
  </>}</article>)}</section>}
  </main><footer>Townlight Station · AGPL 3.0 · Private staff evidence</footer></>;
 }
-function Recording({record:r,catalog,stop,attach,play,busy}:{record:any;catalog:Catalog;stop:(id:string)=>Promise<void>;attach:(id:string,hash:string,request:string)=>Promise<void>;play:(id:string,mode:string,busy:boolean)=>void;busy:boolean}){
+function Recording({record:r,catalog,stop,attach,play,busy,uploads,upload}:{record:any;catalog:Catalog;stop:(id:string)=>Promise<void>;attach:(id:string,hash:string,request:string)=>Promise<void>;play:(id:string,mode:string,busy:boolean)=>void;busy:boolean;uploads:any[];upload:(body:any)=>Promise<void>}){
+ const uploadKey=useRef(crypto.randomUUID());
  const [request,setRequest]=useState(''),[local,setLocal]=useState(false);
  const status=r.control.stop_requested_at&&['queued','running'].includes(r.status)?'Stopping — finishing and verifying media':r.status==='running'?(r.live_progress?.bytes_written>0?'Recording live feed':'Starting — waiting for live input'):r.status;
  return <article data-id={r.id}><h3>{r.details.meeting.title}</h3><p className="status">{status}</p>
  {r.status==='running'&&r.live_progress?.bytes_written>0&&<p>{(r.live_progress.bytes_written/1048576).toFixed(2)} MiB captured</p>}
  {catalog.can_capture&&r.details.live_source&&['queued','running'].includes(r.status)&&<button disabled={busy||local||!!r.control.stop_requested_at} onClick={async()=>{setLocal(true);try{await stop(r.id);}finally{setLocal(false);}}}>Stop recording</button>}
  {['failed','interrupted'].includes(r.status)&&<p>Recording did not complete. Partial evidence is retained. Start a new live recording; missing live time cannot be recovered.</p>}
+ {r.details.civiccast_delivery&&<p data-feed-status={r.details.civiccast_delivery.state}>CivicCast feed: {r.details.civiccast_delivery.state} - {r.details.civiccast_delivery.bytes_sent||0} bytes sent. CivicCast's operator controls cable broadcast.</p>}
  {r.status==='complete'&&<><p>{r.details.duration_seconds.toFixed(1)} seconds · {(r.details.size_bytes/1048576).toFixed(2)} MiB · Verified private evidence</p>
  {catalog.can_capture&&<div className="section-heading"><button disabled={busy} onClick={()=>play(r.id,'dry-run',busy)}>Check playout</button><button id="commit-to-air" disabled={busy} onClick={()=>play(r.id,'commit',busy)}>Commit to air</button></div>}
+ {catalog.can_capture&&!uploads.length&&<form className="youtube-upload" onSubmit={e=>{e.preventDefault();const form=new FormData(e.currentTarget);upload({title:form.get('title'),privacy:form.get('privacy'),approval_note:form.get('approval_note'),idempotency_key:uploadKey.current});}}>
+ <h4>Upload completed recording to YouTube</h4><p>This sends a copy to the configured Station YouTube account. The private Records copy stays intact.</p>
+ <label>Video title<input name="title" required maxLength={100} defaultValue={r.details.meeting.title.slice(0,100)}/></label>
+ <label>YouTube visibility<select name="privacy" defaultValue="private"><option value="private">Private</option><option value="unlisted">Unlisted</option><option value="public">Public</option></select></label>
+ <label>Approval note<input name="approval_note" required minLength={3} maxLength={500}/></label>
+ <button disabled={busy}>Upload to YouTube</button></form>}
+ {uploads.map(u=><p key={u.id} data-upload-status={u.status}>YouTube: {u.status} ({u.details.privacy}) {u.details.video_id&&<a href={`https://www.youtube.com/watch?v=${u.details.video_id}`} target="_blank" rel="noreferrer">Open video</a>}{u.status==='needs-reconciliation'&&' - Check YouTube Studio before another upload; Station will not automatically retry.'}{u.status==='failed'&&' - Preparation failed. Administrator review required.'}</p>)}
  {catalog.can_attach?<form onSubmit={async e=>{e.preventDefault();setLocal(true);try{await attach(r.id,r.details.sha256,request);}finally{setLocal(false);}}}><label>Records request<select aria-label="Records request" required value={request} onChange={e=>setRequest(e.target.value)}><option value="">Choose a request</option>{catalog.requests.map(q=><option key={q.id} value={q.id}>{q.summary}</option>)}</select></label><button disabled={!request||busy||local}>Attach privately to Records</button></form>:<p>Records staff can attach this recording after opening Station with their own Townlight session.</p>}<p>This does not publish or approve disclosure.</p></>}
  <details><summary>Evidence reference</summary><p>{r.id}</p>{r.details.sha256&&<p>SHA-256: {r.details.sha256}</p>}</details></article>;
 }

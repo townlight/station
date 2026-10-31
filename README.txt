@@ -1,8 +1,8 @@
-> **Townlight Beta 1 release:** [signed Windows installer, exact owned source, documentation and acceptance](https://github.com/townlight/townlight/releases/tag/townlight-beta-1). [Online manual](https://townlight.github.io/manuals/station.html). This retained manual edition describes the accepted candidate before publication; distribution has changed, component versions and signed bytes have not.
-
-The suite implementation is in `beta-1/`. The pre-existing Rust kernel is a separate development line and is not shipped in this suite MSI. See [the accepted boundary decision](docs/architecture/townlight-beta-1-boundary.md).
+> **Townlight Beta 1 — Station delivery update, 31 October 2026.** [Signed Windows installer, source, documentation and acceptance](https://github.com/townlight/townlight/releases/tag/townlight-beta-1-station-delivery). This edition documents the Sandbox-tested Station delivery additions. Existing component versions are retained. Earlier baseline results remain identified as historical evidence; the new acceptance report identifies the new installer.
 
 # Townlight Station
+
+The accepted suite implementation is in `beta-1/`. The existing Rust kernel remains a separate development line, as described in [the accepted boundary decision](docs/architecture/townlight-beta-1-boundary.md).
 
 **Townlight Beta 1** · Existing component versions retained · AGPL-3.0-only
 
@@ -10,11 +10,11 @@ Station adapts a pinned CivicCast media implementation into an independent Townl
 
 ## Start here
 
-Staff should use the operating manual. Administrators should read first-run, configuration and recovery before changing a deployment. Developers should read the exact API/schema reference and matching source companion. This edition accompanies Townlight Beta 1; use the release link above for the signed candidate and exact source/documentation archives.
+Staff should use the operating manual. Administrators should read first-run, configuration and recovery before changing a deployment. Developers should read the exact API/schema reference and matching source companion. This edition accompanies the [published Station delivery update](https://github.com/townlight/townlight/releases/tag/townlight-beta-1-station-delivery).
 
-- [Operating manual](docs/beta-1/manuals/station.html) · [Printable PDF](docs/beta-1/pdf/Townlight-Station-Manual-Beta-1.pdf) · [Editable Word manual](docs/beta-1/docx/Townlight-Station-Manual-Beta-1.docx)
-- [API and data dictionary](docs/beta-1/api/station.html) · [OpenAPI JSON](docs/beta-1/api/station-openapi.json)
-- [Product and suite directory](docs/beta-1/index.html) · [Terms and full license](docs/beta-1/terms.html)
+- [Operating manual](https://townlight.github.io/manuals/station.html) · [Printable PDF](https://townlight.github.io/pdf/Townlight-Station-Manual-Beta-1.pdf) · [Editable Word manual](https://townlight.github.io/docx/Townlight-Station-Manual-Beta-1.docx)
+- [API and data dictionary](https://townlight.github.io/api/station.html) · [OpenAPI JSON](https://townlight.github.io/api/station-openapi.json)
+- [Product and suite directory](https://townlight.github.io/index.html) · [Terms and full license](https://townlight.github.io/terms.html)
 
 ## Exact version and candidate
 
@@ -24,13 +24,13 @@ Staff should use the operating manual. Administrators should read first-run, con
 | Installer version | 1.6.0.1 |
 | Product component | townlight-station 0.3.0 |
 | Native desktop source version | 1.6.0-1 |
-| Candidate MSI SHA256 | `98bcdef11ebdf5c767f620c904ff49f85115fde3b5c23f62703b111e645aaf86` |
-| Corresponding-source SHA256 | `84a23e1297e42d17b16cfc9e51b2dd78bc46414c0de8ad7ebd2466c1a409d06b` |
+| Candidate artifact identity | Station delivery update; use the release SHA256SUMS.txt |
+| Corresponding source | Updated Station delivery candidate source companion |
 | Current owned software license | AGPL-3.0-only |
 | Supported acceptance profile | Windows x64 fresh install; inspections-preview; separate Station configuration |
 
 
-“Townlight Beta 1” identifies this coordinated beta delivery. It does not renumber the installer, native binary, Python packages or historical receipts. Component versions may differ. This documentation is a later companion to unchanged signed bytes, not a rebuilt installer. Historical release pages and manuals describe their own versions and are not the download instructions for this private candidate.
+“Townlight Beta 1” identifies this coordinated beta delivery. It does not renumber the installer, native binary, Python packages or historical receipts. Component versions may differ. This edition accompanies the newly packaged and signed MSI containing the Station delivery additions. The native desktop and other native payload files retain their accepted signed bytes. Historical release pages and manuals describe their own versions and are not the download instructions for this Station delivery candidate.
 
 ## What staff can do
 
@@ -47,19 +47,19 @@ Staff should use the operating manual. Administrators should read first-run, con
 
 The operating manual now includes these existing procedures, with synthetic inputs, readback and limits. Follow the actual app boundary identified there; a standalone source capability is not automatically a desktop screen.
 
-- [Scheduling playout and recovery](docs/beta-1/manuals/station.html#scheduling-playout-and-recovery).
-- [Schedule a recording and interpret its state](docs/beta-1/manuals/station.html#schedule-a-recording-and-interpret-its-state).
-- [Apply the caption profile](docs/beta-1/manuals/station.html#apply-the-caption-profile).
-- [Check playout and commit deliberately](docs/beta-1/manuals/station.html#check-playout-and-commit-deliberately).
-- [Take a live override and return](docs/beta-1/manuals/station.html#take-a-live-override-and-return).
-- [Approve and publish local playback](docs/beta-1/manuals/station.html#approve-and-publish-local-playback).
-- [Recover without replaying unknown work](docs/beta-1/manuals/station.html#recover-without-replaying-unknown-work).
-- [Prepare the normally activated synthetic profile](docs/beta-1/manuals/station.html#prepare-the-normally-activated-synthetic-profile).
-- [Store the independent test configuration](docs/beta-1/manuals/station.html#store-the-independent-test-configuration).
-- [Provision the Station database once](docs/beta-1/manuals/station.html#provision-the-station-database-once).
-- [Start and check the paired processes](docs/beta-1/manuals/station.html#start-and-check-the-paired-processes).
-- [Configure a live input and open the operator](docs/beta-1/manuals/station.html#configure-a-live-input-and-open-the-operator).
-- [Bounds and shutdown](docs/beta-1/manuals/station.html#bounds-and-shutdown).
+- [Scheduling playout and recovery](https://townlight.github.io/manuals/station.html#scheduling-playout-and-recovery).
+- [Schedule a recording and interpret its state](https://townlight.github.io/manuals/station.html#schedule-a-recording-and-interpret-its-state).
+- [Apply the caption profile](https://townlight.github.io/manuals/station.html#apply-the-caption-profile).
+- [Check playout and commit deliberately](https://townlight.github.io/manuals/station.html#check-playout-and-commit-deliberately).
+- [Take a live override and return](https://townlight.github.io/manuals/station.html#take-a-live-override-and-return).
+- [Approve and publish local playback](https://townlight.github.io/manuals/station.html#approve-and-publish-local-playback).
+- [Recover without replaying unknown work](https://townlight.github.io/manuals/station.html#recover-without-replaying-unknown-work).
+- [Prepare the normally activated synthetic profile](https://townlight.github.io/manuals/station.html#prepare-the-normally-activated-synthetic-profile).
+- [Store the independent test configuration](https://townlight.github.io/manuals/station.html#store-the-independent-test-configuration).
+- [Provision the Station database once](https://townlight.github.io/manuals/station.html#provision-the-station-database-once).
+- [Start and check the paired processes](https://townlight.github.io/manuals/station.html#start-and-check-the-paired-processes).
+- [Configure a live input and open the operator](https://townlight.github.io/manuals/station.html#configure-a-live-input-and-open-the-operator).
+- [Bounds and shutdown](https://townlight.github.io/manuals/station.html#bounds-and-shutdown).
 
 ## Architecture and data
 
@@ -81,7 +81,7 @@ Versioned saves use expected prior revision identifiers where defined. Reopen an
 
 This beta has synthetic single-profile workflow evidence. It does not have a published benchmark for concurrent staff capacity, minimum RAM/CPU, large-source limits or a field SLA. Do not turn a developer machine’s specification into a supported minimum. Installer size is 2,092,122,112 bytes before installation; allow additional disk for extracted runtime, database, originals, exports, media and backups. Select equipment/storage after sizing those actual workloads.
 
-The exact [runtime payload lock](docs/beta-1/reference/runtime-payload-lock.json) records pinned files, sizes and hashes. The [component metadata](docs/beta-1/reference/component-metadata.json) records shipped dependency declarations. These references are more precise than a manually copied dependency list. Third-party and historical license notices must accompany their matching payloads.
+The exact [runtime payload lock](https://townlight.github.io/reference/runtime-payload-lock.json) records pinned files, sizes and hashes. The [component metadata](https://townlight.github.io/reference/component-metadata.json) records shipped dependency declarations. These references are more precise than a manually copied dependency list. Third-party and historical license notices must accompany their matching payloads.
 
 ### Station operator and media components
 
@@ -110,7 +110,7 @@ Recorded-file requests accept a managed ingest filename, optional SRT sidecar an
 
 ## Setup and operation
 
-1. Obtain the identified signed private candidate and its corresponding-source companion from the beta coordinator. The landing pages in this documentation are not an installer download service.
+1. Obtain the identified signed Station delivery candidate and its corresponding-source companion from the beta coordinator. The landing pages in this documentation are not an installer download service.
 2. On the intended fresh Windows test installation, verify the MSI hash and publisher signature before installing. Preserve unrelated profiles and recovery material. This candidate has fresh-install acceptance; historical in-place upgrades are unverified.
 3. Launch Townlight under the intended named Windows account. Choose the storage folders. Select **Townlight Inspections candidate** (`inspections-preview`) for all eight desktop products. A narrower default selection will not expose all workspaces.
 4. Enter the city profile, time zone and contacts. Create the first named local administrator, sign in and choose protected backup storage. **Continue without local AI** is valid for the deterministic workflows.
@@ -379,7 +379,7 @@ For a transcription client already provisioned separately, an illustrative tool 
 {"name":"get_job_status","arguments":{"job_id":"synthetic-existing-job-id"}}
 ```
 
-Use a job ID returned by that transcription service. This example does not create a Townlight record or bypass its review/Records handoff. The exact optional adapter tool signatures are supplied in the [MCP source reference](docs/beta-1/reference/mcp.html). Station meeting capture does not become live speech recognition because this optional donor adapter exists.
+Use a job ID returned by that transcription service. This example does not create a Townlight record or bypass its review/Records handoff. The exact optional adapter tool signatures are supplied in the [MCP source reference](https://townlight.github.io/reference/mcp.html). Station meeting capture does not become live speech recognition because this optional donor adapter exists.
 
 ## Verification and known limits
 
@@ -388,9 +388,9 @@ Use a job ID returned by that transcription service. This example does not creat
 | Station | PASS | Actual native staff session and normally created meeting; headless operator live start/stop, decoded generated audio/video, served hash, private Records readback, idempotent locked original and logout. |
 
 
-These results come from the identified signed candidate’s fresh normal-profile Sandbox exercise: real native IPC/HTTP/PostgreSQL and selected headless controls. All accounts, source bundles and media were synthetic. The guest install/uninstall and recovery passed, and the owned Sandbox stopped. No host installed application or standalone CivicCast was changed. This documentation task reuses those receipts; it does not claim a new software acceptance run.
+The following baseline results come from the previously accepted signed candidate’s fresh normal-profile Sandbox exercise: real native IPC/HTTP/PostgreSQL and selected headless controls. All accounts, source bundles and media were synthetic. The guest install/uninstall and recovery passed, and the owned Sandbox stopped. No host installed application or standalone CivicCast was changed. Those baseline receipts are retained for unchanged workflows. The accompanying ACCEPTANCE.md records the separate installed verification and exact identity of this new Station delivery candidate.
 
-The [workflow matrix](docs/beta-1/reference/workflow-matrix.json) identifies raw receipt filenames. The [evidence index](docs/beta-1/reference/sandbox-evidence-index.json) retains their original hashes; raw receipts remain in the private beta handoff rather than being silently republished with the documentation site.
+The [workflow matrix](https://townlight.github.io/reference/workflow-matrix.json) identifies raw receipt filenames. The [evidence index](https://townlight.github.io/reference/sandbox-evidence-index.json) retains their original hashes; raw receipts remain in the private beta handoff rather than being silently republished with the documentation site.
 
 The limits remain: actual city field acceptance and equipment/network commissioning; Station automatic provisioning/SCM commissioning; every UI/role combination; field recognition accuracy; and historical in-place upgrades are not certified. They are not five invented feature requirements. Fresh-install controlled beta handoff remains the accepted scope. This package makes no city-deployment, publication or general-availability claim.
 
@@ -425,6 +425,7 @@ On failure, record the time, selected composition, component/installer versions 
 
 Current owned code is AGPL-3.0-only. Preserve full license, matching corresponding source, dependency notices and historical grants. Terms of use do not remove license rights. Source imports do not confer permission to publish third-party material. Review all automatic drafts and use the separate owning-product decision before official action. CivicCast remains independent.
 
-## Earlier documentation
 
-Previous editions are retained under `docs/history/pre-townlight-beta-1/`. They describe their original software and license grants. Use the current Townlight Beta 1 manual for this candidate.
+## Station video delivery additions
+
+Staff can upload a verified completed recording to YouTube with explicit approval, title and visibility. Live recordings can simultaneously offer an encrypted SRT feed to the separate CivicCast/PEG operator. Recording continues independently of receiver availability. See the [updated Station manual](https://townlight.github.io/manuals/station.html#completed-recordings-on-youtube-and-live-civiccast-coverage) for setup, API and recovery.

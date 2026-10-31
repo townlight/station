@@ -1,0 +1,2683 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="description" content=""><title>Townlight
+Code API Reference | Townlight Beta 1</title><style>
+:root{--ink:#182f3a;--muted:#526775;--accent:#006b64;--paper:#fff;--wash:#f1f6f5;--line:#cfdddf;--warm:#dceab2}
+*{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;background:var(--paper);color:var(--ink);font:17px/1.65 "Segoe UI",Arial,sans-serif}a{color:#006b64;text-underline-offset:3px}a:hover{text-decoration-thickness:2px}a:focus-visible,button:focus-visible,input:focus-visible{outline:3px solid #a25900;outline-offset:4px}.skip{position:absolute;left:-9999px}.skip:focus{left:1rem;top:1rem;background:white;padding:1rem;z-index:20}header{border-bottom:1px solid var(--line);padding:1.1rem 5vw;display:flex;align-items:center;gap:1.5rem;flex-wrap:wrap}header .brand{font-size:1.3rem;font-weight:750;letter-spacing:-.04em;text-decoration:none;color:var(--ink)}header nav{margin-left:auto;display:flex;gap:1.25rem;flex-wrap:wrap;font-size:.88rem}.edition{font:700 .72rem/1.5 "Segoe UI",sans-serif;letter-spacing:.12em;text-transform:uppercase;color:var(--accent)}.wrap{max-width:1240px;margin:auto;padding:0 4vw}.hero{padding:5rem 0 3.2rem;max-width:950px}.hero h1{font-size:clamp(2.5rem,5vw,4.7rem);line-height:1.08;letter-spacing:-.045em;margin:1rem 0 1.5rem;font-weight:650}.hero .lead{font-size:1.26rem;max-width:780px;color:var(--muted)}.actions{display:flex;gap:.8rem;flex-wrap:wrap;margin:1.8rem 0}.button{display:inline-block;padding:.7rem 1.15rem;border:1px solid var(--accent);border-radius:4px;text-decoration:none;font-weight:650}.button.primary{background:var(--accent);color:#fff}.facts{display:flex;gap:1.5rem;flex-wrap:wrap;font-size:.85rem;color:var(--muted)}.section{padding:3rem 0;border-top:1px solid var(--line)}h2{font-size:1.8rem;line-height:1.3;letter-spacing:-.025em;margin:2.5rem 0 1rem}h3{font-size:1.18rem;line-height:1.45;margin:1.8rem 0 .7rem}h4{font-size:1rem;margin:1.3rem 0 .6rem}p{margin:.85rem 0 1rem}ul,ol{padding-left:1.6rem}li{margin:.4rem 0}strong{font-weight:650}.grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:1.6rem}.product{border-top:3px solid var(--accent);padding:1.4rem 0}.product h3{font-size:1.65rem;margin:.4rem 0}.product p{color:var(--muted)}.number{font-size:.76rem;letter-spacing:.1em}.split{display:grid;grid-template-columns:1fr 1fr;gap:3rem}.flow{width:100%;height:auto;display:block;margin:1.8rem 0}.caption{font-size:.85rem;color:var(--muted)}.reading{max-width:860px}.doclayout{display:grid;grid-template-columns:245px minmax(0,1fr);gap:3rem;max-width:1320px;margin:auto;padding:2rem 4vw}.toc{font-size:.84rem;align-self:start;position:sticky;top:1rem;max-height:90vh;overflow:auto;padding-right:.8rem}.toc ul{list-style:none;padding:0}.toc li{margin:.5rem 0}.toc li li{padding-left:.8rem}.toc a{text-decoration:none}.docbody{min-width:0}.docbody h1{font-size:2.7rem;line-height:1.1;letter-spacing:-.04em}.docbody h2{border-top:1px solid var(--line);padding-top:1.8rem}.docbody img{max-width:100%;height:auto}.docmeta{color:var(--muted);font-size:.9rem}.docbody section{scroll-margin-top:1rem}table{width:100%;border-collapse:collapse;font-size:.87rem;line-height:1.5;margin:1.3rem 0;table-layout:auto}th{text-align:left;background:var(--wash);font-weight:650}th,td{padding:.65rem .7rem;border-bottom:1px solid var(--line);vertical-align:top;overflow-wrap:anywhere}thead{display:table-header-group}pre{background:#f2f5f6;padding:1rem;border:1px solid #dfe7e8;white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;font:13px/1.6 Consolas,monospace}code{font: .85em/1.6 Consolas,monospace;overflow-wrap:anywhere}pre code{font-size:inherit}blockquote{border-left:3px solid var(--accent);padding-left:1rem;margin-left:0;color:var(--muted)}.search{padding:.65rem;border:1px solid #789399;border-radius:4px;width:100%;font:inherit}.search-status{font-size:.8rem;color:var(--muted)}footer{border-top:1px solid var(--line);padding:2rem 5vw;margin-top:3rem;font-size:.85rem;color:var(--muted);display:flex;gap:2rem;justify-content:space-between;flex-wrap:wrap}.small{font-size:.9rem;color:var(--muted)}.api-entry{padding:1.2rem 0;border-top:1px solid var(--line)}.api-entry h3{overflow-wrap:anywhere}.method{font-size:.76rem;font-weight:750;color:var(--accent)}details{margin:1rem 0}summary{cursor:pointer;font-weight:650}.index-columns{columns:2;column-gap:2rem}.index-columns li{break-inside:avoid}
+@media(max-width:850px){.grid{grid-template-columns:1fr 1fr}.split{grid-template-columns:1fr}.doclayout{grid-template-columns:1fr;gap:1rem}.toc{position:static;max-height:none}.hero{padding-top:3rem}header nav{margin-left:0}.docbody h1{font-size:2.2rem}}
+@media(max-width:520px){.grid{grid-template-columns:1fr}.wrap{padding:0 6vw}header{padding:1rem 6vw}.hero h1{font-size:2.6rem}.index-columns{columns:1}table{font-size:.78rem}th,td{padding:.45rem}.doclayout{padding:1rem 6vw}.facts{gap:.5rem}}
+main,.toc a,.hero h1{overflow-wrap:anywhere}
+@page{size:Letter;margin:.7in .65in .75in}
+@media print{html{scroll-behavior:auto}body{font:10.5pt/1.45 Arial,sans-serif;color:#172f39}header,footer,.search-area,.screen-only{display:none}.doclayout{display:block;padding:0;max-width:none}.toc{position:static;max-height:none;overflow:visible;font-size:10pt;break-after:page}.toc>h2{border:0}.toc ul{columns:2;column-gap:.3in}.toc li{break-inside:avoid}.docbody h1{font-size:30pt}.docbody h2{font-size:19pt;break-after:avoid;padding-top:.15in;margin-top:.35in}.docbody h3{font-size:12pt;break-after:avoid}.docbody h4{break-after:avoid}p{orphans:3;widows:3}pre{font-size:8.2pt;line-height:1.4;padding:.1in;break-inside:auto}table{font-size:8.4pt;line-height:1.35}th,td{padding:.06in .07in}tr{break-inside:avoid}.flow{max-height:6in;object-fit:contain;break-inside:avoid}a{color:#172f39;text-decoration:underline}.cover{break-after:page;padding-top:1in}.cover .edition{font-size:11pt}.cover h1{font-size:32pt}.cover .lead{font-size:14pt}.api-entry{break-inside:auto}.api-entry h3{break-after:avoid}.index-columns{columns:2}}
+</style></head><body><a class="skip" href="#main">Skip to content</a><aside aria-label="Beta download" style="padding:1rem 5%;background:#e5f3ec;color:#123b30"><strong>Townlight Beta 1</strong> · <a href="https://github.com/townlight/townlight/releases/tag/townlight-beta-1-station-delivery">Signed Windows installer, source, documentation and acceptance</a>. Updated Station live feed and recorded-video delivery; existing component versions retained. <a href="https://townlight.github.io/versions.html">Candidate identity and retained baseline evidence</a>.</aside><header><a class="brand" href="../index.html">townlight<span aria-hidden="true"> ·</span></a><span class="edition">Townlight Beta 1</span><nav aria-label="Main"><a href="../index.html#products">Products</a><a href="../manuals/suite.html">Suite manual</a><a href="../reference/index.html">Technical reference</a><a href="../terms.html">Terms and license</a></nav></header>
+<main id="main"><div class="cover wrap"><div class="hero"><div class="edition">Townlight Beta 1</div><h1>Townlight
+Code API
+Reference</h1><p class="lead">Staff guide and technical reference</p><p class="docmeta">Documentation edition 30 October 2026<br>Existing component versions retained<br>Signed suite installer 1.6.0.1<br>Private beta documentation companion</p></div></div><div class="doclayout"><aside class="toc" aria-label="Table of contents"><h2>Contents</h2><div class="search-area"><label for="find-section">Find a section</label><input class="search" id="find-section" type="search" placeholder="Type a heading"><p class="search-status" aria-live="polite"></p></div><ul>
+<li><a href="#api-reference-scope" id="toc-api-reference-scope">API
+reference scope</a></li>
+<li><a href="#installed-desktop-http-operations"
+id="toc-installed-desktop-http-operations">Installed desktop HTTP
+operations</a></li>
+<li><a href="#request-and-response-data-dictionary"
+id="toc-request-and-response-data-dictionary">Request and response data
+dictionary</a></li>
+<li><a href="#source-route-and-validation-supplement"
+id="toc-source-route-and-validation-supplement">Source route and
+validation supplement</a></li>
+<li><a href="#alphabetical-contract-index"
+id="toc-alphabetical-contract-index">Alphabetical contract
+index</a></li>
+</ul></aside><article class="docbody"><h2 id="api-reference-scope">API
+reference scope</h2>
+<p>This is the <strong>Townlight Beta 1</strong> technical contract for
+Code. The desktop-domain entries below come from the installed
+candidate’s generated OpenAPI schema. Export did not start a server,
+enter application lifespan, run migrations or contact a database. It is
+schema evidence, not proof of every endpoint’s runtime behavior. The
+acceptance section of the operating manual identifies exercised
+paths.</p>
+<p>The complete filtered <a href="code-openapi.json">OpenAPI JSON</a>
+preserves request bodies, parameters, response declarations, constraints
+and referenced schemas. An empty response schema means that this
+application did not declare a structured response model; do not infer a
+stronger contract from a green HTTP status. HTTP authorization enforced
+inside dependencies is still required when an automatically generated
+header parameter says optional.</p>
+<h3 id="origins-and-authentication">Origins and authentication</h3>
+<p>The canonical native domain transport uses
+<code>http://127.0.0.1:15480</code>. The native shell supplies
+<code>X-Townlight-Session</code> and maps it to a persisted SQL
+identity; browser code must not invent an actor or role. A trusted local
+integration must protect that proof as a credential and revalidate
+current authority. Standalone <code>/auth/jwt/login</code> uses the
+existing bearer-token flow; that token is not interchangeable with
+native proof. Public routes have their own permission and deployment
+gates. Do not bind the native domain runtime to a non-loopback
+interface.</p>
+<p>Station defaults to explicit loopback port <code>8756</code>. Its
+service revalidates Townlight authority. Its browser exchanges a one-use
+60-second ticket for a 900-second HttpOnly SameSite Strict operator
+cookie. Browser mutations require the exact Origin and
+<code>X-Station-UI: 1</code>. Native session proof must not be put in a
+URL or shipped to an MCP client.</p>
+<h3 id="failure-and-retry-contract">Failure and retry contract</h3>
+<p><code>401</code> means missing/expired identity; <code>403</code>
+means permission or origin denial; <code>404</code> means a missing or
+unavailable resource; <code>409</code> commonly means revision,
+source-hash, lifecycle or idempotency conflict; <code>422</code> means
+invalid input; <code>429</code> means a bounded rate/capacity refusal;
+<code>503</code> means an unavailable dependency, configuration or
+schema. Individual routes may use only a subset and source-derived
+checks can add errors absent from generated response declarations.
+Preserve edits, read the detail and inspect current state before
+retrying a write. Neither a retry nor an idempotency key authorizes a
+changed payload.</p>
+<h3 id="effective-installed-runtime-contract">Effective installed
+runtime contract</h3>
+<p>The inner domain export in
+<code>reference/desktop-domain-openapi.json</code> has 243 paths and 245
+schemas. The installed host is a second FastAPI application: it
+registers <strong>GET /health</strong>, <strong>GET /modules</strong>
+and <strong>GET /ready</strong> before mounting that domain application
+at <code>/</code>. Its <code>/health</code> therefore
+<strong>overrides</strong> the inner <code>app.main.health</code> at the
+installed origin. The effective composition has 245 unique URI paths.
+The filtered downloads for Suite, Core and Records compose those real
+outer routes over their inner-domain selection; the original inner and
+outer exports remain separate evidence files.</p>
+<table>
+<colgroup>
+<col style="width: 50%" />
+<col style="width: 50%" />
+</colgroup>
+<thead>
+<tr>
+<th>Outer operation</th>
+<th>Actual response and use</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>GET /health</code></td>
+<td>Runtime <code>status</code> (<code>ok</code> or
+<code>degraded</code>), service/version, product profile, module checks,
+database check and <code>local_only</code>. HTTP 200 when healthy,
+otherwise 503. This is not the inner app’s simple status/version
+handler.</td>
+</tr>
+<tr>
+<td><code>GET /modules</code></td>
+<td>The same runtime health payload and HTTP status as
+<code>/health</code>; not a second independent readiness proof.</td>
+</tr>
+<tr>
+<td><code>GET /ready</code></td>
+<td><code>status</code> (<code>ready</code> or <code>not-ready</code>)
+and <code>reason</code>; HTTP 200/503 after the applicable activation,
+schema and provider checks. Use this for domain readiness.</td>
+</tr>
+</tbody>
+</table>
+<p>For example, a ready result has shape
+<code>{"status":"ready","reason":"&lt;actual profile-specific readiness reason&gt;"}</code>;
+an inactive domain returns
+<code>{"status":"not-ready","reason":"domain-inactive"}</code> with 503.
+These are source-derived shapes, not new execution receipts. Read the
+actual reason rather than treating a listening process or
+<code>/health</code> alone as canonical readiness.</p>
+<p>The native origin remains <code>http://127.0.0.1:15480</code>.
+Station’s separately paired suite process can use another explicitly
+configured loopback port; its Station origin and the Station service’s
+suite origin must agree. The Station operating guide supplies that setup
+without disabling normal activation.</p>
+<h2 id="installed-desktop-http-operations">Installed desktop HTTP
+operations</h2>
+<h3 id="post-desktopv1codeimports">POST /desktop/v1/code/imports</h3>
+<p>Imports</p>
+<p>Operation ID: <code>imports_desktop_v1_code_imports_post</code>.
+Tags: native-code.</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Location</th>
+<th>Required</th>
+<th>Type and constraints</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>X-Townlight-Session</code></td>
+<td>header</td>
+<td>no at schema level</td>
+<td>string or null</td>
+</tr>
+</tbody>
+</table>
+<p>Request body: <code>application/json</code>; required. Model:
+<code>ImportBundleCreate</code>.</p>
+<table>
+<thead>
+<tr>
+<th>Declared status</th>
+<th>Description</th>
+<th>Response model</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>200</td>
+<td>Successful Response</td>
+<td>application/json: Unspecified JSON shape</td>
+</tr>
+<tr>
+<td>422</td>
+<td>Validation Error</td>
+<td>application/json: HTTPValidationError</td>
+</tr>
+</tbody>
+</table>
+<h3 id="get-desktopv1codeimports">GET /desktop/v1/code/imports</h3>
+<p>List Imports</p>
+<p>Operation ID: <code>list_imports_desktop_v1_code_imports_get</code>.
+Tags: native-code.</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Location</th>
+<th>Required</th>
+<th>Type and constraints</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>X-Townlight-Session</code></td>
+<td>header</td>
+<td>no at schema level</td>
+<td>string or null</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>Declared status</th>
+<th>Description</th>
+<th>Response model</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>200</td>
+<td>Successful Response</td>
+<td>application/json: Unspecified JSON shape</td>
+</tr>
+<tr>
+<td>422</td>
+<td>Validation Error</td>
+<td>application/json: HTTPValidationError</td>
+</tr>
+</tbody>
+</table>
+<h3 id="get-desktopv1codesources">GET /desktop/v1/code/sources</h3>
+<p>Sources</p>
+<p>Operation ID: <code>sources_desktop_v1_code_sources_get</code>. Tags:
+native-code.</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Location</th>
+<th>Required</th>
+<th>Type and constraints</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>X-Townlight-Session</code></td>
+<td>header</td>
+<td>no at schema level</td>
+<td>string or null</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>Declared status</th>
+<th>Description</th>
+<th>Response model</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>200</td>
+<td>Successful Response</td>
+<td>application/json: Unspecified JSON shape</td>
+</tr>
+<tr>
+<td>422</td>
+<td>Validation Error</td>
+<td>application/json: HTTPValidationError</td>
+</tr>
+</tbody>
+</table>
+<h3 id="get-desktopv1codeworkspace">GET /desktop/v1/code/workspace</h3>
+<p>Workspace</p>
+<p>Operation ID: <code>workspace_desktop_v1_code_workspace_get</code>.
+Tags: native-code.</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Location</th>
+<th>Required</th>
+<th>Type and constraints</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>X-Townlight-Session</code></td>
+<td>header</td>
+<td>no at schema level</td>
+<td>string or null</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>Declared status</th>
+<th>Description</th>
+<th>Response model</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>200</td>
+<td>Successful Response</td>
+<td>application/json: Unspecified JSON shape</td>
+</tr>
+<tr>
+<td>422</td>
+<td>Validation Error</td>
+<td>application/json: HTTPValidationError</td>
+</tr>
+</tbody>
+</table>
+<h3 id="get-desktopv1codelookup">GET /desktop/v1/code/lookup</h3>
+<p>Lookup</p>
+<p>Operation ID: <code>lookup_desktop_v1_code_lookup_get</code>. Tags:
+native-code.</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Location</th>
+<th>Required</th>
+<th>Type and constraints</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>section_number</code></td>
+<td>query</td>
+<td>yes</td>
+<td>string</td>
+</tr>
+<tr>
+<td><code>as_of</code></td>
+<td>query</td>
+<td>no at schema level</td>
+<td>string; format=date or null</td>
+</tr>
+<tr>
+<td><code>X-Townlight-Session</code></td>
+<td>header</td>
+<td>no at schema level</td>
+<td>string or null</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>Declared status</th>
+<th>Description</th>
+<th>Response model</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>200</td>
+<td>Successful Response</td>
+<td>application/json: Unspecified JSON shape</td>
+</tr>
+<tr>
+<td>422</td>
+<td>Validation Error</td>
+<td>application/json: HTTPValidationError</td>
+</tr>
+</tbody>
+</table>
+<h3 id="get-desktopv1codesectionssection_idhistory">GET
+/desktop/v1/code/sections/{section_id}/history</h3>
+<p>Section History</p>
+<p>Operation ID:
+<code>section_history_desktop_v1_code_sections__section_id__history_get</code>.
+Tags: native-code.</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Location</th>
+<th>Required</th>
+<th>Type and constraints</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>section_id</code></td>
+<td>path</td>
+<td>yes</td>
+<td>string</td>
+</tr>
+<tr>
+<td><code>X-Townlight-Session</code></td>
+<td>header</td>
+<td>no at schema level</td>
+<td>string or null</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>Declared status</th>
+<th>Description</th>
+<th>Response model</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>200</td>
+<td>Successful Response</td>
+<td>application/json: Unspecified JSON shape</td>
+</tr>
+<tr>
+<td>422</td>
+<td>Validation Error</td>
+<td>application/json: HTTPValidationError</td>
+</tr>
+</tbody>
+</table>
+<h3 id="get-desktopv1codecitation">GET /desktop/v1/code/citation</h3>
+<p>Citation</p>
+<p>Operation ID: <code>citation_desktop_v1_code_citation_get</code>.
+Tags: native-code.</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Location</th>
+<th>Required</th>
+<th>Type and constraints</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>section_number</code></td>
+<td>query</td>
+<td>yes</td>
+<td>string</td>
+</tr>
+<tr>
+<td><code>as_of</code></td>
+<td>query</td>
+<td>no at schema level</td>
+<td>string; format=date or null</td>
+</tr>
+<tr>
+<td><code>X-Townlight-Session</code></td>
+<td>header</td>
+<td>no at schema level</td>
+<td>string or null</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>Declared status</th>
+<th>Description</th>
+<th>Response model</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>200</td>
+<td>Successful Response</td>
+<td>application/json: Unspecified JSON shape</td>
+</tr>
+<tr>
+<td>422</td>
+<td>Validation Error</td>
+<td>application/json: HTTPValidationError</td>
+</tr>
+</tbody>
+</table>
+<h3 id="get-desktopv1codesearch">GET /desktop/v1/code/search</h3>
+<p>Search</p>
+<p>Operation ID: <code>search_desktop_v1_code_search_get</code>. Tags:
+native-code.</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Location</th>
+<th>Required</th>
+<th>Type and constraints</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>q</code></td>
+<td>query</td>
+<td>yes</td>
+<td>string</td>
+</tr>
+<tr>
+<td><code>X-Townlight-Session</code></td>
+<td>header</td>
+<td>no at schema level</td>
+<td>string or null</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>Declared status</th>
+<th>Description</th>
+<th>Response model</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>200</td>
+<td>Successful Response</td>
+<td>application/json: Unspecified JSON shape</td>
+</tr>
+<tr>
+<td>422</td>
+<td>Validation Error</td>
+<td>application/json: HTTPValidationError</td>
+</tr>
+</tbody>
+</table>
+<h3 id="get-desktopv1codeimportsjob_idtree">GET
+/desktop/v1/code/imports/{job_id}/tree</h3>
+<p>Import Tree</p>
+<p>Operation ID:
+<code>import_tree_desktop_v1_code_imports__job_id__tree_get</code>.
+Tags: native-code.</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Location</th>
+<th>Required</th>
+<th>Type and constraints</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>job_id</code></td>
+<td>path</td>
+<td>yes</td>
+<td>string</td>
+</tr>
+<tr>
+<td><code>X-Townlight-Session</code></td>
+<td>header</td>
+<td>no at schema level</td>
+<td>string or null</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>Declared status</th>
+<th>Description</th>
+<th>Response model</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>200</td>
+<td>Successful Response</td>
+<td>application/json: Unspecified JSON shape</td>
+</tr>
+<tr>
+<td>422</td>
+<td>Validation Error</td>
+<td>application/json: HTTPValidationError</td>
+</tr>
+</tbody>
+</table>
+<h3 id="get-desktopv1codeimportsjob_idprovenance">GET
+/desktop/v1/code/imports/{job_id}/provenance</h3>
+<p>Import Provenance</p>
+<p>Operation ID:
+<code>import_provenance_desktop_v1_code_imports__job_id__provenance_get</code>.
+Tags: native-code.</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Location</th>
+<th>Required</th>
+<th>Type and constraints</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>job_id</code></td>
+<td>path</td>
+<td>yes</td>
+<td>string</td>
+</tr>
+<tr>
+<td><code>X-Townlight-Session</code></td>
+<td>header</td>
+<td>no at schema level</td>
+<td>string or null</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>Declared status</th>
+<th>Description</th>
+<th>Response model</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>200</td>
+<td>Successful Response</td>
+<td>application/json: Unspecified JSON shape</td>
+</tr>
+<tr>
+<td>422</td>
+<td>Validation Error</td>
+<td>application/json: HTTPValidationError</td>
+</tr>
+</tbody>
+</table>
+<h3 id="get-desktopv1codeexport">GET /desktop/v1/code/export</h3>
+<p>Export Section</p>
+<p>Operation ID: <code>export_section_desktop_v1_code_export_get</code>.
+Tags: native-code.</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Location</th>
+<th>Required</th>
+<th>Type and constraints</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>section_ref</code></td>
+<td>query</td>
+<td>yes</td>
+<td>string</td>
+</tr>
+<tr>
+<td><code>as_of</code></td>
+<td>query</td>
+<td>no at schema level</td>
+<td>string; format=date or null</td>
+</tr>
+<tr>
+<td><code>X-Townlight-Session</code></td>
+<td>header</td>
+<td>no at schema level</td>
+<td>string or null</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>Declared status</th>
+<th>Description</th>
+<th>Response model</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>200</td>
+<td>Successful Response</td>
+<td>application/json: Unspecified JSON shape</td>
+</tr>
+<tr>
+<td>422</td>
+<td>Validation Error</td>
+<td>application/json: HTTPValidationError</td>
+</tr>
+</tbody>
+</table>
+<h3 id="post-desktopv1codequestions">POST
+/desktop/v1/code/questions</h3>
+<p>Questions</p>
+<p>Operation ID: <code>questions_desktop_v1_code_questions_post</code>.
+Tags: native-code.</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Location</th>
+<th>Required</th>
+<th>Type and constraints</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>X-Townlight-Session</code></td>
+<td>header</td>
+<td>no at schema level</td>
+<td>string or null</td>
+</tr>
+</tbody>
+</table>
+<p>Request body: <code>application/json</code>; required. Model:
+<code>QuestionAnswerRequest</code>.</p>
+<table>
+<thead>
+<tr>
+<th>Declared status</th>
+<th>Description</th>
+<th>Response model</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>200</td>
+<td>Successful Response</td>
+<td>application/json: Unspecified JSON shape</td>
+</tr>
+<tr>
+<td>422</td>
+<td>Validation Error</td>
+<td>application/json: HTTPValidationError</td>
+</tr>
+</tbody>
+</table>
+<h3 id="post-desktopv1codesectionssection_idnotes">POST
+/desktop/v1/code/sections/{section_id}/notes</h3>
+<p>Create Note</p>
+<p>Operation ID:
+<code>create_note_desktop_v1_code_sections__section_id__notes_post</code>.
+Tags: native-code.</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Location</th>
+<th>Required</th>
+<th>Type and constraints</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>section_id</code></td>
+<td>path</td>
+<td>yes</td>
+<td>string</td>
+</tr>
+<tr>
+<td><code>X-Townlight-Session</code></td>
+<td>header</td>
+<td>no at schema level</td>
+<td>string or null</td>
+</tr>
+</tbody>
+</table>
+<p>Request body: <code>application/json</code>; required. Model:
+<code>InterpretationNoteCreate</code>.</p>
+<table>
+<thead>
+<tr>
+<th>Declared status</th>
+<th>Description</th>
+<th>Response model</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>200</td>
+<td>Successful Response</td>
+<td>application/json: Unspecified JSON shape</td>
+</tr>
+<tr>
+<td>422</td>
+<td>Validation Error</td>
+<td>application/json: HTTPValidationError</td>
+</tr>
+</tbody>
+</table>
+<h3 id="get-desktopv1codesectionssection_idnotes">GET
+/desktop/v1/code/sections/{section_id}/notes</h3>
+<p>List Notes</p>
+<p>Operation ID:
+<code>list_notes_desktop_v1_code_sections__section_id__notes_get</code>.
+Tags: native-code.</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Location</th>
+<th>Required</th>
+<th>Type and constraints</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>section_id</code></td>
+<td>path</td>
+<td>yes</td>
+<td>string</td>
+</tr>
+<tr>
+<td><code>X-Townlight-Session</code></td>
+<td>header</td>
+<td>no at schema level</td>
+<td>string or null</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>Declared status</th>
+<th>Description</th>
+<th>Response model</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>200</td>
+<td>Successful Response</td>
+<td>application/json: Unspecified JSON shape</td>
+</tr>
+<tr>
+<td>422</td>
+<td>Validation Error</td>
+<td>application/json: HTTPValidationError</td>
+</tr>
+</tbody>
+</table>
+<h3 id="post-desktopv1codesectionssection_idsummaries">POST
+/desktop/v1/code/sections/{section_id}/summaries</h3>
+<p>Create Summary</p>
+<p>Operation ID:
+<code>create_summary_desktop_v1_code_sections__section_id__summaries_post</code>.
+Tags: native-code.</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Location</th>
+<th>Required</th>
+<th>Type and constraints</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>section_id</code></td>
+<td>path</td>
+<td>yes</td>
+<td>string</td>
+</tr>
+<tr>
+<td><code>X-Townlight-Session</code></td>
+<td>header</td>
+<td>no at schema level</td>
+<td>string or null</td>
+</tr>
+</tbody>
+</table>
+<p>Request body: <code>application/json</code>; required. Model:
+<code>PlainLanguageSummaryCreate</code>.</p>
+<table>
+<thead>
+<tr>
+<th>Declared status</th>
+<th>Description</th>
+<th>Response model</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>200</td>
+<td>Successful Response</td>
+<td>application/json: Unspecified JSON shape</td>
+</tr>
+<tr>
+<td>422</td>
+<td>Validation Error</td>
+<td>application/json: HTTPValidationError</td>
+</tr>
+</tbody>
+</table>
+<h3 id="get-desktopv1codesectionssection_idsummaries">GET
+/desktop/v1/code/sections/{section_id}/summaries</h3>
+<p>List Summaries</p>
+<p>Operation ID:
+<code>list_summaries_desktop_v1_code_sections__section_id__summaries_get</code>.
+Tags: native-code.</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Location</th>
+<th>Required</th>
+<th>Type and constraints</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>section_id</code></td>
+<td>path</td>
+<td>yes</td>
+<td>string</td>
+</tr>
+<tr>
+<td><code>X-Townlight-Session</code></td>
+<td>header</td>
+<td>no at schema level</td>
+<td>string or null</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>Declared status</th>
+<th>Description</th>
+<th>Response model</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>200</td>
+<td>Successful Response</td>
+<td>application/json: Unspecified JSON shape</td>
+</tr>
+<tr>
+<td>422</td>
+<td>Validation Error</td>
+<td>application/json: HTTPValidationError</td>
+</tr>
+</tbody>
+</table>
+<h3 id="post-desktopv1codesummariessummary_idapprove">POST
+/desktop/v1/code/summaries/{summary_id}/approve</h3>
+<p>Approve Summary</p>
+<p>Operation ID:
+<code>approve_summary_desktop_v1_code_summaries__summary_id__approve_post</code>.
+Tags: native-code.</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Location</th>
+<th>Required</th>
+<th>Type and constraints</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>summary_id</code></td>
+<td>path</td>
+<td>yes</td>
+<td>string</td>
+</tr>
+<tr>
+<td><code>X-Townlight-Session</code></td>
+<td>header</td>
+<td>no at schema level</td>
+<td>string or null</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>Declared status</th>
+<th>Description</th>
+<th>Response model</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>200</td>
+<td>Successful Response</td>
+<td>application/json: Unspecified JSON shape</td>
+</tr>
+<tr>
+<td>422</td>
+<td>Validation Error</td>
+<td>application/json: HTTPValidationError</td>
+</tr>
+</tbody>
+</table>
+<h3 id="get-desktopv1codeconnections">GET
+/desktop/v1/code/connections</h3>
+<p>List Connections</p>
+<p>Operation ID:
+<code>list_connections_desktop_v1_code_connections_get</code>. Tags:
+.</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Location</th>
+<th>Required</th>
+<th>Type and constraints</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>X-Townlight-Session</code></td>
+<td>header</td>
+<td>no at schema level</td>
+<td>string or null</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>Declared status</th>
+<th>Description</th>
+<th>Response model</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>200</td>
+<td>Successful Response</td>
+<td>application/json: Unspecified JSON shape</td>
+</tr>
+<tr>
+<td>422</td>
+<td>Validation Error</td>
+<td>application/json: HTTPValidationError</td>
+</tr>
+</tbody>
+</table>
+<h3 id="post-desktopv1codeconnections">POST
+/desktop/v1/code/connections</h3>
+<p>Create Connection</p>
+<p>Operation ID:
+<code>create_connection_desktop_v1_code_connections_post</code>. Tags:
+.</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Location</th>
+<th>Required</th>
+<th>Type and constraints</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>X-Townlight-Session</code></td>
+<td>header</td>
+<td>no at schema level</td>
+<td>string or null</td>
+</tr>
+</tbody>
+</table>
+<p>Request body: <code>application/json</code>; required. Model:
+<code>Proposal</code>.</p>
+<table>
+<thead>
+<tr>
+<th>Declared status</th>
+<th>Description</th>
+<th>Response model</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>200</td>
+<td>Successful Response</td>
+<td>application/json: Unspecified JSON shape</td>
+</tr>
+<tr>
+<td>422</td>
+<td>Validation Error</td>
+<td>application/json: HTTPValidationError</td>
+</tr>
+</tbody>
+</table>
+<h3 id="get-desktopv1codeconnectionsconnection_id">GET
+/desktop/v1/code/connections/{connection_id}</h3>
+<p>Get Connection</p>
+<p>Operation ID:
+<code>get_connection_desktop_v1_code_connections__connection_id__get</code>.
+Tags: .</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Location</th>
+<th>Required</th>
+<th>Type and constraints</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>connection_id</code></td>
+<td>path</td>
+<td>yes</td>
+<td>string; pattern=<a href="#fn1" class="footnote-ref" id="fnref1"
+role="doc-noteref"><sup>1</sup></a>{1,64}$</td>
+</tr>
+<tr>
+<td><code>X-Townlight-Session</code></td>
+<td>header</td>
+<td>no at schema level</td>
+<td>string or null</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>Declared status</th>
+<th>Description</th>
+<th>Response model</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>200</td>
+<td>Successful Response</td>
+<td>application/json: Unspecified JSON shape</td>
+</tr>
+<tr>
+<td>422</td>
+<td>Validation Error</td>
+<td>application/json: HTTPValidationError</td>
+</tr>
+</tbody>
+</table>
+<h3 id="post-desktopv1codeconnectionsconnection_idcloseout">POST
+/desktop/v1/code/connections/{connection_id}/closeout</h3>
+<p>Closeout Connection</p>
+<p>Operation ID:
+<code>closeout_connection_desktop_v1_code_connections__connection_id__closeout_post</code>.
+Tags: .</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Location</th>
+<th>Required</th>
+<th>Type and constraints</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>connection_id</code></td>
+<td>path</td>
+<td>yes</td>
+<td>string; pattern=<a href="#fn2" class="footnote-ref" id="fnref2"
+role="doc-noteref"><sup>2</sup></a>{1,64}$</td>
+</tr>
+<tr>
+<td><code>X-Townlight-Session</code></td>
+<td>header</td>
+<td>no at schema level</td>
+<td>string or null</td>
+</tr>
+</tbody>
+</table>
+<p>Request body: <code>application/json</code>; required. Model:
+<code>Closeout</code>.</p>
+<table>
+<thead>
+<tr>
+<th>Declared status</th>
+<th>Description</th>
+<th>Response model</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>200</td>
+<td>Successful Response</td>
+<td>application/json: Unspecified JSON shape</td>
+</tr>
+<tr>
+<td>422</td>
+<td>Validation Error</td>
+<td>application/json: HTTPValidationError</td>
+</tr>
+</tbody>
+</table>
+<h3 id="get-civiccode">GET /civiccode</h3>
+<p>Home</p>
+<p>Operation ID: <code>home_civiccode_get</code>. Tags: .</p>
+<table>
+<thead>
+<tr>
+<th>Declared status</th>
+<th>Description</th>
+<th>Response model</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>200</td>
+<td>Successful Response</td>
+<td>text/html: string</td>
+</tr>
+</tbody>
+</table>
+<h3 id="get-civiccodesearch">GET /civiccode/search</h3>
+<p>Search</p>
+<p>Operation ID: <code>search_civiccode_search_get</code>. Tags: .</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Location</th>
+<th>Required</th>
+<th>Type and constraints</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>q</code></td>
+<td>query</td>
+<td>no at schema level</td>
+<td>string</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>Declared status</th>
+<th>Description</th>
+<th>Response model</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>200</td>
+<td>Successful Response</td>
+<td>text/html: string</td>
+</tr>
+<tr>
+<td>422</td>
+<td>Validation Error</td>
+<td>application/json: HTTPValidationError</td>
+</tr>
+</tbody>
+</table>
+<h3 id="get-civiccodeanswer">GET /civiccode/answer</h3>
+<p>Answer</p>
+<p>Operation ID: <code>answer_civiccode_answer_get</code>. Tags: .</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Location</th>
+<th>Required</th>
+<th>Type and constraints</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>q</code></td>
+<td>query</td>
+<td>no at schema level</td>
+<td>string</td>
+</tr>
+<tr>
+<td><code>section_number</code></td>
+<td>query</td>
+<td>no at schema level</td>
+<td>string or null</td>
+</tr>
+<tr>
+<td><code>as_of</code></td>
+<td>query</td>
+<td>no at schema level</td>
+<td>string; format=date or null</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>Declared status</th>
+<th>Description</th>
+<th>Response model</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>200</td>
+<td>Successful Response</td>
+<td>text/html: string</td>
+</tr>
+<tr>
+<td>422</td>
+<td>Validation Error</td>
+<td>application/json: HTTPValidationError</td>
+</tr>
+</tbody>
+</table>
+<h3 id="get-civiccodesectionssection_ref">GET
+/civiccode/sections/{section_ref}</h3>
+<p>Detail</p>
+<p>Operation ID:
+<code>detail_civiccode_sections__section_ref__get</code>. Tags: .</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Location</th>
+<th>Required</th>
+<th>Type and constraints</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>section_ref</code></td>
+<td>path</td>
+<td>yes</td>
+<td>string</td>
+</tr>
+<tr>
+<td><code>as_of</code></td>
+<td>query</td>
+<td>no at schema level</td>
+<td>string; format=date or null</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>Declared status</th>
+<th>Description</th>
+<th>Response model</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>200</td>
+<td>Successful Response</td>
+<td>text/html: string</td>
+</tr>
+<tr>
+<td>422</td>
+<td>Validation Error</td>
+<td>application/json: HTTPValidationError</td>
+</tr>
+</tbody>
+</table>
+<h3 id="get-civiccodesectionssection_refexport">GET
+/civiccode/sections/{section_ref}/export</h3>
+<p>Export</p>
+<p>Operation ID:
+<code>export_civiccode_sections__section_ref__export_get</code>. Tags:
+.</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Location</th>
+<th>Required</th>
+<th>Type and constraints</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>section_ref</code></td>
+<td>path</td>
+<td>yes</td>
+<td>string</td>
+</tr>
+<tr>
+<td><code>as_of</code></td>
+<td>query</td>
+<td>no at schema level</td>
+<td>string; format=date or null</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>Declared status</th>
+<th>Description</th>
+<th>Response model</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>200</td>
+<td>Successful Response</td>
+<td>text/html: string</td>
+</tr>
+<tr>
+<td>422</td>
+<td>Validation Error</td>
+<td>application/json: HTTPValidationError</td>
+</tr>
+</tbody>
+</table>
+<h2 id="request-and-response-data-dictionary">Request and response data
+dictionary</h2>
+<p>Fields below retain the actual schema requirements and constraints.
+<code>null</code> and omitted are distinct where a model distinguishes
+them. Additional-property rules apply per schema. Full discriminators,
+nested definitions and defaults are retained in the JSON.</p>
+<h3 id="chaptercreate">ChapterCreate</h3>
+<p>Request body for creating a code chapter.</p>
+<p>Additional properties: false.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Required</th>
+<th>Type and constraints</th>
+<th>Default or description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>chapter_id</code></td>
+<td>no</td>
+<td>string or null</td>
+<td></td>
+</tr>
+<tr>
+<td><code>title_id</code></td>
+<td>yes</td>
+<td>string; minLength=1</td>
+<td></td>
+</tr>
+<tr>
+<td><code>chapter_number</code></td>
+<td>yes</td>
+<td>string; minLength=1</td>
+<td></td>
+</tr>
+<tr>
+<td><code>chapter_name</code></td>
+<td>yes</td>
+<td>string; minLength=1</td>
+<td></td>
+</tr>
+<tr>
+<td><code>sort_order</code></td>
+<td>no</td>
+<td>integer</td>
+<td>default 0.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="closeout">Closeout</h3>
+<p>Additional properties: false.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Required</th>
+<th>Type and constraints</th>
+<th>Default or description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>decision_id</code></td>
+<td>yes</td>
+<td>string; pattern=<a href="#fn3" class="footnote-ref" id="fnref3"
+role="doc-noteref"><sup>3</sup></a>{1,64}$</td>
+<td></td>
+</tr>
+<tr>
+<td><code>version_id</code></td>
+<td>yes</td>
+<td>string; minLength=1; maxLength=255</td>
+<td></td>
+</tr>
+<tr>
+<td><code>source_id</code></td>
+<td>yes</td>
+<td>string; minLength=1; maxLength=255</td>
+<td></td>
+</tr>
+<tr>
+<td><code>version_label</code></td>
+<td>yes</td>
+<td>string; minLength=1; maxLength=255</td>
+<td></td>
+</tr>
+<tr>
+<td><code>body</code></td>
+<td>yes</td>
+<td>string; minLength=1; maxLength=1000000</td>
+<td></td>
+</tr>
+<tr>
+<td><code>effective_start</code></td>
+<td>yes</td>
+<td>string; format=date</td>
+<td></td>
+</tr>
+<tr>
+<td><code>effective_end</code></td>
+<td>no</td>
+<td>string; format=date or null</td>
+<td></td>
+</tr>
+<tr>
+<td><code>is_current</code></td>
+<td>yes</td>
+<td>boolean</td>
+<td></td>
+</tr>
+<tr>
+<td><code>reconciliation_note</code></td>
+<td>no</td>
+<td>string or null</td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<h3 id="httpvalidationerror">HTTPValidationError</h3>
+<p>Additional properties: not explicitly declared.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Required</th>
+<th>Type and constraints</th>
+<th>Default or description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>detail</code></td>
+<td>no</td>
+<td>array of ValidationError</td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<h3 id="importbundlecreate">ImportBundleCreate</h3>
+<p>Request body for local fixture/file-drop import jobs.</p>
+<p>Additional properties: false.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Required</th>
+<th>Type and constraints</th>
+<th>Default or description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>job_id</code></td>
+<td>no</td>
+<td>string or null</td>
+<td></td>
+</tr>
+<tr>
+<td><code>connector_type</code></td>
+<td>yes</td>
+<td>string; minLength=1</td>
+<td></td>
+</tr>
+<tr>
+<td><code>source</code></td>
+<td>yes</td>
+<td>SourceCreate</td>
+<td></td>
+</tr>
+<tr>
+<td><code>sources</code></td>
+<td>no</td>
+<td>array of SourceCreate</td>
+<td></td>
+</tr>
+<tr>
+<td><code>titles</code></td>
+<td>no</td>
+<td>array of TitleCreate</td>
+<td></td>
+</tr>
+<tr>
+<td><code>chapters</code></td>
+<td>no</td>
+<td>array of ChapterCreate</td>
+<td></td>
+</tr>
+<tr>
+<td><code>sections</code></td>
+<td>no</td>
+<td>array of SectionCreate</td>
+<td></td>
+</tr>
+<tr>
+<td><code>versions</code></td>
+<td>no</td>
+<td>array of SectionVersionCreate</td>
+<td></td>
+</tr>
+<tr>
+<td><code>provenance</code></td>
+<td>no</td>
+<td>object</td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<h3 id="interpretationnotecreate">InterpretationNoteCreate</h3>
+<p>Request body for staff-only interpretation notes.</p>
+<p>Additional properties: false.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Required</th>
+<th>Type and constraints</th>
+<th>Default or description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>note_id</code></td>
+<td>no</td>
+<td>string or null</td>
+<td></td>
+</tr>
+<tr>
+<td><code>note_text</code></td>
+<td>yes</td>
+<td>string; minLength=1</td>
+<td></td>
+</tr>
+<tr>
+<td><code>status</code></td>
+<td>no</td>
+<td>string</td>
+<td>default “draft”.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="plainlanguagesummarycreate">PlainLanguageSummaryCreate</h3>
+<p>Request body for staff-drafted plain-language summaries.</p>
+<p>Additional properties: false.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Required</th>
+<th>Type and constraints</th>
+<th>Default or description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>summary_id</code></td>
+<td>no</td>
+<td>string or null</td>
+<td></td>
+</tr>
+<tr>
+<td><code>section_version_id</code></td>
+<td>yes</td>
+<td>string; minLength=1</td>
+<td></td>
+</tr>
+<tr>
+<td><code>summary_text</code></td>
+<td>yes</td>
+<td>string; minLength=1</td>
+<td></td>
+</tr>
+<tr>
+<td><code>language_code</code></td>
+<td>no</td>
+<td>string</td>
+<td>default “en”.</td>
+</tr>
+<tr>
+<td><code>status</code></td>
+<td>no</td>
+<td>string</td>
+<td>default “draft”.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="proposal">Proposal</h3>
+<p>Additional properties: false.</p>
+<table>
+<colgroup>
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+</colgroup>
+<thead>
+<tr>
+<th>Field</th>
+<th>Required</th>
+<th>Type and constraints</th>
+<th>Default or description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>id</code></td>
+<td>yes</td>
+<td>string; pattern=<a href="#fn4" class="footnote-ref" id="fnref4"
+role="doc-noteref"><sup>4</sup></a>{1,64}$</td>
+<td></td>
+</tr>
+<tr>
+<td><code>version_id</code></td>
+<td>yes</td>
+<td>string; minLength=1; maxLength=255</td>
+<td></td>
+</tr>
+<tr>
+<td><code>meeting_id</code></td>
+<td>yes</td>
+<td>string; format=uuid</td>
+<td></td>
+</tr>
+<tr>
+<td><code>title</code></td>
+<td>yes</td>
+<td>string; minLength=1; maxLength=500</td>
+<td></td>
+</tr>
+<tr>
+<td><code>ordinance_number</code></td>
+<td>yes</td>
+<td>string; minLength=1; maxLength=120</td>
+<td></td>
+</tr>
+<tr>
+<td><code>proposed_text</code></td>
+<td>yes</td>
+<td>string; minLength=1; maxLength=1000000</td>
+<td></td>
+</tr>
+<tr>
+<td><code>supersedes_id</code></td>
+<td>no</td>
+<td>string; pattern=<a href="#fn5" class="footnote-ref" id="fnref5"
+role="doc-noteref"><sup>5</sup></a>{1,64}$ or null</td>
+<td></td>
+</tr>
+<tr>
+<td><code>reconciliation_note</code></td>
+<td>no</td>
+<td>string or null</td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<h3 id="questionanswerrequest">QuestionAnswerRequest</h3>
+<p>Request body for citation-grounded code Q&amp;A.</p>
+<p>Additional properties: false.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Required</th>
+<th>Type and constraints</th>
+<th>Default or description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>question</code></td>
+<td>yes</td>
+<td>string; minLength=1</td>
+<td></td>
+</tr>
+<tr>
+<td><code>section_number</code></td>
+<td>no</td>
+<td>string or null</td>
+<td></td>
+</tr>
+<tr>
+<td><code>as_of</code></td>
+<td>no</td>
+<td>string; format=date or null</td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<h3 id="sectioncreate">SectionCreate</h3>
+<p>Request body for creating a code section or subsection.</p>
+<p>Additional properties: false.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Required</th>
+<th>Type and constraints</th>
+<th>Default or description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>section_id</code></td>
+<td>no</td>
+<td>string or null</td>
+<td></td>
+</tr>
+<tr>
+<td><code>chapter_id</code></td>
+<td>yes</td>
+<td>string; minLength=1</td>
+<td></td>
+</tr>
+<tr>
+<td><code>section_number</code></td>
+<td>yes</td>
+<td>string; minLength=1</td>
+<td></td>
+</tr>
+<tr>
+<td><code>section_heading</code></td>
+<td>yes</td>
+<td>string; minLength=1</td>
+<td></td>
+</tr>
+<tr>
+<td><code>parent_section_id</code></td>
+<td>no</td>
+<td>string or null</td>
+<td></td>
+</tr>
+<tr>
+<td><code>sort_order</code></td>
+<td>no</td>
+<td>integer</td>
+<td>default 0.</td>
+</tr>
+<tr>
+<td><code>administrative_regulation_refs</code></td>
+<td>no</td>
+<td>array of string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>resolution_refs</code></td>
+<td>no</td>
+<td>array of string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>policy_refs</code></td>
+<td>no</td>
+<td>array of string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>approved_summary_refs</code></td>
+<td>no</td>
+<td>array of string</td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<h3 id="sectionversioncreate">SectionVersionCreate</h3>
+<p>Request body for adding an immutable section version.</p>
+<p>Additional properties: false.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Required</th>
+<th>Type and constraints</th>
+<th>Default or description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>version_id</code></td>
+<td>no</td>
+<td>string or null</td>
+<td></td>
+</tr>
+<tr>
+<td><code>section_id</code></td>
+<td>yes</td>
+<td>string; minLength=1</td>
+<td></td>
+</tr>
+<tr>
+<td><code>source_id</code></td>
+<td>yes</td>
+<td>string; minLength=1</td>
+<td></td>
+</tr>
+<tr>
+<td><code>version_label</code></td>
+<td>yes</td>
+<td>string; minLength=1</td>
+<td></td>
+</tr>
+<tr>
+<td><code>body</code></td>
+<td>yes</td>
+<td>string; minLength=1</td>
+<td></td>
+</tr>
+<tr>
+<td><code>effective_start</code></td>
+<td>yes</td>
+<td>string; format=date</td>
+<td></td>
+</tr>
+<tr>
+<td><code>effective_end</code></td>
+<td>no</td>
+<td>string; format=date or null</td>
+<td></td>
+</tr>
+<tr>
+<td><code>status</code></td>
+<td>no</td>
+<td>string</td>
+<td>default “draft”.</td>
+</tr>
+<tr>
+<td><code>is_current</code></td>
+<td>no</td>
+<td>boolean</td>
+<td>default false.</td>
+</tr>
+<tr>
+<td><code>adoption_event_id</code></td>
+<td>no</td>
+<td>string or null</td>
+<td></td>
+</tr>
+<tr>
+<td><code>amendment_event_id</code></td>
+<td>no</td>
+<td>string or null</td>
+<td></td>
+</tr>
+<tr>
+<td><code>amendment_summary</code></td>
+<td>no</td>
+<td>string or null</td>
+<td></td>
+</tr>
+<tr>
+<td><code>prior_version_id</code></td>
+<td>no</td>
+<td>string or null</td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<h3 id="sourcecreate">SourceCreate</h3>
+<p>Request body for registering an official or explicitly labeled
+source.</p>
+<p>Additional properties: false.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Required</th>
+<th>Type and constraints</th>
+<th>Default or description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>source_id</code></td>
+<td>no</td>
+<td>string or null</td>
+<td></td>
+</tr>
+<tr>
+<td><code>name</code></td>
+<td>yes</td>
+<td>string; minLength=1</td>
+<td></td>
+</tr>
+<tr>
+<td><code>publisher</code></td>
+<td>yes</td>
+<td>string; minLength=1</td>
+<td></td>
+</tr>
+<tr>
+<td><code>source_type</code></td>
+<td>yes</td>
+<td>string; minLength=1</td>
+<td></td>
+</tr>
+<tr>
+<td><code>source_category</code></td>
+<td>yes</td>
+<td>string; minLength=1</td>
+<td></td>
+</tr>
+<tr>
+<td><code>source_url</code></td>
+<td>no</td>
+<td>string or null</td>
+<td></td>
+</tr>
+<tr>
+<td><code>file_reference</code></td>
+<td>no</td>
+<td>string or null</td>
+<td></td>
+</tr>
+<tr>
+<td><code>retrieved_at</code></td>
+<td>no</td>
+<td>string; format=date-time or null</td>
+<td></td>
+</tr>
+<tr>
+<td><code>retrieval_method</code></td>
+<td>no</td>
+<td>string or null</td>
+<td></td>
+</tr>
+<tr>
+<td><code>checksum</code></td>
+<td>no</td>
+<td>string or null</td>
+<td></td>
+</tr>
+<tr>
+<td><code>source_owner</code></td>
+<td>no</td>
+<td>string or null</td>
+<td></td>
+</tr>
+<tr>
+<td><code>is_official</code></td>
+<td>no</td>
+<td>boolean</td>
+<td>default true.</td>
+</tr>
+<tr>
+<td><code>official_status_note</code></td>
+<td>no</td>
+<td>string or null</td>
+<td></td>
+</tr>
+<tr>
+<td><code>status</code></td>
+<td>no</td>
+<td>string</td>
+<td>default “draft”.</td>
+</tr>
+<tr>
+<td><code>staff_notes</code></td>
+<td>no</td>
+<td>string or null</td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<h3 id="titlecreate">TitleCreate</h3>
+<p>Request body for creating a code title.</p>
+<p>Additional properties: false.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Required</th>
+<th>Type and constraints</th>
+<th>Default or description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>title_id</code></td>
+<td>no</td>
+<td>string or null</td>
+<td></td>
+</tr>
+<tr>
+<td><code>title_number</code></td>
+<td>yes</td>
+<td>string; minLength=1</td>
+<td></td>
+</tr>
+<tr>
+<td><code>title_name</code></td>
+<td>yes</td>
+<td>string; minLength=1</td>
+<td></td>
+</tr>
+<tr>
+<td><code>sort_order</code></td>
+<td>no</td>
+<td>integer</td>
+<td>default 0.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="validationerror">ValidationError</h3>
+<p>Additional properties: not explicitly declared.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Required</th>
+<th>Type and constraints</th>
+<th>Default or description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>loc</code></td>
+<td>yes</td>
+<td>array of string or integer</td>
+<td></td>
+</tr>
+<tr>
+<td><code>msg</code></td>
+<td>yes</td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>type</code></td>
+<td>yes</td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>input</code></td>
+<td>no</td>
+<td>object</td>
+<td></td>
+</tr>
+<tr>
+<td><code>ctx</code></td>
+<td>no</td>
+<td>object</td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<h2 id="source-route-and-validation-supplement">Source route and
+validation supplement</h2>
+<p>These declarations are extracted from the immutable candidate source.
+Package standalone routes are <strong>a different deployment
+surface</strong> from the mounted installed domain. They are listed to
+document existing code, not to claim they all have installed or city
+acceptance. A source declaration without a resolved include-router mount
+is identified as such. Full signatures, direct HTTP refusals and schema
+fields are retained in the <a
+href="../reference/source-inventory.json">source inventory</a>.</p>
+<h3 id="main.py">main.py</h3>
+<p>Candidate source:
+<code>installed-owned-source/civiccode/main.py</code>.</p>
+<p><strong>GET <code>/</code></strong> — handler <code>root</code>, line
+786. Declared router prefix included.</p>
+<div class="sourceCode" id="cb1"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a>root() <span class="op">-&gt;</span> <span class="bu">dict</span>[<span class="bu">str</span>, <span class="bu">str</span>]</span></code></pre></div>
+<p><strong>GET <code>/civiccode</code></strong> — handler
+<code>public_lookup_home</code>, line 834. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb2"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a>public_lookup_home() <span class="op">-&gt;</span> <span class="bu">str</span></span></code></pre></div>
+<p><strong>GET <code>/civiccode/app</code></strong> — handler
+<code>civiccode_frontend_app</code>, line 845. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb3"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb3-1"><a href="#cb3-1" aria-hidden="true" tabindex="-1"></a>civiccode_frontend_app() <span class="op">-&gt;</span> Response</span></code></pre></div>
+<p><strong>GET <code>/civiccode/app/</code></strong> — handler
+<code>civiccode_frontend_app</code>, line 845. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb4"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb4-1"><a href="#cb4-1" aria-hidden="true" tabindex="-1"></a>civiccode_frontend_app() <span class="op">-&gt;</span> Response</span></code></pre></div>
+<p><strong>GET <code>/civiccode/search</code></strong> — handler
+<code>public_lookup_search</code>, line 858. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb5"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb5-1"><a href="#cb5-1" aria-hidden="true" tabindex="-1"></a>public_lookup_search(q: <span class="bu">str</span><span class="op">=</span><span class="st">&#39;&#39;</span>) <span class="op">-&gt;</span> <span class="bu">str</span></span></code></pre></div>
+<p><strong>GET <code>/civiccode/answer</code></strong> — handler
+<code>public_lookup_answer</code>, line 878. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb6"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb6-1"><a href="#cb6-1" aria-hidden="true" tabindex="-1"></a>public_lookup_answer(q: <span class="bu">str</span><span class="op">=</span><span class="st">&#39;&#39;</span>, section_number: <span class="bu">str</span> <span class="op">|</span> <span class="va">None</span><span class="op">=</span><span class="va">None</span>, as_of: date <span class="op">|</span> <span class="va">None</span><span class="op">=</span><span class="va">None</span>) <span class="op">-&gt;</span> <span class="bu">str</span></span></code></pre></div>
+<p><strong>GET <code>/civiccode/sections/{section_ref}</code></strong> —
+handler <code>public_section_detail</code>, line 901. Declared router
+prefix included.</p>
+<div class="sourceCode" id="cb7"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb7-1"><a href="#cb7-1" aria-hidden="true" tabindex="-1"></a>public_section_detail(section_ref: <span class="bu">str</span>, as_of: date <span class="op">|</span> <span class="va">None</span><span class="op">=</span><span class="va">None</span>) <span class="op">-&gt;</span> <span class="bu">str</span></span></code></pre></div>
+<p><strong>GET
+<code>/civiccode/sections/{section_ref}/export</code></strong> — handler
+<code>public_section_export</code>, line 937. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb8"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb8-1"><a href="#cb8-1" aria-hidden="true" tabindex="-1"></a>public_section_export(section_ref: <span class="bu">str</span>, as_of: date <span class="op">|</span> <span class="va">None</span><span class="op">=</span><span class="va">None</span>) <span class="op">-&gt;</span> <span class="bu">str</span></span></code></pre></div>
+<p><strong>GET <code>/staff/sources</code></strong> — handler
+<code>staff_source_workspace</code>, line 953. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb9"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb9-1"><a href="#cb9-1" aria-hidden="true" tabindex="-1"></a>staff_source_workspace(x_civiccode_role: <span class="bu">str</span> <span class="op">|</span> <span class="va">None</span><span class="op">=</span>Header(default<span class="op">=</span><span class="va">None</span>), x_civiccode_actor: <span class="bu">str</span> <span class="op">|</span> <span class="va">None</span><span class="op">=</span>Header(default<span class="op">=</span><span class="va">None</span>)) <span class="op">-&gt;</span> HTMLResponse</span></code></pre></div>
+<p><strong>GET <code>/staff/code</code></strong> — handler
+<code>staff_code_workspace</code>, line 970. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb10"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb10-1"><a href="#cb10-1" aria-hidden="true" tabindex="-1"></a>staff_code_workspace(x_civiccode_role: <span class="bu">str</span> <span class="op">|</span> <span class="va">None</span><span class="op">=</span>Header(default<span class="op">=</span><span class="va">None</span>), x_civiccode_actor: <span class="bu">str</span> <span class="op">|</span> <span class="va">None</span><span class="op">=</span>Header(default<span class="op">=</span><span class="va">None</span>)) <span class="op">-&gt;</span> HTMLResponse</span></code></pre></div>
+<p><strong>GET <code>/staff/sync</code></strong> — handler
+<code>staff_sync_workspace</code>, line 983. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb11"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb11-1"><a href="#cb11-1" aria-hidden="true" tabindex="-1"></a>staff_sync_workspace(x_civiccode_role: <span class="bu">str</span> <span class="op">|</span> <span class="va">None</span><span class="op">=</span>Header(default<span class="op">=</span><span class="va">None</span>), x_civiccode_actor: <span class="bu">str</span> <span class="op">|</span> <span class="va">None</span><span class="op">=</span>Header(default<span class="op">=</span><span class="va">None</span>)) <span class="op">-&gt;</span> HTMLResponse</span></code></pre></div>
+<p><strong>GET <code>/staff/imports</code></strong> — handler
+<code>staff_import_ledger</code>, line 1000. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb12"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb12-1"><a href="#cb12-1" aria-hidden="true" tabindex="-1"></a>staff_import_ledger(x_civiccode_role: <span class="bu">str</span> <span class="op">|</span> <span class="va">None</span><span class="op">=</span>Header(default<span class="op">=</span><span class="va">None</span>), x_civiccode_actor: <span class="bu">str</span> <span class="op">|</span> <span class="va">None</span><span class="op">=</span>Header(default<span class="op">=</span><span class="va">None</span>)) <span class="op">-&gt;</span> HTMLResponse</span></code></pre></div>
+<p><strong>GET <code>/health</code></strong> — handler
+<code>health</code>, line 1013. Declared router prefix included.</p>
+<div class="sourceCode" id="cb13"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb13-1"><a href="#cb13-1" aria-hidden="true" tabindex="-1"></a>health() <span class="op">-&gt;</span> <span class="bu">dict</span>[<span class="bu">str</span>, <span class="bu">str</span>]</span></code></pre></div>
+<p><strong>GET
+<code>/api/v1/civiccode/staff/operational-state</code></strong> —
+handler <code>get_staff_operational_state</code>, line 1024. Declared
+router prefix included.</p>
+<div class="sourceCode" id="cb14"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb14-1"><a href="#cb14-1" aria-hidden="true" tabindex="-1"></a>get_staff_operational_state(x_civiccode_role: <span class="bu">str</span> <span class="op">|</span> <span class="va">None</span><span class="op">=</span>Header(default<span class="op">=</span><span class="va">None</span>), x_civiccode_actor: <span class="bu">str</span> <span class="op">|</span> <span class="va">None</span><span class="op">=</span>Header(default<span class="op">=</span><span class="va">None</span>)) <span class="op">-&gt;</span> <span class="bu">dict</span>[<span class="bu">str</span>, Any]</span></code></pre></div>
+<p><strong>GET <code>/api/v1/civiccode/sources/catalog</code></strong> —
+handler <code>source_registry_catalog</code>, line 1036. Declared router
+prefix included.</p>
+<div class="sourceCode" id="cb15"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb15-1"><a href="#cb15-1" aria-hidden="true" tabindex="-1"></a>source_registry_catalog() <span class="op">-&gt;</span> <span class="bu">dict</span>[<span class="bu">str</span>, Any]</span></code></pre></div>
+<p><strong>POST <code>/api/v1/civiccode/sources</code></strong> —
+handler <code>create_source</code>, line 1050. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb16"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb16-1"><a href="#cb16-1" aria-hidden="true" tabindex="-1"></a>create_source(request: SourceCreate, x_civiccode_role: <span class="bu">str</span> <span class="op">|</span> <span class="va">None</span><span class="op">=</span>Header(default<span class="op">=</span><span class="va">None</span>), x_civiccode_actor: <span class="bu">str</span> <span class="op">|</span> <span class="va">None</span><span class="op">=</span>Header(default<span class="op">=</span><span class="va">None</span>)) <span class="op">-&gt;</span> <span class="bu">dict</span>[<span class="bu">str</span>, Any]</span></code></pre></div>
+<p><strong>GET <code>/api/v1/civiccode/sources</code></strong> — handler
+<code>list_public_sources</code>, line 1068. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb17"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb17-1"><a href="#cb17-1" aria-hidden="true" tabindex="-1"></a>list_public_sources() <span class="op">-&gt;</span> <span class="bu">dict</span>[<span class="bu">str</span>, Any]</span></code></pre></div>
+<p><strong>GET
+<code>/api/v1/civiccode/sources/{source_id}</code></strong> — handler
+<code>get_public_source</code>, line 1079. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb18"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb18-1"><a href="#cb18-1" aria-hidden="true" tabindex="-1"></a>get_public_source(source_id: <span class="bu">str</span>) <span class="op">-&gt;</span> <span class="bu">dict</span>[<span class="bu">str</span>, Any]</span></code></pre></div>
+<p>Direct handler refusals:
+<code>HTTPException(status_code=404, detail={'message': f"Source '{source_id}' is not public-visible.", 'fix': 'Use the staff source endpoint if you are authorized to view it.'})</code>.</p>
+<p><strong>GET <code>/api/v1/civiccode/staff/sources</code></strong> —
+handler <code>list_staff_sources</code>, line 1097. Declared router
+prefix included.</p>
+<div class="sourceCode" id="cb19"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb19-1"><a href="#cb19-1" aria-hidden="true" tabindex="-1"></a>list_staff_sources(x_civiccode_role: <span class="bu">str</span> <span class="op">|</span> <span class="va">None</span><span class="op">=</span>Header(default<span class="op">=</span><span class="va">None</span>), x_civiccode_actor: <span class="bu">str</span> <span class="op">|</span> <span class="va">None</span><span class="op">=</span>Header(default<span class="op">=</span><span class="va">None</span>)) <span class="op">-&gt;</span> <span class="bu">dict</span>[<span class="bu">str</span>, Any]</span></code></pre></div>
+<p><strong>GET
+<code>/api/v1/civiccode/staff/sources/{source_id}</code></strong> —
+handler <code>get_staff_source</code>, line 1112. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb20"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb20-1"><a href="#cb20-1" aria-hidden="true" tabindex="-1"></a>get_staff_source(source_id: <span class="bu">str</span>, x_civiccode_role: <span class="bu">str</span> <span class="op">|</span> <span class="va">None</span><span class="op">=</span>Header(default<span class="op">=</span><span class="va">None</span>), x_civiccode_actor: <span class="bu">str</span> <span class="op">|</span> <span class="va">None</span><span class="op">=</span>Header(default<span class="op">=</span><span class="va">None</span>)) <span class="op">-&gt;</span> <span class="bu">dict</span>[<span class="bu">str</span>, Any]</span></code></pre></div>
+<p><strong>POST
+<code>/api/v1/civiccode/sources/{source_id}/transitions</code></strong>
+— handler <code>transition_source</code>, line 1127. Declared router
+prefix included.</p>
+<div class="sourceCode" id="cb21"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb21-1"><a href="#cb21-1" aria-hidden="true" tabindex="-1"></a>transition_source(source_id: <span class="bu">str</span>, request: SourceTransitionRequest, x_civiccode_role: <span class="bu">str</span> <span class="op">|</span> <span class="va">None</span><span class="op">=</span>Header(default<span class="op">=</span><span class="va">None</span>), x_civiccode_actor: <span class="bu">str</span> <span class="op">|</span> <span class="va">None</span><span class="op">=</span>Header(default<span class="op">=</span><span class="va">None</span>)) <span class="op">-&gt;</span> <span class="bu">dict</span>[<span class="bu">str</span>, Any]</span></code></pre></div>
+<p><strong>POST <code>/api/v1/civiccode/titles</code></strong> — handler
+<code>create_title</code>, line 1148. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb22"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb22-1"><a href="#cb22-1" aria-hidden="true" tabindex="-1"></a>create_title(request: TitleCreate, x_civiccode_role: <span class="bu">str</span> <span class="op">|</span> <span class="va">None</span><span class="op">=</span>Header(default<span class="op">=</span><span class="va">None</span>), x_civiccode_actor: <span class="bu">str</span> <span class="op">|</span> <span class="va">None</span><span class="op">=</span>Header(default<span class="op">=</span><span class="va">None</span>)) <span class="op">-&gt;</span> <span class="bu">dict</span>[<span class="bu">str</span>, Any]</span></code></pre></div>
+<p><strong>POST <code>/api/v1/civiccode/chapters</code></strong> —
+handler <code>create_chapter</code>, line 1163. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb23"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb23-1"><a href="#cb23-1" aria-hidden="true" tabindex="-1"></a>create_chapter(request: ChapterCreate, x_civiccode_role: <span class="bu">str</span> <span class="op">|</span> <span class="va">None</span><span class="op">=</span>Header(default<span class="op">=</span><span class="va">None</span>), x_civiccode_actor: <span class="bu">str</span> <span class="op">|</span> <span class="va">None</span><span class="op">=</span>Header(default<span class="op">=</span><span class="va">None</span>)) <span class="op">-&gt;</span> <span class="bu">dict</span>[<span class="bu">str</span>, Any]</span></code></pre></div>
+<p><strong>POST <code>/api/v1/civiccode/sections</code></strong> —
+handler <code>create_section</code>, line 1178. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb24"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb24-1"><a href="#cb24-1" aria-hidden="true" tabindex="-1"></a>create_section(request: SectionCreate, x_civiccode_role: <span class="bu">str</span> <span class="op">|</span> <span class="va">None</span><span class="op">=</span>Header(default<span class="op">=</span><span class="va">None</span>), x_civiccode_actor: <span class="bu">str</span> <span class="op">|</span> <span class="va">None</span><span class="op">=</span>Header(default<span class="op">=</span><span class="va">None</span>)) <span class="op">-&gt;</span> <span class="bu">dict</span>[<span class="bu">str</span>, Any]</span></code></pre></div>
+<p><strong>POST
+<code>/api/v1/civiccode/sections/{section_id}/versions</code></strong> —
+handler <code>create_section_version</code>, line 1193. Declared router
+prefix included.</p>
+<div class="sourceCode" id="cb25"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb25-1"><a href="#cb25-1" aria-hidden="true" tabindex="-1"></a>create_section_version(section_id: <span class="bu">str</span>, request: SectionVersionCreate, x_civiccode_role: <span class="bu">str</span> <span class="op">|</span> <span class="va">None</span><span class="op">=</span>Header(default<span class="op">=</span><span class="va">None</span>), x_civiccode_actor: <span class="bu">str</span> <span class="op">|</span> <span class="va">None</span><span class="op">=</span>Header(default<span class="op">=</span><span class="va">None</span>)) <span class="op">-&gt;</span> <span class="bu">dict</span>[<span class="bu">str</span>, Any]</span></code></pre></div>
+<p>Direct handler refusals:
+<code>HTTPException(status_code=422, detail={'message': 'Path section_id must match request body section_id.', 'fix': 'Use the same section_id in the URL and JSON body.'})</code>;
+<code>HTTPException(status_code=409, detail={'message': f"Source '{source.source_id}' is {source.status} and cannot back section text.", 'fix': 'Use an active source or refresh the source registry record first.'})</code>;
+<code>HTTPException(status_code=409, detail={'message': 'Adopted section versions require an active public-visible source.', 'fix': 'Activate an official source in the registry before marking text as adopted law.'})</code>;
+<code>HTTPException(status_code=404, detail={'message': f"Source '{data['source_id']}' was not found for this section version.", 'fix': 'Register the source before adding section text from it.'})</code>.</p>
+<p><strong>GET <code>/api/v1/civiccode/sections/lookup</code></strong> —
+handler <code>lookup_section</code>, line 1244. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb26"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb26-1"><a href="#cb26-1" aria-hidden="true" tabindex="-1"></a>lookup_section(section_number: <span class="bu">str</span>, as_of: date <span class="op">|</span> <span class="va">None</span><span class="op">=</span><span class="va">None</span>) <span class="op">-&gt;</span> <span class="bu">dict</span>[<span class="bu">str</span>, Any]</span></code></pre></div>
+<p><strong>POST <code>/api/v1/civiccode/sections/resolve</code></strong>
+— handler <code>resolve_section</code>, line 1255. Declared router
+prefix included.</p>
+<div class="sourceCode" id="cb27"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb27-1"><a href="#cb27-1" aria-hidden="true" tabindex="-1"></a>resolve_section(request: SectionResolveRequest) <span class="op">-&gt;</span> <span class="bu">dict</span>[<span class="bu">str</span>, Any]</span></code></pre></div>
+<p><strong>GET
+<code>/api/v1/civiccode/sections/{section_id}/history</code></strong> —
+handler <code>section_history</code>, line 1354. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb28"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb28-1"><a href="#cb28-1" aria-hidden="true" tabindex="-1"></a>section_history(section_id: <span class="bu">str</span>) <span class="op">-&gt;</span> <span class="bu">dict</span>[<span class="bu">str</span>, Any]</span></code></pre></div>
+<p><strong>GET
+<code>/api/v1/civiccode/sections/{section_id}/permalink</code></strong>
+— handler <code>section_permalink</code>, line 1363. Declared router
+prefix included.</p>
+<div class="sourceCode" id="cb29"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb29-1"><a href="#cb29-1" aria-hidden="true" tabindex="-1"></a>section_permalink(section_id: <span class="bu">str</span>) <span class="op">-&gt;</span> <span class="bu">dict</span>[<span class="bu">str</span>, Any]</span></code></pre></div>
+<p><strong>GET <code>/api/v1/civiccode/search</code></strong> — handler
+<code>search_sections</code>, line 1372. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb30"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb30-1"><a href="#cb30-1" aria-hidden="true" tabindex="-1"></a>search_sections(q: <span class="bu">str</span>) <span class="op">-&gt;</span> <span class="bu">dict</span>[<span class="bu">str</span>, Any]</span></code></pre></div>
+<p><strong>GET <code>/api/v1/civiccode/popular-questions</code></strong>
+— handler <code>list_popular_questions</code>, line 1381. Declared
+router prefix included.</p>
+<div class="sourceCode" id="cb31"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb31-1"><a href="#cb31-1" aria-hidden="true" tabindex="-1"></a>list_popular_questions() <span class="op">-&gt;</span> <span class="bu">dict</span>[<span class="bu">str</span>, Any]</span></code></pre></div>
+<p><strong>POST
+<code>/api/v1/civiccode/staff/popular-questions</code></strong> —
+handler <code>create_popular_question</code>, line 1403. Declared router
+prefix included.</p>
+<div class="sourceCode" id="cb32"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb32-1"><a href="#cb32-1" aria-hidden="true" tabindex="-1"></a>create_popular_question(request: PopularQuestionCreate, x_civiccode_role: <span class="bu">str</span> <span class="op">|</span> <span class="va">None</span><span class="op">=</span>Header(default<span class="op">=</span><span class="va">None</span>), x_civiccode_actor: <span class="bu">str</span> <span class="op">|</span> <span class="va">None</span><span class="op">=</span>Header(default<span class="op">=</span><span class="va">None</span>)) <span class="op">-&gt;</span> <span class="bu">dict</span>[<span class="bu">str</span>, Any]</span></code></pre></div>
+<p>Direct handler refusals:
+<code>HTTPException(status_code=422, detail={'message': 'Popular questions cannot ask CivicCode for a legal determination.', 'fix': "Rewrite the question as a navigation prompt, such as 'Where do I read the backyard chicken permit rule?'"})</code>;
+<code>HTTPException(status_code=409, detail={'message': citation_payload.get('reason', 'Citation could not be built.'), 'fix': citation_payload.get('fix', 'Attach the question to cited adopted code.')})</code>.</p>
+<p><strong>GET
+<code>/api/v1/civiccode/sections/{section_number}/related</code></strong>
+— handler <code>related_materials</code>, line 1453. Declared router
+prefix included.</p>
+<div class="sourceCode" id="cb33"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb33-1"><a href="#cb33-1" aria-hidden="true" tabindex="-1"></a>related_materials(section_number: <span class="bu">str</span>) <span class="op">-&gt;</span> <span class="bu">dict</span>[<span class="bu">str</span>, Any]</span></code></pre></div>
+<p><strong>GET <code>/api/v1/civiccode/citations/build</code></strong> —
+handler <code>build_citation</code>, line 1466. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb34"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb34-1"><a href="#cb34-1" aria-hidden="true" tabindex="-1"></a>build_citation(section_number: <span class="bu">str</span>, as_of: date <span class="op">|</span> <span class="va">None</span><span class="op">=</span><span class="va">None</span>) <span class="op">-&gt;</span> <span class="bu">dict</span>[<span class="bu">str</span>, Any]</span></code></pre></div>
+<p><strong>GET
+<code>/api/v1/civiccode/sections/{section_ref}/export</code></strong> —
+handler <code>export_section</code>, line 1472. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb35"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb35-1"><a href="#cb35-1" aria-hidden="true" tabindex="-1"></a>export_section(section_ref: <span class="bu">str</span>, as_of: date <span class="op">|</span> <span class="va">None</span><span class="op">=</span><span class="va">None</span>) <span class="op">-&gt;</span> <span class="bu">dict</span>[<span class="bu">str</span>, Any]</span></code></pre></div>
+<p><strong>POST <code>/api/v1/civiccode/questions/answer</code></strong>
+— handler <code>answer_question</code>, line 1478. Declared router
+prefix included.</p>
+<div class="sourceCode" id="cb36"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb36-1"><a href="#cb36-1" aria-hidden="true" tabindex="-1"></a>answer_question(request: QuestionAnswerRequest) <span class="op">-&gt;</span> <span class="bu">dict</span>[<span class="bu">str</span>, Any]</span></code></pre></div>
+<p><strong>POST
+<code>/api/v1/civiccode/staff/sections/{section_id}/notes</code></strong>
+— handler <code>create_interpretation_note</code>, line 1494. Declared
+router prefix included.</p>
+<div class="sourceCode" id="cb37"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb37-1"><a href="#cb37-1" aria-hidden="true" tabindex="-1"></a>create_interpretation_note(section_id: <span class="bu">str</span>, request: InterpretationNoteCreate, x_civiccode_role: <span class="bu">str</span> <span class="op">|</span> <span class="va">None</span><span class="op">=</span>Header(default<span class="op">=</span><span class="va">None</span>), x_civiccode_actor: <span class="bu">str</span> <span class="op">|</span> <span class="va">None</span><span class="op">=</span>Header(default<span class="op">=</span><span class="va">None</span>)) <span class="op">-&gt;</span> <span class="bu">dict</span>[<span class="bu">str</span>, Any]</span></code></pre></div>
+<p><strong>GET
+<code>/api/v1/civiccode/staff/sections/{section_id}/notes</code></strong>
+— handler <code>list_interpretation_notes</code>, line 1517. Declared
+router prefix included.</p>
+<div class="sourceCode" id="cb38"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb38-1"><a href="#cb38-1" aria-hidden="true" tabindex="-1"></a>list_interpretation_notes(section_id: <span class="bu">str</span>, x_civiccode_role: <span class="bu">str</span> <span class="op">|</span> <span class="va">None</span><span class="op">=</span>Header(default<span class="op">=</span><span class="va">None</span>), x_civiccode_actor: <span class="bu">str</span> <span class="op">|</span> <span class="va">None</span><span class="op">=</span>Header(default<span class="op">=</span><span class="va">None</span>)) <span class="op">-&gt;</span> <span class="bu">dict</span>[<span class="bu">str</span>, Any]</span></code></pre></div>
+<p><strong>GET
+<code>/api/v1/civiccode/staff/audit-events</code></strong> — handler
+<code>list_staff_audit_events</code>, line 1532. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb39"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb39-1"><a href="#cb39-1" aria-hidden="true" tabindex="-1"></a>list_staff_audit_events(x_civiccode_role: <span class="bu">str</span> <span class="op">|</span> <span class="va">None</span><span class="op">=</span>Header(default<span class="op">=</span><span class="va">None</span>), x_civiccode_actor: <span class="bu">str</span> <span class="op">|</span> <span class="va">None</span><span class="op">=</span>Header(default<span class="op">=</span><span class="va">None</span>)) <span class="op">-&gt;</span> <span class="bu">dict</span>[<span class="bu">str</span>, Any]</span></code></pre></div>
+<p><strong>POST
+<code>/api/v1/civiccode/staff/imports/local-bundle</code></strong> —
+handler <code>create_local_import_job</code>, line 1548. Declared router
+prefix included.</p>
+<div class="sourceCode" id="cb40"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb40-1"><a href="#cb40-1" aria-hidden="true" tabindex="-1"></a>create_local_import_job(request: ImportBundleCreate, x_civiccode_role: <span class="bu">str</span> <span class="op">|</span> <span class="va">None</span><span class="op">=</span>Header(default<span class="op">=</span><span class="va">None</span>), x_civiccode_actor: <span class="bu">str</span> <span class="op">|</span> <span class="va">None</span><span class="op">=</span>Header(default<span class="op">=</span><span class="va">None</span>)) <span class="op">-&gt;</span> <span class="bu">dict</span>[<span class="bu">str</span>, Any]</span></code></pre></div>
+<p><strong>POST
+<code>/api/v1/civiccode/staff/imports/shared-pdf</code></strong> —
+handler <code>create_shared_pdf_import_job</code>, line 1560. Declared
+router prefix included.</p>
+<div class="sourceCode" id="cb41"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb41-1"><a href="#cb41-1" aria-hidden="true" tabindex="-1"></a>create_shared_pdf_import_job(request: SharedPdfImportCreate, x_civiccode_role: <span class="bu">str</span> <span class="op">|</span> <span class="va">None</span><span class="op">=</span>Header(default<span class="op">=</span><span class="va">None</span>), x_civiccode_actor: <span class="bu">str</span> <span class="op">|</span> <span class="va">None</span><span class="op">=</span>Header(default<span class="op">=</span><span class="va">None</span>)) <span class="op">-&gt;</span> <span class="bu">dict</span>[<span class="bu">str</span>, Any]</span></code></pre></div>
+<p>Direct handler refusals:
+<code>HTTPException(status_code=409, detail={'message': 'Shared PDF ingestion requires a durable PostgreSQL runtime.', 'fix': 'Set CIVICCODE_SOURCE_REGISTRY_DB_URL or DATABASE_URL to the CivicCode PostgreSQL DSN.'})</code>.</p>
+<p><strong>GET <code>/api/v1/civiccode/staff/imports</code></strong> —
+handler <code>list_import_jobs</code>, line 1594. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb42"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb42-1"><a href="#cb42-1" aria-hidden="true" tabindex="-1"></a>list_import_jobs(x_civiccode_role: <span class="bu">str</span> <span class="op">|</span> <span class="va">None</span><span class="op">=</span>Header(default<span class="op">=</span><span class="va">None</span>), x_civiccode_actor: <span class="bu">str</span> <span class="op">|</span> <span class="va">None</span><span class="op">=</span>Header(default<span class="op">=</span><span class="va">None</span>)) <span class="op">-&gt;</span> <span class="bu">dict</span>[<span class="bu">str</span>, Any]</span></code></pre></div>
+<p><strong>GET
+<code>/api/v1/civiccode/staff/imports/{job_id}</code></strong> — handler
+<code>get_import_job</code>, line 1604. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb43"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb43-1"><a href="#cb43-1" aria-hidden="true" tabindex="-1"></a>get_import_job(job_id: <span class="bu">str</span>, x_civiccode_role: <span class="bu">str</span> <span class="op">|</span> <span class="va">None</span><span class="op">=</span>Header(default<span class="op">=</span><span class="va">None</span>), x_civiccode_actor: <span class="bu">str</span> <span class="op">|</span> <span class="va">None</span><span class="op">=</span>Header(default<span class="op">=</span><span class="va">None</span>)) <span class="op">-&gt;</span> <span class="bu">dict</span>[<span class="bu">str</span>, Any]</span></code></pre></div>
+<p><strong>POST
+<code>/api/v1/civiccode/staff/imports/{job_id}/retry</code></strong> —
+handler <code>retry_import_job</code>, line 1619. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb44"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb44-1"><a href="#cb44-1" aria-hidden="true" tabindex="-1"></a>retry_import_job(job_id: <span class="bu">str</span>, request: ImportBundleCreate, x_civiccode_role: <span class="bu">str</span> <span class="op">|</span> <span class="va">None</span><span class="op">=</span>Header(default<span class="op">=</span><span class="va">None</span>), x_civiccode_actor: <span class="bu">str</span> <span class="op">|</span> <span class="va">None</span><span class="op">=</span>Header(default<span class="op">=</span><span class="va">None</span>)) <span class="op">-&gt;</span> <span class="bu">dict</span>[<span class="bu">str</span>, Any]</span></code></pre></div>
+<p><strong>GET
+<code>/api/v1/civiccode/staff/imports/{job_id}/provenance</code></strong>
+— handler <code>get_import_provenance</code>, line 1635. Declared router
+prefix included.</p>
+<div class="sourceCode" id="cb45"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb45-1"><a href="#cb45-1" aria-hidden="true" tabindex="-1"></a>get_import_provenance(job_id: <span class="bu">str</span>, x_civiccode_role: <span class="bu">str</span> <span class="op">|</span> <span class="va">None</span><span class="op">=</span>Header(default<span class="op">=</span><span class="va">None</span>), x_civiccode_actor: <span class="bu">str</span> <span class="op">|</span> <span class="va">None</span><span class="op">=</span>Header(default<span class="op">=</span><span class="va">None</span>)) <span class="op">-&gt;</span> <span class="bu">dict</span>[<span class="bu">str</span>, Any]</span></code></pre></div>
+<p><strong>GET
+<code>/api/v1/civiccode/staff/imports/{job_id}/tree</code></strong> —
+handler <code>get_imported_tree</code>, line 1650. Declared router
+prefix included.</p>
+<div class="sourceCode" id="cb46"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb46-1"><a href="#cb46-1" aria-hidden="true" tabindex="-1"></a>get_imported_tree(job_id: <span class="bu">str</span>, x_civiccode_role: <span class="bu">str</span> <span class="op">|</span> <span class="va">None</span><span class="op">=</span>Header(default<span class="op">=</span><span class="va">None</span>), x_civiccode_actor: <span class="bu">str</span> <span class="op">|</span> <span class="va">None</span><span class="op">=</span>Header(default<span class="op">=</span><span class="va">None</span>)) <span class="op">-&gt;</span> <span class="bu">dict</span>[<span class="bu">str</span>, Any]</span></code></pre></div>
+<p><strong>POST
+<code>/api/v1/civiccode/staff/sync/codifier-sources</code></strong> —
+handler <code>configure_codifier_sync_source</code>, line 1673. Declared
+router prefix included.</p>
+<div class="sourceCode" id="cb47"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb47-1"><a href="#cb47-1" aria-hidden="true" tabindex="-1"></a>configure_codifier_sync_source(request: CodifierSyncConfigureRequest, x_civiccode_role: <span class="bu">str</span> <span class="op">|</span> <span class="va">None</span><span class="op">=</span>Header(default<span class="op">=</span><span class="va">None</span>), x_civiccode_actor: <span class="bu">str</span> <span class="op">|</span> <span class="va">None</span><span class="op">=</span>Header(default<span class="op">=</span><span class="va">None</span>)) <span class="op">-&gt;</span> <span class="bu">dict</span>[<span class="bu">str</span>, Any]</span></code></pre></div>
+<p><strong>GET
+<code>/api/v1/civiccode/staff/sync/codifier-sources</code></strong> —
+handler <code>list_codifier_sync_sources</code>, line 1694. Declared
+router prefix included.</p>
+<div class="sourceCode" id="cb48"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb48-1"><a href="#cb48-1" aria-hidden="true" tabindex="-1"></a>list_codifier_sync_sources(x_civiccode_role: <span class="bu">str</span> <span class="op">|</span> <span class="va">None</span><span class="op">=</span>Header(default<span class="op">=</span><span class="va">None</span>), x_civiccode_actor: <span class="bu">str</span> <span class="op">|</span> <span class="va">None</span><span class="op">=</span>Header(default<span class="op">=</span><span class="va">None</span>)) <span class="op">-&gt;</span> <span class="bu">dict</span>[<span class="bu">str</span>, Any]</span></code></pre></div>
+<p><strong>POST
+<code>/api/v1/civiccode/staff/sync/codifier-sources/{source_id}/run</code></strong>
+— handler <code>run_codifier_sync_source</code>, line 1709. Declared
+router prefix included.</p>
+<div class="sourceCode" id="cb49"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb49-1"><a href="#cb49-1" aria-hidden="true" tabindex="-1"></a>run_codifier_sync_source(source_id: <span class="bu">str</span>, request: CodifierSyncRunRequest, x_civiccode_role: <span class="bu">str</span> <span class="op">|</span> <span class="va">None</span><span class="op">=</span>Header(default<span class="op">=</span><span class="va">None</span>), x_civiccode_actor: <span class="bu">str</span> <span class="op">|</span> <span class="va">None</span><span class="op">=</span>Header(default<span class="op">=</span><span class="va">None</span>)) <span class="op">-&gt;</span> <span class="bu">dict</span>[<span class="bu">str</span>, Any]</span></code></pre></div>
+<p><strong>POST
+<code>/api/v1/civiccode/staff/civicclerk/ordinance-events</code></strong>
+— handler <code>create_civicclerk_ordinance_event</code>, line 1730.
+Declared router prefix included.</p>
+<div class="sourceCode" id="cb50"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb50-1"><a href="#cb50-1" aria-hidden="true" tabindex="-1"></a>create_civicclerk_ordinance_event(request: CivicClerkOrdinanceEventCreate, x_civiccode_role: <span class="bu">str</span> <span class="op">|</span> <span class="va">None</span><span class="op">=</span>Header(default<span class="op">=</span><span class="va">None</span>), x_civiccode_actor: <span class="bu">str</span> <span class="op">|</span> <span class="va">None</span><span class="op">=</span>Header(default<span class="op">=</span><span class="va">None</span>), x_civiccode_intake_auth: <span class="bu">str</span> <span class="op">|</span> <span class="va">None</span><span class="op">=</span>Header(default<span class="op">=</span><span class="va">None</span>, alias<span class="op">=</span>CIVICCODE_INTAKE_AUTH_HEADER), authorization: <span class="bu">str</span> <span class="op">|</span> <span class="va">None</span><span class="op">=</span>Header(default<span class="op">=</span><span class="va">None</span>)) <span class="op">-&gt;</span> <span class="bu">dict</span>[<span class="bu">str</span>, Any]</span></code></pre></div>
+<p><strong>POST
+<code>/api/v1/civiccode/staff/civicclerk/ordinance-events/{event_id}/resolve</code></strong>
+— handler <code>resolve_civicclerk_ordinance_event</code>, line 1756.
+Declared router prefix included.</p>
+<div class="sourceCode" id="cb51"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb51-1"><a href="#cb51-1" aria-hidden="true" tabindex="-1"></a>resolve_civicclerk_ordinance_event(event_id: <span class="bu">str</span>, request: CivicClerkOrdinanceEventResolve, x_civiccode_role: <span class="bu">str</span> <span class="op">|</span> <span class="va">None</span><span class="op">=</span>Header(default<span class="op">=</span><span class="va">None</span>), x_civiccode_actor: <span class="bu">str</span> <span class="op">|</span> <span class="va">None</span><span class="op">=</span>Header(default<span class="op">=</span><span class="va">None</span>), x_civiccode_intake_auth: <span class="bu">str</span> <span class="op">|</span> <span class="va">None</span><span class="op">=</span>Header(default<span class="op">=</span><span class="va">None</span>, alias<span class="op">=</span>CIVICCODE_INTAKE_AUTH_HEADER), authorization: <span class="bu">str</span> <span class="op">|</span> <span class="va">None</span><span class="op">=</span>Header(default<span class="op">=</span><span class="va">None</span>)) <span class="op">-&gt;</span> <span class="bu">dict</span>[<span class="bu">str</span>, Any]</span></code></pre></div>
+<p><strong>POST
+<code>/api/v1/civiccode/staff/sections/{section_id}/summaries</code></strong>
+— handler <code>create_plain_language_summary</code>, line 1806.
+Declared router prefix included.</p>
+<div class="sourceCode" id="cb52"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb52-1"><a href="#cb52-1" aria-hidden="true" tabindex="-1"></a>create_plain_language_summary(section_id: <span class="bu">str</span>, request: PlainLanguageSummaryCreate, x_civiccode_role: <span class="bu">str</span> <span class="op">|</span> <span class="va">None</span><span class="op">=</span>Header(default<span class="op">=</span><span class="va">None</span>), x_civiccode_actor: <span class="bu">str</span> <span class="op">|</span> <span class="va">None</span><span class="op">=</span>Header(default<span class="op">=</span><span class="va">None</span>)) <span class="op">-&gt;</span> <span class="bu">dict</span>[<span class="bu">str</span>, Any]</span></code></pre></div>
+<p><strong>POST
+<code>/api/v1/civiccode/staff/summaries/{summary_id}/approve</code></strong>
+— handler <code>approve_plain_language_summary</code>, line 1841.
+Declared router prefix included.</p>
+<div class="sourceCode" id="cb53"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb53-1"><a href="#cb53-1" aria-hidden="true" tabindex="-1"></a>approve_plain_language_summary(summary_id: <span class="bu">str</span>, x_civiccode_role: <span class="bu">str</span> <span class="op">|</span> <span class="va">None</span><span class="op">=</span>Header(default<span class="op">=</span><span class="va">None</span>), x_civiccode_actor: <span class="bu">str</span> <span class="op">|</span> <span class="va">None</span><span class="op">=</span>Header(default<span class="op">=</span><span class="va">None</span>)) <span class="op">-&gt;</span> <span class="bu">dict</span>[<span class="bu">str</span>, Any]</span></code></pre></div>
+<p><strong>GET
+<code>/api/v1/civiccode/sections/{section_id}/summaries</code></strong>
+— handler <code>list_public_plain_language_summaries</code>, line 1866.
+Declared router prefix included.</p>
+<div class="sourceCode" id="cb54"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb54-1"><a href="#cb54-1" aria-hidden="true" tabindex="-1"></a>list_public_plain_language_summaries(section_id: <span class="bu">str</span>) <span class="op">-&gt;</span> <span class="bu">dict</span>[<span class="bu">str</span>, Any]</span></code></pre></div>
+<p><strong>POST
+<code>/api/v1/civiccode/staff/questions/answer</code></strong> — handler
+<code>answer_staff_question</code>, line 1895. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb55"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb55-1"><a href="#cb55-1" aria-hidden="true" tabindex="-1"></a>answer_staff_question(request: QuestionAnswerRequest, x_civiccode_role: <span class="bu">str</span> <span class="op">|</span> <span class="va">None</span><span class="op">=</span>Header(default<span class="op">=</span><span class="va">None</span>), x_civiccode_actor: <span class="bu">str</span> <span class="op">|</span> <span class="va">None</span><span class="op">=</span>Header(default<span class="op">=</span><span class="va">None</span>)) <span class="op">-&gt;</span> <span class="bu">dict</span>[<span class="bu">str</span>, Any]</span></code></pre></div>
+<h3 id="code_bridge.py">code_bridge.py</h3>
+<p>Candidate source:
+<code>installed-owned-source/civicsuite_runtime/code_bridge.py</code>.</p>
+<p><strong>POST <code>/desktop/v1/code/imports</code></strong> — handler
+<code>imports</code>, line 46. Declared router prefix included.</p>
+<div class="sourceCode" id="cb56"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb56-1"><a href="#cb56-1" aria-hidden="true" tabindex="-1"></a>imports(data: code.ImportBundleCreate, actor_id: <span class="bu">str</span><span class="op">=</span>Depends(actor))</span></code></pre></div>
+<p><strong>GET <code>/desktop/v1/code/sources</code></strong> — handler
+<code>sources</code>, line 55. Declared router prefix included.</p>
+<div class="sourceCode" id="cb57"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb57-1"><a href="#cb57-1" aria-hidden="true" tabindex="-1"></a>sources(actor_id: <span class="bu">str</span><span class="op">=</span>Depends(actor))</span></code></pre></div>
+<p><strong>GET <code>/desktop/v1/code/workspace</code></strong> —
+handler <code>workspace</code>, line 60. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb58"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb58-1"><a href="#cb58-1" aria-hidden="true" tabindex="-1"></a>workspace(actor_id: <span class="bu">str</span><span class="op">=</span>Depends(actor))</span></code></pre></div>
+<p>Direct handler refusals:
+<code>HTTPException(503, 'Townlight Code persistence unavailable.')</code>.</p>
+<p><strong>GET <code>/desktop/v1/code/lookup</code></strong> — handler
+<code>lookup</code>, line 68. Declared router prefix included.</p>
+<div class="sourceCode" id="cb59"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb59-1"><a href="#cb59-1" aria-hidden="true" tabindex="-1"></a>lookup(section_number: <span class="bu">str</span>, as_of: date <span class="op">|</span> <span class="va">None</span><span class="op">=</span><span class="va">None</span>, actor_id: <span class="bu">str</span><span class="op">=</span>Depends(actor))</span></code></pre></div>
+<p><strong>GET
+<code>/desktop/v1/code/sections/{section_id}/history</code></strong> —
+handler <code>section_history</code>, line 77. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb60"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb60-1"><a href="#cb60-1" aria-hidden="true" tabindex="-1"></a>section_history(section_id: <span class="bu">str</span>, actor_id: <span class="bu">str</span><span class="op">=</span>Depends(actor))</span></code></pre></div>
+<p><strong>GET <code>/desktop/v1/code/citation</code></strong> — handler
+<code>citation</code>, line 82. Declared router prefix included.</p>
+<div class="sourceCode" id="cb61"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb61-1"><a href="#cb61-1" aria-hidden="true" tabindex="-1"></a>citation(section_number: <span class="bu">str</span>, as_of: date <span class="op">|</span> <span class="va">None</span><span class="op">=</span><span class="va">None</span>, actor_id: <span class="bu">str</span><span class="op">=</span>Depends(actor))</span></code></pre></div>
+<p><strong>GET <code>/desktop/v1/code/search</code></strong> — handler
+<code>search</code>, line 89. Declared router prefix included.</p>
+<div class="sourceCode" id="cb62"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb62-1"><a href="#cb62-1" aria-hidden="true" tabindex="-1"></a>search(q: <span class="bu">str</span>, actor_id: <span class="bu">str</span><span class="op">=</span>Depends(actor))</span></code></pre></div>
+<p><strong>GET <code>/desktop/v1/code/imports</code></strong> — handler
+<code>list_imports</code>, line 100. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb63"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb63-1"><a href="#cb63-1" aria-hidden="true" tabindex="-1"></a>list_imports(actor_id: <span class="bu">str</span><span class="op">=</span>Depends(actor))</span></code></pre></div>
+<p><strong>GET
+<code>/desktop/v1/code/imports/{job_id}/tree</code></strong> — handler
+<code>import_tree</code>, line 105. Declared router prefix included.</p>
+<div class="sourceCode" id="cb64"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb64-1"><a href="#cb64-1" aria-hidden="true" tabindex="-1"></a>import_tree(job_id: <span class="bu">str</span>, actor_id: <span class="bu">str</span><span class="op">=</span>Depends(actor))</span></code></pre></div>
+<p><strong>GET
+<code>/desktop/v1/code/imports/{job_id}/provenance</code></strong> —
+handler <code>import_provenance</code>, line 110. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb65"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb65-1"><a href="#cb65-1" aria-hidden="true" tabindex="-1"></a>import_provenance(job_id: <span class="bu">str</span>, actor_id: <span class="bu">str</span><span class="op">=</span>Depends(actor))</span></code></pre></div>
+<p><strong>GET <code>/desktop/v1/code/export</code></strong> — handler
+<code>export_section</code>, line 115. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb66"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb66-1"><a href="#cb66-1" aria-hidden="true" tabindex="-1"></a>export_section(section_ref: <span class="bu">str</span>, as_of: date <span class="op">|</span> <span class="va">None</span><span class="op">=</span><span class="va">None</span>, actor_id: <span class="bu">str</span><span class="op">=</span>Depends(actor))</span></code></pre></div>
+<p><strong>POST <code>/desktop/v1/code/questions</code></strong> —
+handler <code>questions</code>, line 120. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb67"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb67-1"><a href="#cb67-1" aria-hidden="true" tabindex="-1"></a>questions(data: code.QuestionAnswerRequest, actor_id: <span class="bu">str</span><span class="op">=</span>Depends(actor))</span></code></pre></div>
+<p><strong>POST
+<code>/desktop/v1/code/sections/{section_id}/notes</code></strong> —
+handler <code>create_note</code>, line 125. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb68"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb68-1"><a href="#cb68-1" aria-hidden="true" tabindex="-1"></a>create_note(section_id: <span class="bu">str</span>, data: code.InterpretationNoteCreate, actor_id: <span class="bu">str</span><span class="op">=</span>Depends(actor))</span></code></pre></div>
+<p><strong>GET
+<code>/desktop/v1/code/sections/{section_id}/notes</code></strong> —
+handler <code>list_notes</code>, line 130. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb69"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb69-1"><a href="#cb69-1" aria-hidden="true" tabindex="-1"></a>list_notes(section_id: <span class="bu">str</span>, actor_id: <span class="bu">str</span><span class="op">=</span>Depends(actor))</span></code></pre></div>
+<p><strong>POST
+<code>/desktop/v1/code/sections/{section_id}/summaries</code></strong> —
+handler <code>create_summary</code>, line 135. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb70"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb70-1"><a href="#cb70-1" aria-hidden="true" tabindex="-1"></a>create_summary(section_id: <span class="bu">str</span>, data: code.PlainLanguageSummaryCreate, actor_id: <span class="bu">str</span><span class="op">=</span>Depends(actor))</span></code></pre></div>
+<p><strong>POST
+<code>/desktop/v1/code/summaries/{summary_id}/approve</code></strong> —
+handler <code>approve_summary</code>, line 140. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb71"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb71-1"><a href="#cb71-1" aria-hidden="true" tabindex="-1"></a>approve_summary(summary_id: <span class="bu">str</span>, actor_id: <span class="bu">str</span><span class="op">=</span>Depends(actor))</span></code></pre></div>
+<p><strong>GET
+<code>/desktop/v1/code/sections/{section_id}/summaries</code></strong> —
+handler <code>list_summaries</code>, line 145. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb72"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb72-1"><a href="#cb72-1" aria-hidden="true" tabindex="-1"></a>list_summaries(section_id: <span class="bu">str</span>, actor_id: <span class="bu">str</span><span class="op">=</span>Depends(actor))</span></code></pre></div>
+<h3 id="code_public.py">code_public.py</h3>
+<p>Candidate source:
+<code>installed-owned-source/civicsuite_runtime/code_public.py</code>.</p>
+<p><strong>GET <code>/civiccode</code></strong> — handler
+<code>home</code>, line 66. Declared router prefix included.</p>
+<div class="sourceCode" id="cb73"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb73-1"><a href="#cb73-1" aria-hidden="true" tabindex="-1"></a>home()</span></code></pre></div>
+<p><strong>GET <code>/civiccode/search</code></strong> — handler
+<code>search</code>, line 71. Declared router prefix included.</p>
+<div class="sourceCode" id="cb74"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb74-1"><a href="#cb74-1" aria-hidden="true" tabindex="-1"></a>search(q: <span class="bu">str</span><span class="op">=</span><span class="st">&#39;&#39;</span>)</span></code></pre></div>
+<p><strong>GET <code>/civiccode/answer</code></strong> — handler
+<code>answer</code>, line 80. Declared router prefix included.</p>
+<div class="sourceCode" id="cb75"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb75-1"><a href="#cb75-1" aria-hidden="true" tabindex="-1"></a>answer(q: <span class="bu">str</span><span class="op">=</span><span class="st">&#39;&#39;</span>, section_number: <span class="bu">str</span> <span class="op">|</span> <span class="va">None</span><span class="op">=</span><span class="va">None</span>, as_of: date <span class="op">|</span> <span class="va">None</span><span class="op">=</span><span class="va">None</span>)</span></code></pre></div>
+<p><strong>GET <code>/civiccode/sections/{section_ref}</code></strong> —
+handler <code>detail</code>, line 91. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb76"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb76-1"><a href="#cb76-1" aria-hidden="true" tabindex="-1"></a>detail(section_ref: <span class="bu">str</span>, as_of: date <span class="op">|</span> <span class="va">None</span><span class="op">=</span><span class="va">None</span>) <span class="op">-&gt;</span> HTMLResponse</span></code></pre></div>
+<p>Direct handler refusals:
+<code>HTTPException(503, 'Service unavailable')</code>.</p>
+<p><strong>GET
+<code>/civiccode/sections/{section_ref}/export</code></strong> — handler
+<code>export</code>, line 109. Declared router prefix included.</p>
+<div class="sourceCode" id="cb77"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb77-1"><a href="#cb77-1" aria-hidden="true" tabindex="-1"></a>export(section_ref: <span class="bu">str</span>, as_of: date <span class="op">|</span> <span class="va">None</span><span class="op">=</span><span class="va">None</span>) <span class="op">-&gt;</span> HTMLResponse</span></code></pre></div>
+<p>Direct handler refusals:
+<code>HTTPException(503, 'Service unavailable')</code>.</p>
+<h3 id="code_meetings_bridge.py">code_meetings_bridge.py</h3>
+<p>Candidate source:
+<code>installed-owned-source/civicsuite_runtime/code_meetings_bridge.py</code>.</p>
+<p><strong>GET <code>/desktop/v1/code/connections</code></strong> —
+handler <code>list_connections</code>, line 87. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb78"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb78-1"><a href="#cb78-1" aria-hidden="true" tabindex="-1"></a>list_connections(actor<span class="op">=</span>Depends(code_actor))</span></code></pre></div>
+<p><strong>GET
+<code>/desktop/v1/code/connections/{connection_id}</code></strong> —
+handler <code>get_connection</code>, line 92. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb79"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb79-1"><a href="#cb79-1" aria-hidden="true" tabindex="-1"></a>get_connection(connection_id: Key, actor<span class="op">=</span>Depends(code_actor))</span></code></pre></div>
+<p><strong>POST <code>/desktop/v1/code/connections</code></strong> —
+handler <code>create_connection</code>, line 97. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb80"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb80-1"><a href="#cb80-1" aria-hidden="true" tabindex="-1"></a>create_connection(payload: Proposal, actor<span class="op">=</span>Depends(code_actor))</span></code></pre></div>
+<p><strong>POST
+<code>/desktop/v1/code/connections/{connection_id}/closeout</code></strong>
+— handler <code>closeout_connection</code>, line 104. Declared router
+prefix included.</p>
+<div class="sourceCode" id="cb81"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb81-1"><a href="#cb81-1" aria-hidden="true" tabindex="-1"></a>closeout_connection(connection_id: Key, payload: Closeout, actor<span class="op">=</span>Depends(code_actor))</span></code></pre></div>
+<p><strong>GET
+<code>/desktop/v1/meetings/code-connections</code></strong> — handler
+<code>list_code_connections</code>, line 111. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb82"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb82-1"><a href="#cb82-1" aria-hidden="true" tabindex="-1"></a>list_code_connections(actor<span class="op">=</span>Depends(meeting_actor))</span></code></pre></div>
+<p><strong>GET
+<code>/desktop/v1/meetings/code-connections/{connection_id}</code></strong>
+— handler <code>get_code_connection</code>, line 116. Declared router
+prefix included.</p>
+<div class="sourceCode" id="cb83"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb83-1"><a href="#cb83-1" aria-hidden="true" tabindex="-1"></a>get_code_connection(connection_id: Key, actor<span class="op">=</span>Depends(meeting_actor))</span></code></pre></div>
+<p><strong>POST
+<code>/desktop/v1/meetings/code-connections/{connection_id}/decisions</code></strong>
+— handler <code>record_decision</code>, line 121. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb84"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb84-1"><a href="#cb84-1" aria-hidden="true" tabindex="-1"></a>record_decision(connection_id: Key, payload: Decision, actor<span class="op">=</span>Depends(meeting_actor))</span></code></pre></div>
+<h2 id="alphabetical-contract-index">Alphabetical contract index</h2>
+<ul>
+<li><p><strong>ChapterCreate</strong> — request/response data
+dictionary.</p></li>
+<li><p><strong>Closeout</strong> — request/response data
+dictionary.</p></li>
+<li><p><strong>HTTPValidationError</strong> — request/response data
+dictionary.</p></li>
+<li><p><strong>ImportBundleCreate</strong> — request/response data
+dictionary.</p></li>
+<li><p><strong>InterpretationNoteCreate</strong> — request/response data
+dictionary.</p></li>
+<li><p><strong>PlainLanguageSummaryCreate</strong> — request/response
+data dictionary.</p></li>
+<li><p><strong>Proposal</strong> — request/response data
+dictionary.</p></li>
+<li><p><strong>QuestionAnswerRequest</strong> — request/response data
+dictionary.</p></li>
+<li><p><strong>SectionCreate</strong> — request/response data
+dictionary.</p></li>
+<li><p><strong>SectionVersionCreate</strong> — request/response data
+dictionary.</p></li>
+<li><p><strong>SourceCreate</strong> — request/response data
+dictionary.</p></li>
+<li><p><strong>TitleCreate</strong> — request/response data
+dictionary.</p></li>
+<li><p><strong>ValidationError</strong> — request/response data
+dictionary.</p></li>
+<li><p>Authentication: Origins and authentication.</p></li>
+<li><p>Conflicts and retry: Failure and retry contract.</p></li>
+<li><p>Fields and validation: Request and response data
+dictionary.</p></li>
+<li><p>HTTP operations: Installed desktop HTTP operations.</p></li>
+<li><p>Standalone boundaries: Source route and validation
+supplement.</p></li>
+</ul>
+<section id="footnotes" class="footnotes footnotes-end-of-document"
+role="doc-endnotes">
+<hr />
+<ol>
+<li id="fn1"><p>A-Za-z0-9_-<a href="#fnref1" class="footnote-back"
+role="doc-backlink">↩︎</a></p></li>
+<li id="fn2"><p>A-Za-z0-9_-<a href="#fnref2" class="footnote-back"
+role="doc-backlink">↩︎</a></p></li>
+<li id="fn3"><p>A-Za-z0-9_-<a href="#fnref3" class="footnote-back"
+role="doc-backlink">↩︎</a></p></li>
+<li id="fn4"><p>A-Za-z0-9_-<a href="#fnref4" class="footnote-back"
+role="doc-backlink">↩︎</a></p></li>
+<li id="fn5"><p>A-Za-z0-9_-<a href="#fnref5" class="footnote-back"
+role="doc-backlink">↩︎</a></p></li>
+</ol>
+</section></article></div></main><footer><span>Townlight Beta 1 · Townlight Beta 1 documentation · AGPL-3.0-only</span><span><a href="../versions.html">Exact versions and candidate</a> · CivicCast remains separate</span></footer>
+<script>const search=document.getElementById('find-section');if(search)search.addEventListener('input',()=>{const q=search.value.toLowerCase();let n=0;document.querySelectorAll('.toc li').forEach(li=>{const match=li.textContent.toLowerCase().includes(q);li.hidden=!match;if(match)n++;});document.querySelector('.search-status').textContent=q?n+' matching entries':'';});</script></body></html>

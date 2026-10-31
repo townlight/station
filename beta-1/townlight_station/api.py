@@ -37,6 +37,7 @@ class Capture(BaseModel):
     agenda_ids: list[UUID] = Field(default_factory=list, max_length=100)
     source_file: str | None = Field(default=None,pattern=r'^[A-Za-z0-9][A-Za-z0-9_.-]{0,180}$')
     live_source_id: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_-]{1,64}$")
+    civiccast_feed_id: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_-]{1,64}$")
     captions_file: str | None = Field(default=None, pattern=r'^[A-Za-z0-9][A-Za-z0-9_.-]{0,180}\.srt$')
     idempotency_key: str = Field(min_length=1, max_length=100)
 
@@ -100,6 +101,10 @@ def create_app(settings=None):
         live = sources(settings).get(data.live_source_id) if data.live_source_id else None
         if data.live_source_id and not live:
             raise HTTPException(422, 'Configured live input not found')
+        from .delivery import feeds
+        feed = feeds(settings).get(data.civiccast_feed_id) if data.civiccast_feed_id else None
+        if data.civiccast_feed_id and (not live or not feed):
+            raise HTTPException(422, 'Select a configured CivicCast feed with a live recording')
         original = private_path(settings.data, 'ingest', data.source_file) if data.source_file else None
         if original and (not original.is_file() or original.stat().st_size > settings.max_bytes):
             raise HTTPException(422, 'Source file missing or exceeds configured limit')
@@ -109,7 +114,7 @@ def create_app(settings=None):
             raise HTTPException(422, 'Caption sidecar missing or too large')
         caption_hash = sha256(captions) if captions else None
         request_hash = hashlib.sha256(json.dumps({'request': data.model_dump(mode='json'),
-            'input_sha256': input_hash, 'live_source': live, 'caption_sha256': caption_hash, 'encoding_profile': settings.encoding_profile(),
+            'input_sha256': input_hash, 'live_source': live, 'civiccast_feed': feed, 'caption_sha256': caption_hash, 'encoding_profile': settings.encoding_profile(),
             'meeting': meeting, 'agenda': agendas}, sort_keys=True).encode()).hexdigest()
         with store.engine.begin() as conn:
             # Serialize idempotency checks including bytes and captured meeting version.
@@ -139,7 +144,7 @@ def create_app(settings=None):
                 'caption_sha256': caption_hash, 'media_source_commit': source_commit,
                 'caption_policy': 'replace-with-supplied-sidecar' if captions else 'preserve-embedded',
                 'encoding_profile': settings.encoding_profile(), 'visibility': 'private', 'attempts': [], 'live_source': live,
-                'capture_kind': 'live' if live else 'file'}
+                'capture_kind': 'live' if live else 'file', 'civiccast_feed': feed}
             conn.execute(recordings.insert().values(id=identity, creator=principal['actor_id'],
                 idempotency_key=data.idempotency_key, request_hash=request_hash,
                 meeting_id=str(data.meeting_id), status='queued', details=details))
@@ -237,6 +242,9 @@ def create_app(settings=None):
                 conn.execute(recordings.update().where(recordings.c.id == str(identity)).values(control={
                     'stop_requested_at': datetime.now(timezone.utc).isoformat(), 'stopped_by': actor['actor_id']}))
         return {'id': str(identity), 'stop_requested': True}
+
+    from .delivery import install_delivery
+    install_delivery(app, settings, suite, store)
 
     from .operations import install_operations
     install_operations(app, settings, suite, store)

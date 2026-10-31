@@ -1,0 +1,1514 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="description" content=""><title>Townlight
+Zoning API Reference | Townlight Beta 1</title><style>
+:root{--ink:#182f3a;--muted:#526775;--accent:#006b64;--paper:#fff;--wash:#f1f6f5;--line:#cfdddf;--warm:#dceab2}
+*{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;background:var(--paper);color:var(--ink);font:17px/1.65 "Segoe UI",Arial,sans-serif}a{color:#006b64;text-underline-offset:3px}a:hover{text-decoration-thickness:2px}a:focus-visible,button:focus-visible,input:focus-visible{outline:3px solid #a25900;outline-offset:4px}.skip{position:absolute;left:-9999px}.skip:focus{left:1rem;top:1rem;background:white;padding:1rem;z-index:20}header{border-bottom:1px solid var(--line);padding:1.1rem 5vw;display:flex;align-items:center;gap:1.5rem;flex-wrap:wrap}header .brand{font-size:1.3rem;font-weight:750;letter-spacing:-.04em;text-decoration:none;color:var(--ink)}header nav{margin-left:auto;display:flex;gap:1.25rem;flex-wrap:wrap;font-size:.88rem}.edition{font:700 .72rem/1.5 "Segoe UI",sans-serif;letter-spacing:.12em;text-transform:uppercase;color:var(--accent)}.wrap{max-width:1240px;margin:auto;padding:0 4vw}.hero{padding:5rem 0 3.2rem;max-width:950px}.hero h1{font-size:clamp(2.5rem,5vw,4.7rem);line-height:1.08;letter-spacing:-.045em;margin:1rem 0 1.5rem;font-weight:650}.hero .lead{font-size:1.26rem;max-width:780px;color:var(--muted)}.actions{display:flex;gap:.8rem;flex-wrap:wrap;margin:1.8rem 0}.button{display:inline-block;padding:.7rem 1.15rem;border:1px solid var(--accent);border-radius:4px;text-decoration:none;font-weight:650}.button.primary{background:var(--accent);color:#fff}.facts{display:flex;gap:1.5rem;flex-wrap:wrap;font-size:.85rem;color:var(--muted)}.section{padding:3rem 0;border-top:1px solid var(--line)}h2{font-size:1.8rem;line-height:1.3;letter-spacing:-.025em;margin:2.5rem 0 1rem}h3{font-size:1.18rem;line-height:1.45;margin:1.8rem 0 .7rem}h4{font-size:1rem;margin:1.3rem 0 .6rem}p{margin:.85rem 0 1rem}ul,ol{padding-left:1.6rem}li{margin:.4rem 0}strong{font-weight:650}.grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:1.6rem}.product{border-top:3px solid var(--accent);padding:1.4rem 0}.product h3{font-size:1.65rem;margin:.4rem 0}.product p{color:var(--muted)}.number{font-size:.76rem;letter-spacing:.1em}.split{display:grid;grid-template-columns:1fr 1fr;gap:3rem}.flow{width:100%;height:auto;display:block;margin:1.8rem 0}.caption{font-size:.85rem;color:var(--muted)}.reading{max-width:860px}.doclayout{display:grid;grid-template-columns:245px minmax(0,1fr);gap:3rem;max-width:1320px;margin:auto;padding:2rem 4vw}.toc{font-size:.84rem;align-self:start;position:sticky;top:1rem;max-height:90vh;overflow:auto;padding-right:.8rem}.toc ul{list-style:none;padding:0}.toc li{margin:.5rem 0}.toc li li{padding-left:.8rem}.toc a{text-decoration:none}.docbody{min-width:0}.docbody h1{font-size:2.7rem;line-height:1.1;letter-spacing:-.04em}.docbody h2{border-top:1px solid var(--line);padding-top:1.8rem}.docbody img{max-width:100%;height:auto}.docmeta{color:var(--muted);font-size:.9rem}.docbody section{scroll-margin-top:1rem}table{width:100%;border-collapse:collapse;font-size:.87rem;line-height:1.5;margin:1.3rem 0;table-layout:auto}th{text-align:left;background:var(--wash);font-weight:650}th,td{padding:.65rem .7rem;border-bottom:1px solid var(--line);vertical-align:top;overflow-wrap:anywhere}thead{display:table-header-group}pre{background:#f2f5f6;padding:1rem;border:1px solid #dfe7e8;white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;font:13px/1.6 Consolas,monospace}code{font: .85em/1.6 Consolas,monospace;overflow-wrap:anywhere}pre code{font-size:inherit}blockquote{border-left:3px solid var(--accent);padding-left:1rem;margin-left:0;color:var(--muted)}.search{padding:.65rem;border:1px solid #789399;border-radius:4px;width:100%;font:inherit}.search-status{font-size:.8rem;color:var(--muted)}footer{border-top:1px solid var(--line);padding:2rem 5vw;margin-top:3rem;font-size:.85rem;color:var(--muted);display:flex;gap:2rem;justify-content:space-between;flex-wrap:wrap}.small{font-size:.9rem;color:var(--muted)}.api-entry{padding:1.2rem 0;border-top:1px solid var(--line)}.api-entry h3{overflow-wrap:anywhere}.method{font-size:.76rem;font-weight:750;color:var(--accent)}details{margin:1rem 0}summary{cursor:pointer;font-weight:650}.index-columns{columns:2;column-gap:2rem}.index-columns li{break-inside:avoid}
+@media(max-width:850px){.grid{grid-template-columns:1fr 1fr}.split{grid-template-columns:1fr}.doclayout{grid-template-columns:1fr;gap:1rem}.toc{position:static;max-height:none}.hero{padding-top:3rem}header nav{margin-left:0}.docbody h1{font-size:2.2rem}}
+@media(max-width:520px){.grid{grid-template-columns:1fr}.wrap{padding:0 6vw}header{padding:1rem 6vw}.hero h1{font-size:2.6rem}.index-columns{columns:1}table{font-size:.78rem}th,td{padding:.45rem}.doclayout{padding:1rem 6vw}.facts{gap:.5rem}}
+main,.toc a,.hero h1{overflow-wrap:anywhere}
+@page{size:Letter;margin:.7in .65in .75in}
+@media print{html{scroll-behavior:auto}body{font:10.5pt/1.45 Arial,sans-serif;color:#172f39}header,footer,.search-area,.screen-only{display:none}.doclayout{display:block;padding:0;max-width:none}.toc{position:static;max-height:none;overflow:visible;font-size:10pt;break-after:page}.toc>h2{border:0}.toc ul{columns:2;column-gap:.3in}.toc li{break-inside:avoid}.docbody h1{font-size:30pt}.docbody h2{font-size:19pt;break-after:avoid;padding-top:.15in;margin-top:.35in}.docbody h3{font-size:12pt;break-after:avoid}.docbody h4{break-after:avoid}p{orphans:3;widows:3}pre{font-size:8.2pt;line-height:1.4;padding:.1in;break-inside:auto}table{font-size:8.4pt;line-height:1.35}th,td{padding:.06in .07in}tr{break-inside:avoid}.flow{max-height:6in;object-fit:contain;break-inside:avoid}a{color:#172f39;text-decoration:underline}.cover{break-after:page;padding-top:1in}.cover .edition{font-size:11pt}.cover h1{font-size:32pt}.cover .lead{font-size:14pt}.api-entry{break-inside:auto}.api-entry h3{break-after:avoid}.index-columns{columns:2}}
+</style></head><body><a class="skip" href="#main">Skip to content</a><aside aria-label="Beta download" style="padding:1rem 5%;background:#e5f3ec;color:#123b30"><strong>Townlight Beta 1</strong> · <a href="https://github.com/townlight/townlight/releases/tag/townlight-beta-1-station-delivery">Signed Windows installer, source, documentation and acceptance</a>. Updated Station live feed and recorded-video delivery; existing component versions retained. <a href="https://townlight.github.io/versions.html">Candidate identity and retained baseline evidence</a>.</aside><header><a class="brand" href="../index.html">townlight<span aria-hidden="true"> ·</span></a><span class="edition">Townlight Beta 1</span><nav aria-label="Main"><a href="../index.html#products">Products</a><a href="../manuals/suite.html">Suite manual</a><a href="../reference/index.html">Technical reference</a><a href="../terms.html">Terms and license</a></nav></header>
+<main id="main"><div class="cover wrap"><div class="hero"><div class="edition">Townlight Beta 1</div><h1>Townlight
+Zoning API
+Reference</h1><p class="lead">Staff guide and technical reference</p><p class="docmeta">Documentation edition 30 October 2026<br>Existing component versions retained<br>Signed suite installer 1.6.0.1<br>Private beta documentation companion</p></div></div><div class="doclayout"><aside class="toc" aria-label="Table of contents"><h2>Contents</h2><div class="search-area"><label for="find-section">Find a section</label><input class="search" id="find-section" type="search" placeholder="Type a heading"><p class="search-status" aria-live="polite"></p></div><ul>
+<li><a href="#api-reference-scope" id="toc-api-reference-scope">API
+reference scope</a></li>
+<li><a href="#installed-desktop-http-operations"
+id="toc-installed-desktop-http-operations">Installed desktop HTTP
+operations</a></li>
+<li><a href="#request-and-response-data-dictionary"
+id="toc-request-and-response-data-dictionary">Request and response data
+dictionary</a></li>
+<li><a href="#source-route-and-validation-supplement"
+id="toc-source-route-and-validation-supplement">Source route and
+validation supplement</a></li>
+<li><a href="#alphabetical-contract-index"
+id="toc-alphabetical-contract-index">Alphabetical contract
+index</a></li>
+</ul></aside><article class="docbody"><h2 id="api-reference-scope">API
+reference scope</h2>
+<p>This is the <strong>Townlight Beta 1</strong> technical contract for
+Zoning. The desktop-domain entries below come from the installed
+candidate’s generated OpenAPI schema. Export did not start a server,
+enter application lifespan, run migrations or contact a database. It is
+schema evidence, not proof of every endpoint’s runtime behavior. The
+acceptance section of the operating manual identifies exercised
+paths.</p>
+<p>The complete filtered <a href="zoning-openapi.json">OpenAPI JSON</a>
+preserves request bodies, parameters, response declarations, constraints
+and referenced schemas. An empty response schema means that this
+application did not declare a structured response model; do not infer a
+stronger contract from a green HTTP status. HTTP authorization enforced
+inside dependencies is still required when an automatically generated
+header parameter says optional.</p>
+<h3 id="origins-and-authentication">Origins and authentication</h3>
+<p>The canonical native domain transport uses
+<code>http://127.0.0.1:15480</code>. The native shell supplies
+<code>X-Townlight-Session</code> and maps it to a persisted SQL
+identity; browser code must not invent an actor or role. A trusted local
+integration must protect that proof as a credential and revalidate
+current authority. Standalone <code>/auth/jwt/login</code> uses the
+existing bearer-token flow; that token is not interchangeable with
+native proof. Public routes have their own permission and deployment
+gates. Do not bind the native domain runtime to a non-loopback
+interface.</p>
+<p>Station defaults to explicit loopback port <code>8756</code>. Its
+service revalidates Townlight authority. Its browser exchanges a one-use
+60-second ticket for a 900-second HttpOnly SameSite Strict operator
+cookie. Browser mutations require the exact Origin and
+<code>X-Station-UI: 1</code>. Native session proof must not be put in a
+URL or shipped to an MCP client.</p>
+<h3 id="failure-and-retry-contract">Failure and retry contract</h3>
+<p><code>401</code> means missing/expired identity; <code>403</code>
+means permission or origin denial; <code>404</code> means a missing or
+unavailable resource; <code>409</code> commonly means revision,
+source-hash, lifecycle or idempotency conflict; <code>422</code> means
+invalid input; <code>429</code> means a bounded rate/capacity refusal;
+<code>503</code> means an unavailable dependency, configuration or
+schema. Individual routes may use only a subset and source-derived
+checks can add errors absent from generated response declarations.
+Preserve edits, read the detail and inspect current state before
+retrying a write. Neither a retry nor an idempotency key authorizes a
+changed payload.</p>
+<h3 id="effective-installed-runtime-contract">Effective installed
+runtime contract</h3>
+<p>The inner domain export in
+<code>reference/desktop-domain-openapi.json</code> has 243 paths and 245
+schemas. The installed host is a second FastAPI application: it
+registers <strong>GET /health</strong>, <strong>GET /modules</strong>
+and <strong>GET /ready</strong> before mounting that domain application
+at <code>/</code>. Its <code>/health</code> therefore
+<strong>overrides</strong> the inner <code>app.main.health</code> at the
+installed origin. The effective composition has 245 unique URI paths.
+The filtered downloads for Suite, Core and Records compose those real
+outer routes over their inner-domain selection; the original inner and
+outer exports remain separate evidence files.</p>
+<table>
+<colgroup>
+<col style="width: 50%" />
+<col style="width: 50%" />
+</colgroup>
+<thead>
+<tr>
+<th>Outer operation</th>
+<th>Actual response and use</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>GET /health</code></td>
+<td>Runtime <code>status</code> (<code>ok</code> or
+<code>degraded</code>), service/version, product profile, module checks,
+database check and <code>local_only</code>. HTTP 200 when healthy,
+otherwise 503. This is not the inner app’s simple status/version
+handler.</td>
+</tr>
+<tr>
+<td><code>GET /modules</code></td>
+<td>The same runtime health payload and HTTP status as
+<code>/health</code>; not a second independent readiness proof.</td>
+</tr>
+<tr>
+<td><code>GET /ready</code></td>
+<td><code>status</code> (<code>ready</code> or <code>not-ready</code>)
+and <code>reason</code>; HTTP 200/503 after the applicable activation,
+schema and provider checks. Use this for domain readiness.</td>
+</tr>
+</tbody>
+</table>
+<p>For example, a ready result has shape
+<code>{"status":"ready","reason":"&lt;actual profile-specific readiness reason&gt;"}</code>;
+an inactive domain returns
+<code>{"status":"not-ready","reason":"domain-inactive"}</code> with 503.
+These are source-derived shapes, not new execution receipts. Read the
+actual reason rather than treating a listening process or
+<code>/health</code> alone as canonical readiness.</p>
+<p>The native origin remains <code>http://127.0.0.1:15480</code>.
+Station’s separately paired suite process can use another explicitly
+configured loopback port; its Station origin and the Station service’s
+suite origin must agree. The Station operating guide supplies that setup
+without disabling normal activation.</p>
+<h2 id="installed-desktop-http-operations">Installed desktop HTTP
+operations</h2>
+<h3 id="post-desktopv1zoningimports">POST
+/desktop/v1/zoning/imports</h3>
+<p>Imports</p>
+<p>Operation ID: <code>imports_desktop_v1_zoning_imports_post</code>.
+Tags: native-zoning.</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Location</th>
+<th>Required</th>
+<th>Type and constraints</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>X-Townlight-Session</code></td>
+<td>header</td>
+<td>no at schema level</td>
+<td>string or null</td>
+</tr>
+</tbody>
+</table>
+<p>Request body: <code>application/json</code>; required. Model:
+<code>object</code>.</p>
+<table>
+<thead>
+<tr>
+<th>Declared status</th>
+<th>Description</th>
+<th>Response model</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>200</td>
+<td>Successful Response</td>
+<td>application/json: Unspecified JSON shape</td>
+</tr>
+<tr>
+<td>422</td>
+<td>Validation Error</td>
+<td>application/json: HTTPValidationError</td>
+</tr>
+</tbody>
+</table>
+<h3 id="post-desktopv1zoningparcelslookup">POST
+/desktop/v1/zoning/parcels/lookup</h3>
+<p>Parcel Lookup</p>
+<p>Operation ID:
+<code>parcel_lookup_desktop_v1_zoning_parcels_lookup_post</code>. Tags:
+native-zoning.</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Location</th>
+<th>Required</th>
+<th>Type and constraints</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>X-Townlight-Session</code></td>
+<td>header</td>
+<td>no at schema level</td>
+<td>string or null</td>
+</tr>
+</tbody>
+</table>
+<p>Request body: <code>application/json</code>; required. Model:
+<code>_ParcelLookupIn</code>.</p>
+<table>
+<thead>
+<tr>
+<th>Declared status</th>
+<th>Description</th>
+<th>Response model</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>200</td>
+<td>Successful Response</td>
+<td>application/json: Unspecified JSON shape</td>
+</tr>
+<tr>
+<td>422</td>
+<td>Validation Error</td>
+<td>application/json: HTTPValidationError</td>
+</tr>
+</tbody>
+</table>
+<h3 id="get-desktopv1zoningquestionsquestion_idhistory">GET
+/desktop/v1/zoning/questions/{question_id}/history</h3>
+<p>Question History</p>
+<p>Operation ID:
+<code>question_history_desktop_v1_zoning_questions__question_id__history_get</code>.
+Tags: native-zoning.</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Location</th>
+<th>Required</th>
+<th>Type and constraints</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>question_id</code></td>
+<td>path</td>
+<td>yes</td>
+<td>string; format=uuid</td>
+</tr>
+<tr>
+<td><code>X-Townlight-Session</code></td>
+<td>header</td>
+<td>no at schema level</td>
+<td>string or null</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>Declared status</th>
+<th>Description</th>
+<th>Response model</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>200</td>
+<td>Successful Response</td>
+<td>application/json: Unspecified JSON shape</td>
+</tr>
+<tr>
+<td>422</td>
+<td>Validation Error</td>
+<td>application/json: HTTPValidationError</td>
+</tr>
+</tbody>
+</table>
+<h3 id="post-desktopv1zoningmeetingssearch">POST
+/desktop/v1/zoning/meetings/search</h3>
+<p>Search Meetings</p>
+<p>Operation ID:
+<code>search_meetings_desktop_v1_zoning_meetings_search_post</code>.
+Tags: native-zoning.</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Location</th>
+<th>Required</th>
+<th>Type and constraints</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>X-Townlight-Session</code></td>
+<td>header</td>
+<td>no at schema level</td>
+<td>string or null</td>
+</tr>
+</tbody>
+</table>
+<p>Request body: <code>application/json</code>; required. Model:
+<code>MeetingSearch</code>.</p>
+<table>
+<thead>
+<tr>
+<th>Declared status</th>
+<th>Description</th>
+<th>Response model</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>200</td>
+<td>Successful Response</td>
+<td>application/json: Unspecified JSON shape</td>
+</tr>
+<tr>
+<td>422</td>
+<td>Validation Error</td>
+<td>application/json: HTTPValidationError</td>
+</tr>
+</tbody>
+</table>
+<h3 id="post-desktopv1zoningquestionsquestion_idmeetings">POST
+/desktop/v1/zoning/questions/{question_id}/meetings</h3>
+<p>Link Meeting</p>
+<p>Operation ID:
+<code>link_meeting_desktop_v1_zoning_questions__question_id__meetings_post</code>.
+Tags: native-zoning.</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Location</th>
+<th>Required</th>
+<th>Type and constraints</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>question_id</code></td>
+<td>path</td>
+<td>yes</td>
+<td>string; format=uuid</td>
+</tr>
+<tr>
+<td><code>X-Townlight-Session</code></td>
+<td>header</td>
+<td>no at schema level</td>
+<td>string or null</td>
+</tr>
+</tbody>
+</table>
+<p>Request body: <code>application/json</code>; required. Model:
+<code>MeetingLink</code>.</p>
+<table>
+<thead>
+<tr>
+<th>Declared status</th>
+<th>Description</th>
+<th>Response model</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>200</td>
+<td>Successful Response</td>
+<td>application/json: Unspecified JSON shape</td>
+</tr>
+<tr>
+<td>422</td>
+<td>Validation Error</td>
+<td>application/json: HTTPValidationError</td>
+</tr>
+</tbody>
+</table>
+<h3 id="post-desktopv1zoningquestionsquestion_idsnapshots">POST
+/desktop/v1/zoning/questions/{question_id}/snapshots</h3>
+<p>Create Snapshot</p>
+<p>Operation ID:
+<code>create_snapshot_desktop_v1_zoning_questions__question_id__snapshots_post</code>.
+Tags: native-zoning.</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Location</th>
+<th>Required</th>
+<th>Type and constraints</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>question_id</code></td>
+<td>path</td>
+<td>yes</td>
+<td>string; format=uuid</td>
+</tr>
+<tr>
+<td><code>X-Townlight-Session</code></td>
+<td>header</td>
+<td>no at schema level</td>
+<td>string or null</td>
+</tr>
+</tbody>
+</table>
+<p>Request body: <code>application/json</code>; required. Model:
+<code>SourceSnapshot</code>.</p>
+<table>
+<thead>
+<tr>
+<th>Declared status</th>
+<th>Description</th>
+<th>Response model</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>200</td>
+<td>Successful Response</td>
+<td>application/json: Unspecified JSON shape</td>
+</tr>
+<tr>
+<td>422</td>
+<td>Validation Error</td>
+<td>application/json: HTTPValidationError</td>
+</tr>
+</tbody>
+</table>
+<h3 id="post-desktopv1zoningrules">POST /desktop/v1/zoning/rules</h3>
+<p>Create Rule</p>
+<p>Operation ID: <code>create_rule_desktop_v1_zoning_rules_post</code>.
+Tags: native-zoning.</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Location</th>
+<th>Required</th>
+<th>Type and constraints</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>X-Townlight-Session</code></td>
+<td>header</td>
+<td>no at schema level</td>
+<td>string or null</td>
+</tr>
+</tbody>
+</table>
+<p>Request body: <code>application/json</code>; required. Model:
+<code>Rule</code>.</p>
+<table>
+<thead>
+<tr>
+<th>Declared status</th>
+<th>Description</th>
+<th>Response model</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>200</td>
+<td>Successful Response</td>
+<td>application/json: Unspecified JSON shape</td>
+</tr>
+<tr>
+<td>422</td>
+<td>Validation Error</td>
+<td>application/json: HTTPValidationError</td>
+</tr>
+</tbody>
+</table>
+<h3 id="post-desktopv1zoningquestions">POST
+/desktop/v1/zoning/questions</h3>
+<p>Create Question</p>
+<p>Operation ID:
+<code>create_question_desktop_v1_zoning_questions_post</code>. Tags:
+native-zoning.</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Location</th>
+<th>Required</th>
+<th>Type and constraints</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>X-Townlight-Session</code></td>
+<td>header</td>
+<td>no at schema level</td>
+<td>string or null</td>
+</tr>
+</tbody>
+</table>
+<p>Request body: <code>application/json</code>; required. Model:
+<code>Question</code>.</p>
+<table>
+<thead>
+<tr>
+<th>Declared status</th>
+<th>Description</th>
+<th>Response model</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>200</td>
+<td>Successful Response</td>
+<td>application/json: Unspecified JSON shape</td>
+</tr>
+<tr>
+<td>422</td>
+<td>Validation Error</td>
+<td>application/json: HTTPValidationError</td>
+</tr>
+</tbody>
+</table>
+<h3 id="get-desktopv1zoningworkspace">GET
+/desktop/v1/zoning/workspace</h3>
+<p>Get Workspace</p>
+<p>Operation ID:
+<code>get_workspace_desktop_v1_zoning_workspace_get</code>. Tags:
+native-zoning.</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Location</th>
+<th>Required</th>
+<th>Type and constraints</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>X-Townlight-Session</code></td>
+<td>header</td>
+<td>no at schema level</td>
+<td>string or null</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>Declared status</th>
+<th>Description</th>
+<th>Response model</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>200</td>
+<td>Successful Response</td>
+<td>application/json: Unspecified JSON shape</td>
+</tr>
+<tr>
+<td>422</td>
+<td>Validation Error</td>
+<td>application/json: HTTPValidationError</td>
+</tr>
+</tbody>
+</table>
+<h3 id="post-desktopv1zoningquestionsquestion_idreviews">POST
+/desktop/v1/zoning/questions/{question_id}/reviews</h3>
+<p>Create Review</p>
+<p>Operation ID:
+<code>create_review_desktop_v1_zoning_questions__question_id__reviews_post</code>.
+Tags: native-zoning.</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Location</th>
+<th>Required</th>
+<th>Type and constraints</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>question_id</code></td>
+<td>path</td>
+<td>yes</td>
+<td>string; format=uuid</td>
+</tr>
+<tr>
+<td><code>X-Townlight-Session</code></td>
+<td>header</td>
+<td>no at schema level</td>
+<td>string or null</td>
+</tr>
+</tbody>
+</table>
+<p>Request body: <code>application/json</code>; required. Model:
+<code>Review</code>.</p>
+<table>
+<thead>
+<tr>
+<th>Declared status</th>
+<th>Description</th>
+<th>Response model</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>200</td>
+<td>Successful Response</td>
+<td>application/json: Unspecified JSON shape</td>
+</tr>
+<tr>
+<td>422</td>
+<td>Validation Error</td>
+<td>application/json: HTTPValidationError</td>
+</tr>
+</tbody>
+</table>
+<h3 id="post-desktopv1zoningoutlines">POST
+/desktop/v1/zoning/outlines</h3>
+<p>Create Outline</p>
+<p>Operation ID:
+<code>create_outline_desktop_v1_zoning_outlines_post</code>. Tags:
+native-zoning.</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Location</th>
+<th>Required</th>
+<th>Type and constraints</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>X-Townlight-Session</code></td>
+<td>header</td>
+<td>no at schema level</td>
+<td>string or null</td>
+</tr>
+</tbody>
+</table>
+<p>Request body: <code>application/json</code>; required. Model:
+<code>Outline</code>.</p>
+<table>
+<thead>
+<tr>
+<th>Declared status</th>
+<th>Description</th>
+<th>Response model</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>200</td>
+<td>Successful Response</td>
+<td>application/json: Unspecified JSON shape</td>
+</tr>
+<tr>
+<td>422</td>
+<td>Validation Error</td>
+<td>application/json: HTTPValidationError</td>
+</tr>
+</tbody>
+</table>
+<h3 id="post-desktopv1zoningcode-context">POST
+/desktop/v1/zoning/code-context</h3>
+<p>Create Code Context</p>
+<p>Operation ID:
+<code>create_code_context_desktop_v1_zoning_code_context_post</code>.
+Tags: native-zoning.</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Location</th>
+<th>Required</th>
+<th>Type and constraints</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>X-Townlight-Session</code></td>
+<td>header</td>
+<td>no at schema level</td>
+<td>string or null</td>
+</tr>
+</tbody>
+</table>
+<p>Request body: <code>application/json</code>; required. Model:
+<code>CodeContext</code>.</p>
+<table>
+<thead>
+<tr>
+<th>Declared status</th>
+<th>Description</th>
+<th>Response model</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>200</td>
+<td>Successful Response</td>
+<td>application/json: Unspecified JSON shape</td>
+</tr>
+<tr>
+<td>422</td>
+<td>Validation Error</td>
+<td>application/json: HTTPValidationError</td>
+</tr>
+</tbody>
+</table>
+<h3 id="post-desktopv1zoningstandardsprocess-explanation">POST
+/desktop/v1/zoning/standards/process-explanation</h3>
+<p>Standards Explanation</p>
+<p>Cited variance/CUP/nonconformity process; never a determination.</p>
+<p>Operation ID:
+<code>standards_explanation_desktop_v1_zoning_standards_process_explanation_post</code>.
+Tags: native-zoning.</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Location</th>
+<th>Required</th>
+<th>Type and constraints</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>X-Townlight-Session</code></td>
+<td>header</td>
+<td>no at schema level</td>
+<td>string or null</td>
+</tr>
+</tbody>
+</table>
+<p>Request body: <code>application/json</code>; required. Model:
+<code>StandardsExplanation</code>.</p>
+<table>
+<thead>
+<tr>
+<th>Declared status</th>
+<th>Description</th>
+<th>Response model</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>200</td>
+<td>Successful Response</td>
+<td>application/json: Unspecified JSON shape</td>
+</tr>
+<tr>
+<td>422</td>
+<td>Validation Error</td>
+<td>application/json: HTTPValidationError</td>
+</tr>
+</tbody>
+</table>
+<h3 id="post-civiczonequestions">POST /civiczone/questions</h3>
+<p>Public Question</p>
+<p>Operation ID: <code>public_question_civiczone_questions_post</code>.
+Tags: .</p>
+<p>Request body: <code>application/json</code>; required. Model:
+<code>Question</code>.</p>
+<table>
+<thead>
+<tr>
+<th>Declared status</th>
+<th>Description</th>
+<th>Response model</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>200</td>
+<td>Successful Response</td>
+<td>application/json: Unspecified JSON shape</td>
+</tr>
+<tr>
+<td>422</td>
+<td>Validation Error</td>
+<td>application/json: HTTPValidationError</td>
+</tr>
+</tbody>
+</table>
+<h3 id="post-civiczoneparcelslookup">POST /civiczone/parcels/lookup</h3>
+<p>Public Parcel Lookup</p>
+<p>Operation ID:
+<code>public_parcel_lookup_civiczone_parcels_lookup_post</code>. Tags:
+.</p>
+<p>Request body: <code>application/json</code>; required. Model:
+<code>_ParcelLookupIn</code>.</p>
+<table>
+<thead>
+<tr>
+<th>Declared status</th>
+<th>Description</th>
+<th>Response model</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>200</td>
+<td>Successful Response</td>
+<td>application/json: Unspecified JSON shape</td>
+</tr>
+<tr>
+<td>422</td>
+<td>Validation Error</td>
+<td>application/json: HTTPValidationError</td>
+</tr>
+</tbody>
+</table>
+<h2 id="request-and-response-data-dictionary">Request and response data
+dictionary</h2>
+<p>Fields below retain the actual schema requirements and constraints.
+<code>null</code> and omitted are distinct where a model distinguishes
+them. Additional-property rules apply per schema. Full discriminators,
+nested definitions and defaults are retained in the JSON.</p>
+<h3 id="codecontext">CodeContext</h3>
+<p>Additional properties: false.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Required</th>
+<th>Type and constraints</th>
+<th>Default or description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>section_number</code></td>
+<td>yes</td>
+<td>string; minLength=1; maxLength=255</td>
+<td></td>
+</tr>
+<tr>
+<td><code>as_of</code></td>
+<td>no</td>
+<td>string; format=date or null</td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<h3 id="httpvalidationerror">HTTPValidationError</h3>
+<p>Additional properties: not explicitly declared.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Required</th>
+<th>Type and constraints</th>
+<th>Default or description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>detail</code></td>
+<td>no</td>
+<td>array of ValidationError</td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<h3 id="meetinglink">MeetingLink</h3>
+<p>Additional properties: false.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Required</th>
+<th>Type and constraints</th>
+<th>Default or description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>source_id</code></td>
+<td>yes</td>
+<td>string; minLength=1; maxLength=200</td>
+<td></td>
+</tr>
+<tr>
+<td><code>expected_sha256</code></td>
+<td>yes</td>
+<td>string; pattern=<a href="#fn1" class="footnote-ref" id="fnref1"
+role="doc-noteref"><sup>1</sup></a>{64}$</td>
+<td></td>
+</tr>
+<tr>
+<td><code>relation</code></td>
+<td>yes</td>
+<td>string; values hearing, context, precedent</td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<h3 id="meetingsearch">MeetingSearch</h3>
+<p>Additional properties: false.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Required</th>
+<th>Type and constraints</th>
+<th>Default or description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>query</code></td>
+<td>yes</td>
+<td>string; minLength=1; maxLength=500</td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<h3 id="outline">Outline</h3>
+<p>Additional properties: false.</p>
+<table>
+<colgroup>
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+</colgroup>
+<thead>
+<tr>
+<th>Field</th>
+<th>Required</th>
+<th>Type and constraints</th>
+<th>Default or description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>title</code></td>
+<td>yes</td>
+<td>string; minLength=1; maxLength=255</td>
+<td></td>
+</tr>
+<tr>
+<td><code>question_ids</code></td>
+<td>yes</td>
+<td>array of string; format=uuid; minItems=1; maxItems=50</td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<h3 id="question">Question</h3>
+<p>Additional properties: false.</p>
+<table>
+<colgroup>
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+</colgroup>
+<thead>
+<tr>
+<th>Field</th>
+<th>Required</th>
+<th>Type and constraints</th>
+<th>Default or description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>jurisdiction</code></td>
+<td>yes</td>
+<td>string; minLength=1; maxLength=255</td>
+<td></td>
+</tr>
+<tr>
+<td><code>query</code></td>
+<td>yes</td>
+<td>string; minLength=1; maxLength=500</td>
+<td></td>
+</tr>
+<tr>
+<td><code>question</code></td>
+<td>yes</td>
+<td>string; minLength=1; maxLength=2000</td>
+<td></td>
+</tr>
+<tr>
+<td><code>kind</code></td>
+<td>yes</td>
+<td>string; values use, dimension</td>
+<td></td>
+</tr>
+<tr>
+<td><code>key</code></td>
+<td>yes</td>
+<td>string; minLength=1; maxLength=255</td>
+<td></td>
+</tr>
+<tr>
+<td><code>audience</code></td>
+<td>no</td>
+<td>string; values resident, staff</td>
+<td>default “resident”.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="review">Review</h3>
+<p>Additional properties: false.</p>
+<table>
+<colgroup>
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+</colgroup>
+<thead>
+<tr>
+<th>Field</th>
+<th>Required</th>
+<th>Type and constraints</th>
+<th>Default or description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>answer</code></td>
+<td>no</td>
+<td>string; maxLength=10000</td>
+<td>default ““.</td>
+</tr>
+<tr>
+<td><code>notes</code></td>
+<td>no</td>
+<td>string; maxLength=10000</td>
+<td>default ““.</td>
+</tr>
+<tr>
+<td><code>queue_status</code></td>
+<td>no</td>
+<td>string; values open, in_review, resolved, closed</td>
+<td>default “resolved”.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="rule">Rule</h3>
+<p>Additional properties: false.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Required</th>
+<th>Type and constraints</th>
+<th>Default or description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>jurisdiction</code></td>
+<td>yes</td>
+<td>string; minLength=1; maxLength=255</td>
+<td></td>
+</tr>
+<tr>
+<td><code>zone_code</code></td>
+<td>yes</td>
+<td>string; minLength=1; maxLength=80</td>
+<td></td>
+</tr>
+<tr>
+<td><code>key</code></td>
+<td>yes</td>
+<td>string; minLength=1; maxLength=120</td>
+<td></td>
+</tr>
+<tr>
+<td><code>section_number</code></td>
+<td>yes</td>
+<td>string; minLength=1; maxLength=255</td>
+<td></td>
+</tr>
+<tr>
+<td><code>kind</code></td>
+<td>yes</td>
+<td>string; values use, dimension</td>
+<td></td>
+</tr>
+<tr>
+<td><code>value</code></td>
+<td>yes</td>
+<td>string; minLength=1; maxLength=255</td>
+<td></td>
+</tr>
+<tr>
+<td><code>overlay_code</code></td>
+<td>no</td>
+<td>string; maxLength=255 or null</td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<h3 id="sourcesnapshot">SourceSnapshot</h3>
+<p>Additional properties: false.</p>
+<table>
+<colgroup>
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+</colgroup>
+<thead>
+<tr>
+<th>Field</th>
+<th>Required</th>
+<th>Type and constraints</th>
+<th>Default or description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>visibility</code></td>
+<td>yes</td>
+<td>string; values public, staff_only</td>
+<td></td>
+</tr>
+<tr>
+<td><code>meeting_event_ids</code></td>
+<td>no</td>
+<td>array of string; format=uuid; maxItems=50</td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<h3 id="standardsexplanation">StandardsExplanation</h3>
+<p>Additional properties: false.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Required</th>
+<th>Type and constraints</th>
+<th>Default or description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>question</code></td>
+<td>yes</td>
+<td>string; minLength=1; maxLength=2000</td>
+<td></td>
+</tr>
+<tr>
+<td><code>process_section</code></td>
+<td>no</td>
+<td>string; maxLength=255</td>
+<td>default ““.</td>
+</tr>
+<tr>
+<td><code>zone_code</code></td>
+<td>no</td>
+<td>string; maxLength=40</td>
+<td>default ““.</td>
+</tr>
+<tr>
+<td><code>rule_types</code></td>
+<td>no</td>
+<td>array of string; maxItems=10</td>
+<td></td>
+</tr>
+<tr>
+<td><code>observed</code></td>
+<td>no</td>
+<td>object</td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<h3 id="validationerror">ValidationError</h3>
+<p>Additional properties: not explicitly declared.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Required</th>
+<th>Type and constraints</th>
+<th>Default or description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>loc</code></td>
+<td>yes</td>
+<td>array of string or integer</td>
+<td></td>
+</tr>
+<tr>
+<td><code>msg</code></td>
+<td>yes</td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>type</code></td>
+<td>yes</td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>input</code></td>
+<td>no</td>
+<td>object</td>
+<td></td>
+</tr>
+<tr>
+<td><code>ctx</code></td>
+<td>no</td>
+<td>object</td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<h3 id="parcellookupin">_ParcelLookupIn</h3>
+<p>Additional properties: false.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Required</th>
+<th>Type and constraints</th>
+<th>Default or description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>jurisdiction</code></td>
+<td>yes</td>
+<td>string; minLength=1; maxLength=255</td>
+<td></td>
+</tr>
+<tr>
+<td><code>query</code></td>
+<td>yes</td>
+<td>string; minLength=1; maxLength=500</td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<h2 id="source-route-and-validation-supplement">Source route and
+validation supplement</h2>
+<p>These declarations are extracted from the immutable candidate source.
+Package standalone routes are <strong>a different deployment
+surface</strong> from the mounted installed domain. They are listed to
+document existing code, not to claim they all have installed or city
+acceptance. A source declaration without a resolved include-router mount
+is identified as such. Full signatures, direct HTTP refusals and schema
+fields are retained in the <a
+href="../reference/source-inventory.json">source inventory</a>.</p>
+<h3 id="main.py">main.py</h3>
+<p>Candidate source:
+<code>installed-owned-source/civiczone/main.py</code>.</p>
+<p><strong>GET <code>/</code></strong> — handler <code>root</code>, line
+74. Declared router prefix included.</p>
+<div class="sourceCode" id="cb1"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a>root() <span class="op">-&gt;</span> <span class="bu">dict</span>[<span class="bu">str</span>, <span class="bu">str</span>]</span></code></pre></div>
+<p><strong>GET <code>/health</code></strong> — handler
+<code>health</code>, line 92. Declared router prefix included.</p>
+<div class="sourceCode" id="cb2"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a>health() <span class="op">-&gt;</span> <span class="bu">dict</span>[<span class="bu">str</span>, <span class="bu">str</span>]</span></code></pre></div>
+<p><strong>GET <code>/civiczone</code></strong> — handler
+<code>public_civiczone_page</code>, line 104. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb3"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb3-1"><a href="#cb3-1" aria-hidden="true" tabindex="-1"></a>public_civiczone_page() <span class="op">-&gt;</span> <span class="bu">str</span></span></code></pre></div>
+<p><strong>GET <code>/civiczone/staff</code></strong> — handler
+<code>staff_civiczone_page</code>, line 111. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb4"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb4-1"><a href="#cb4-1" aria-hidden="true" tabindex="-1"></a>staff_civiczone_page() <span class="op">-&gt;</span> <span class="bu">str</span></span></code></pre></div>
+<p><strong>POST <code>/api/v1/civiczone/parcels/lookup</code></strong> —
+handler <code>parcel_lookup</code>, line 220. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb5"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb5-1"><a href="#cb5-1" aria-hidden="true" tabindex="-1"></a>parcel_lookup(request: ParcelLookupRequest) <span class="op">-&gt;</span> <span class="bu">dict</span>[<span class="bu">str</span>, <span class="bu">object</span>]</span></code></pre></div>
+<p>Direct handler refusals:
+<code>HTTPException(status_code=422, detail={'message': 'Provide either parcel_number or address.', 'fix': "Send parcel_number '100-200-300' or address '123 Main St', or load local parcel records into CIVICZONE_PARCEL_RULE_DB_URL."})</code>;
+<code>HTTPException(status_code=404, detail={'message': result.message, 'fix': result.fix})</code>.</p>
+<p><strong>POST <code>/api/v1/civiczone/rules/use</code></strong> —
+handler <code>use_rule_lookup</code>, line 246. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb6"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb6-1"><a href="#cb6-1" aria-hidden="true" tabindex="-1"></a>use_rule_lookup(request: UseRuleLookupRequest) <span class="op">-&gt;</span> <span class="bu">dict</span>[<span class="bu">str</span>, <span class="bu">str</span>]</span></code></pre></div>
+<p>Direct handler refusals:
+<code>HTTPException(status_code=404, detail={'message': result.message, 'fix': result.fix})</code>.</p>
+<p><strong>POST
+<code>/api/v1/civiczone/rules/dimensional</code></strong> — handler
+<code>dimensional_rule_lookup</code>, line 261. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb7"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb7-1"><a href="#cb7-1" aria-hidden="true" tabindex="-1"></a>dimensional_rule_lookup(request: DimensionalRuleLookupRequest) <span class="op">-&gt;</span> <span class="bu">dict</span>[<span class="bu">str</span>, <span class="bu">str</span>]</span></code></pre></div>
+<p>Direct handler refusals:
+<code>HTTPException(status_code=404, detail={'message': result.message, 'fix': result.fix})</code>.</p>
+<p><strong>POST
+<code>/api/v1/civiczone/standards/process-explanation</code></strong> —
+handler <code>discretionary_explanation</code>, line 283. Declared
+router prefix included.</p>
+<div class="sourceCode" id="cb8"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb8-1"><a href="#cb8-1" aria-hidden="true" tabindex="-1"></a>discretionary_explanation(request: DiscretionaryExplanationRequest) <span class="op">-&gt;</span> <span class="bu">dict</span>[<span class="bu">str</span>, <span class="bu">object</span>]</span></code></pre></div>
+<p><strong>POST <code>/api/v1/civiczone/questions/answer</code></strong>
+— handler <code>zone_question_answer</code>, line 353. Declared router
+prefix included.</p>
+<div class="sourceCode" id="cb9"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb9-1"><a href="#cb9-1" aria-hidden="true" tabindex="-1"></a>zone_question_answer(request: ZoneQuestionRequest) <span class="op">-&gt;</span> <span class="bu">dict</span>[<span class="bu">str</span>, <span class="bu">object</span>]</span></code></pre></div>
+<p><strong>POST
+<code>/api/v1/civiczone/planner-review/classify</code></strong> —
+handler <code>planner_review_classify</code>, line 378. Declared router
+prefix included.</p>
+<div class="sourceCode" id="cb10"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb10-1"><a href="#cb10-1" aria-hidden="true" tabindex="-1"></a>planner_review_classify(request: PlannerReviewRequest) <span class="op">-&gt;</span> <span class="bu">dict</span>[<span class="bu">str</span>, <span class="bu">str</span>]</span></code></pre></div>
+<p><strong>GET
+<code>/api/v1/civiczone/staff/precedents/{precedent_id}</code></strong>
+— handler <code>staff_precedent</code>, line 384. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb11"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb11-1"><a href="#cb11-1" aria-hidden="true" tabindex="-1"></a>staff_precedent(precedent_id: <span class="bu">str</span>, _principal: Annotated[StaffPrincipal, Depends(_require_staff_access)]) <span class="op">-&gt;</span> <span class="bu">dict</span>[<span class="bu">str</span>, <span class="bu">str</span>]</span></code></pre></div>
+<p>Direct handler refusals:
+<code>HTTPException(status_code=404, detail={'message': 'Staff precedent not found.', 'fix': "Try precedent_id 'historic-adu'."})</code>.</p>
+<p><strong>POST
+<code>/api/v1/civiczone/staff/questions/answer</code></strong> — handler
+<code>staff_question_answer</code>, line 402. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb12"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb12-1"><a href="#cb12-1" aria-hidden="true" tabindex="-1"></a>staff_question_answer(request: StaffQuestionAnswerRequest, principal: Annotated[StaffPrincipal, Depends(_require_staff_access)]) <span class="op">-&gt;</span> <span class="bu">dict</span>[<span class="bu">str</span>, <span class="bu">object</span>]</span></code></pre></div>
+<p><strong>POST
+<code>/api/v1/civiczone/staff/ambiguity-reviews</code></strong> —
+handler <code>create_ambiguity_review</code>, line 415. Declared router
+prefix included.</p>
+<div class="sourceCode" id="cb13"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb13-1"><a href="#cb13-1" aria-hidden="true" tabindex="-1"></a>create_ambiguity_review(request: AmbiguityReviewCreateRequest, principal: Annotated[StaffPrincipal, Depends(_require_staff_access)]) <span class="op">-&gt;</span> <span class="bu">dict</span>[<span class="bu">str</span>, <span class="bu">object</span>]</span></code></pre></div>
+<p><strong>GET
+<code>/api/v1/civiczone/staff/ambiguity-reviews</code></strong> —
+handler <code>list_ambiguity_reviews</code>, line 429. Declared router
+prefix included.</p>
+<div class="sourceCode" id="cb14"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb14-1"><a href="#cb14-1" aria-hidden="true" tabindex="-1"></a>list_ambiguity_reviews(_principal: Annotated[StaffPrincipal, Depends(_require_staff_access)], status: <span class="bu">str</span> <span class="op">|</span> <span class="va">None</span><span class="op">=</span><span class="va">None</span>) <span class="op">-&gt;</span> <span class="bu">dict</span>[<span class="bu">str</span>, <span class="bu">object</span>]</span></code></pre></div>
+<p><strong>PATCH
+<code>/api/v1/civiczone/staff/ambiguity-reviews/{item_id}</code></strong>
+— handler <code>update_ambiguity_review</code>, line 443. Declared
+router prefix included.</p>
+<div class="sourceCode" id="cb15"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb15-1"><a href="#cb15-1" aria-hidden="true" tabindex="-1"></a>update_ambiguity_review(item_id: <span class="bu">str</span>, request: AmbiguityReviewUpdateRequest, _principal: Annotated[StaffPrincipal, Depends(_require_staff_access)]) <span class="op">-&gt;</span> <span class="bu">dict</span>[<span class="bu">str</span>, <span class="bu">object</span>]</span></code></pre></div>
+<p>Direct handler refusals:
+<code>HTTPException(status_code=404, detail={'message': 'Ambiguity review item was not found.', 'fix': 'List staff ambiguity reviews and retry with an existing item id.'})</code>;
+<code>HTTPException(status_code=422, detail={'message': 'Ambiguity review update is invalid.', 'fix': str(exc)})</code>.</p>
+<p><strong>GET
+<code>/api/v1/civiczone/staff/questions/analytics</code></strong> —
+handler <code>staff_question_analytics</code>, line 472. Declared router
+prefix included.</p>
+<div class="sourceCode" id="cb16"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb16-1"><a href="#cb16-1" aria-hidden="true" tabindex="-1"></a>staff_question_analytics(_principal: Annotated[StaffPrincipal, Depends(_require_staff_access)], high_volume_threshold: <span class="bu">int</span><span class="op">=</span><span class="dv">2</span>) <span class="op">-&gt;</span> <span class="bu">dict</span>[<span class="bu">str</span>, <span class="bu">object</span>]</span></code></pre></div>
+<p><strong>POST
+<code>/api/v1/civiczone/staff/reports/outline</code></strong> — handler
+<code>staff_report_outline</code>, line 496. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb17"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb17-1"><a href="#cb17-1" aria-hidden="true" tabindex="-1"></a>staff_report_outline(request: StaffReportOutlineRequest, principal: Annotated[StaffPrincipal, Depends(_require_staff_access)]) <span class="op">-&gt;</span> <span class="bu">dict</span>[<span class="bu">str</span>, <span class="bu">object</span>]</span></code></pre></div>
+<p><strong>POST
+<code>/api/v1/civiczone/staff/flagged-answers</code></strong> — handler
+<code>create_flagged_answer_review</code>, line 520. Declared router
+prefix included.</p>
+<div class="sourceCode" id="cb18"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb18-1"><a href="#cb18-1" aria-hidden="true" tabindex="-1"></a>create_flagged_answer_review(request: FlaggedAnswerCreateRequest, principal: Annotated[StaffPrincipal, Depends(_require_staff_access)]) <span class="op">-&gt;</span> <span class="bu">dict</span>[<span class="bu">str</span>, <span class="bu">object</span>]</span></code></pre></div>
+<p><strong>PATCH
+<code>/api/v1/civiczone/staff/flagged-answers/{review_id}/improve</code></strong>
+— handler <code>improve_flagged_answer_review</code>, line 536. Declared
+router prefix included.</p>
+<div class="sourceCode" id="cb19"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb19-1"><a href="#cb19-1" aria-hidden="true" tabindex="-1"></a>improve_flagged_answer_review(review_id: <span class="bu">str</span>, request: FlaggedAnswerImproveRequest, principal: Annotated[StaffPrincipal, Depends(_require_staff_access)]) <span class="op">-&gt;</span> <span class="bu">dict</span>[<span class="bu">str</span>, <span class="bu">object</span>]</span></code></pre></div>
+<p>Direct handler refusals:
+<code>HTTPException(status_code=404, detail={'message': 'Flagged answer review was not found.', 'fix': 'Create or list the flagged answer review before submitting improvements.'})</code>.</p>
+<h3 id="zoning_bridge.py">zoning_bridge.py</h3>
+<p>Candidate source:
+<code>installed-owned-source/civicsuite_runtime/zoning_bridge.py</code>.</p>
+<p><strong>POST <code>/desktop/v1/zoning/imports</code></strong> —
+handler <code>imports</code>, line 68. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb20"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb20-1"><a href="#cb20-1" aria-hidden="true" tabindex="-1"></a>imports(payload: <span class="bu">dict</span>, actor_id: <span class="bu">str</span><span class="op">=</span>Depends(actor))</span></code></pre></div>
+<p>Direct handler refusals: <code>HTTPException(422, detail)</code>;
+<code>HTTPException(503, 'Zoning persistence unavailable.')</code>.</p>
+<p><strong>POST <code>/desktop/v1/zoning/parcels/lookup</code></strong>
+— handler <code>parcel_lookup</code>, line 91. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb21"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb21-1"><a href="#cb21-1" aria-hidden="true" tabindex="-1"></a>parcel_lookup(body: _ParcelLookupIn, _actor: <span class="bu">str</span><span class="op">=</span>Depends(actor))</span></code></pre></div>
+<p>Direct handler refusals:
+<code>HTTPException(503, 'Townlight Code database/schema is not ready; no determination.')</code>;
+<code>HTTPException(503, 'Zoning persistence unavailable.')</code>.</p>
+<p><strong>GET
+<code>/desktop/v1/zoning/questions/{question_id}/history</code></strong>
+— handler <code>question_history</code>, line 209. Declared router
+prefix included.</p>
+<div class="sourceCode" id="cb22"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb22-1"><a href="#cb22-1" aria-hidden="true" tabindex="-1"></a>question_history(question_id: UUID, actor_id<span class="op">=</span>Depends(actor), provider<span class="op">=</span>Depends(meeting_provider))</span></code></pre></div>
+<p><strong>POST <code>/desktop/v1/zoning/meetings/search</code></strong>
+— handler <code>search_meetings</code>, line 216. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb23"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb23-1"><a href="#cb23-1" aria-hidden="true" tabindex="-1"></a>search_meetings(p: MeetingSearch, actor_id<span class="op">=</span>Depends(actor), provider<span class="op">=</span>Depends(meeting_provider))</span></code></pre></div>
+<p>Direct handler refusals:
+<code>HTTPException(status_code=503, detail='Meeting search unavailable')</code>.</p>
+<p><strong>POST
+<code>/desktop/v1/zoning/questions/{question_id}/meetings</code></strong>
+— handler <code>link_meeting</code>, line 242. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb24"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb24-1"><a href="#cb24-1" aria-hidden="true" tabindex="-1"></a>link_meeting(question_id: UUID, p: MeetingLink, actor_id<span class="op">=</span>Depends(actor), provider<span class="op">=</span>Depends(meeting_provider))</span></code></pre></div>
+<p><strong>POST
+<code>/desktop/v1/zoning/questions/{question_id}/snapshots</code></strong>
+— handler <code>create_snapshot</code>, line 259. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb25"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb25-1"><a href="#cb25-1" aria-hidden="true" tabindex="-1"></a>create_snapshot(question_id: UUID, p: SourceSnapshot, actor_id<span class="op">=</span>Depends(actor), provider<span class="op">=</span>Depends(meeting_provider))</span></code></pre></div>
+<p><strong>POST <code>/desktop/v1/zoning/rules</code></strong> — handler
+<code>create_rule</code>, line 291. Declared router prefix included.</p>
+<div class="sourceCode" id="cb26"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb26-1"><a href="#cb26-1" aria-hidden="true" tabindex="-1"></a>create_rule(p: Rule, actor_id<span class="op">=</span>Depends(actor))</span></code></pre></div>
+<p><strong>POST <code>/desktop/v1/zoning/questions</code></strong> —
+handler <code>create_question</code>, line 300. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb27"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb27-1"><a href="#cb27-1" aria-hidden="true" tabindex="-1"></a>create_question(p: Question, actor_id<span class="op">=</span>Depends(actor))</span></code></pre></div>
+<p><strong>GET <code>/desktop/v1/zoning/workspace</code></strong> —
+handler <code>get_workspace</code>, line 313. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb28"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb28-1"><a href="#cb28-1" aria-hidden="true" tabindex="-1"></a>get_workspace(actor_id<span class="op">=</span>Depends(actor))</span></code></pre></div>
+<p><strong>POST
+<code>/desktop/v1/zoning/questions/{question_id}/reviews</code></strong>
+— handler <code>create_review</code>, line 318. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb29"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb29-1"><a href="#cb29-1" aria-hidden="true" tabindex="-1"></a>create_review(question_id: UUID, p: Review, actor_id<span class="op">=</span>Depends(actor))</span></code></pre></div>
+<p><strong>POST <code>/desktop/v1/zoning/outlines</code></strong> —
+handler <code>create_outline</code>, line 325. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb30"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb30-1"><a href="#cb30-1" aria-hidden="true" tabindex="-1"></a>create_outline(p: Outline, actor_id<span class="op">=</span>Depends(actor))</span></code></pre></div>
+<p><strong>POST <code>/desktop/v1/zoning/code-context</code></strong> —
+handler <code>create_code_context</code>, line 332. Declared router
+prefix included.</p>
+<div class="sourceCode" id="cb31"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb31-1"><a href="#cb31-1" aria-hidden="true" tabindex="-1"></a>create_code_context(p: CodeContext, actor_id<span class="op">=</span>Depends(actor))</span></code></pre></div>
+<p><strong>POST
+<code>/desktop/v1/zoning/standards/process-explanation</code></strong> —
+handler <code>standards_explanation</code>, line 373. Declared router
+prefix included.</p>
+<div class="sourceCode" id="cb32"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb32-1"><a href="#cb32-1" aria-hidden="true" tabindex="-1"></a>standards_explanation(p: StandardsExplanation, actor_id<span class="op">=</span>Depends(actor))</span></code></pre></div>
+<p>Direct handler refusals:
+<code>HTTPException(422, f"Unknown rule type '{rule_type}'.")</code>.</p>
+<p><strong>POST <code>/civiczone/questions</code></strong> — handler
+<code>public_question</code>, line 423. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb33"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb33-1"><a href="#cb33-1" aria-hidden="true" tabindex="-1"></a>public_question(p: Question)</span></code></pre></div>
+<p><strong>POST <code>/civiczone/parcels/lookup</code></strong> —
+handler <code>public_parcel_lookup</code>, line 434. Declared router
+prefix included.</p>
+<div class="sourceCode" id="cb34"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb34-1"><a href="#cb34-1" aria-hidden="true" tabindex="-1"></a>public_parcel_lookup(p: _ParcelLookupIn)</span></code></pre></div>
+<h2 id="alphabetical-contract-index">Alphabetical contract index</h2>
+<ul>
+<li><p>**_ParcelLookupIn** — request/response data dictionary.</p></li>
+<li><p><strong>CodeContext</strong> — request/response data
+dictionary.</p></li>
+<li><p><strong>HTTPValidationError</strong> — request/response data
+dictionary.</p></li>
+<li><p><strong>MeetingLink</strong> — request/response data
+dictionary.</p></li>
+<li><p><strong>MeetingSearch</strong> — request/response data
+dictionary.</p></li>
+<li><p><strong>Outline</strong> — request/response data
+dictionary.</p></li>
+<li><p><strong>Question</strong> — request/response data
+dictionary.</p></li>
+<li><p><strong>Review</strong> — request/response data
+dictionary.</p></li>
+<li><p><strong>Rule</strong> — request/response data
+dictionary.</p></li>
+<li><p><strong>SourceSnapshot</strong> — request/response data
+dictionary.</p></li>
+<li><p><strong>StandardsExplanation</strong> — request/response data
+dictionary.</p></li>
+<li><p><strong>ValidationError</strong> — request/response data
+dictionary.</p></li>
+<li><p>Authentication: Origins and authentication.</p></li>
+<li><p>Conflicts and retry: Failure and retry contract.</p></li>
+<li><p>Fields and validation: Request and response data
+dictionary.</p></li>
+<li><p>HTTP operations: Installed desktop HTTP operations.</p></li>
+<li><p>Standalone boundaries: Source route and validation
+supplement.</p></li>
+</ul>
+<section id="footnotes" class="footnotes footnotes-end-of-document"
+role="doc-endnotes">
+<hr />
+<ol>
+<li id="fn1"><p>0-9a-f<a href="#fnref1" class="footnote-back"
+role="doc-backlink">↩︎</a></p></li>
+</ol>
+</section></article></div></main><footer><span>Townlight Beta 1 · Townlight Beta 1 documentation · AGPL-3.0-only</span><span><a href="../versions.html">Exact versions and candidate</a> · CivicCast remains separate</span></footer>
+<script>const search=document.getElementById('find-section');if(search)search.addEventListener('input',()=>{const q=search.value.toLowerCase();let n=0;document.querySelectorAll('.toc li').forEach(li=>{const match=li.textContent.toLowerCase().includes(q);li.hidden=!match;if(match)n++;});document.querySelector('.search-status').textContent=q?n+' matching entries':'';});</script></body></html>
