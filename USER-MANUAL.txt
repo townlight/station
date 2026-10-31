@@ -24,7 +24,7 @@ Staff should begin with First run and Daily workflow. Administrators should also
 
 ## First run
 
-1. Obtain the identified signed Station delivery candidate and its corresponding-source companion from the beta coordinator. The landing pages in this documentation are not an installer download service.
+1. Download the signed Windows installer and matching source/documentation companions from the [Station delivery release](https://github.com/townlight/townlight/releases/tag/townlight-beta-1-station-delivery). Use that release’s checksums and publisher signature to identify the candidate.
 2. On the intended fresh Windows test installation, verify the MSI hash and publisher signature before installing. Preserve unrelated profiles and recovery material. This candidate has fresh-install acceptance; historical in-place upgrades are unverified.
 3. Launch Townlight under the intended named Windows account. Choose the storage folders. Select **Townlight Inspections candidate** (`inspections-preview`) for all eight desktop products. A narrower default selection will not expose all workspaces.
 4. Enter the city profile, time zone and contacts. Create the first named local administrator, sign in and choose protected backup storage. **Continue without local AI** is valid for the deterministic workflows.
@@ -93,7 +93,7 @@ There is no Station first-run wizard or automatic activation by the desktop comp
 
 ## Architecture
 
-<img class="flow" src="../assets/station-architecture.svg" alt="Townlight Station architecture and evidence flow">
+<img class="flow" src="https://townlight.github.io/assets/station-architecture.svg" alt="Townlight Station architecture and evidence flow">
 
 The drawing shows the principal staff/evidence path. Native commands carry trusted identity to Python business services; PostgreSQL and retained original files hold durable state. A downstream copy does not silently transfer decision authority. Station has its own configured authority/media boundary, database and mutable files. The connected-workflow text supplies the drawing’s reading order and accessibility alternative.
 
@@ -520,7 +520,7 @@ The limits remain: actual city field acceptance and equipment/network commission
 
 ### Scope and status
 
-These terms describe the Townlight Beta 1 software and this documentation package. This is a locally prepared private beta, not a hosted-service subscription, a city deployment agreement or a public release. No uptime commitment, support response time, indemnity, data-processing agreement or paid service is created by these documents. A separate signed agreement, if any, governs services it actually provides.
+These terms describe the Townlight Beta 1 software and this documentation package. This is a public beta software distribution. It does not create a hosted-service subscription or a city deployment agreement. No uptime commitment, support response time, indemnity, data-processing agreement or paid service is created by these documents. A separate signed agreement, if any, governs services it actually provides.
 
 ### Software license and rights
 
@@ -670,7 +670,7 @@ The YouTube visibility is separate from local playback/disclosure approval.
 
 ### Architecture
 
-<img class="flow" src="../assets/station-delivery-architecture.svg" alt="Station live feed to separate CivicCast and completed recording upload to YouTube">
+<img class="flow" src="https://townlight.github.io/assets/station-delivery-architecture.svg" alt="Station live feed to separate CivicCast and completed recording upload to YouTube">
 
 The sender has bounded, leaky buffers and follows the live edge after congestion.
 Its network sink shares no pipeline with the recorder. A late join or connection
