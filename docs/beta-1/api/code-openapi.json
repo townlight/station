@@ -1,0 +1,2287 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Townlight Records",
+    "description": "Townlight Beta 1 documentation view of the installed desktop domain schema. Component API version is unchanged. Exported without lifespan or database access; schema generation is not endpoint acceptance.",
+    "version": "1.8.0.dev1"
+  },
+  "paths": {
+    "/desktop/v1/code/imports": {
+      "post": {
+        "tags": [
+          "native-code"
+        ],
+        "summary": "Imports",
+        "operationId": "imports_desktop_v1_code_imports_post",
+        "parameters": [
+          {
+            "name": "X-Townlight-Session",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Townlight-Session"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ImportBundleCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "native-code"
+        ],
+        "summary": "List Imports",
+        "operationId": "list_imports_desktop_v1_code_imports_get",
+        "parameters": [
+          {
+            "name": "X-Townlight-Session",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Townlight-Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/desktop/v1/code/sources": {
+      "get": {
+        "tags": [
+          "native-code"
+        ],
+        "summary": "Sources",
+        "operationId": "sources_desktop_v1_code_sources_get",
+        "parameters": [
+          {
+            "name": "X-Townlight-Session",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Townlight-Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/desktop/v1/code/workspace": {
+      "get": {
+        "tags": [
+          "native-code"
+        ],
+        "summary": "Workspace",
+        "operationId": "workspace_desktop_v1_code_workspace_get",
+        "parameters": [
+          {
+            "name": "X-Townlight-Session",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Townlight-Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/desktop/v1/code/lookup": {
+      "get": {
+        "tags": [
+          "native-code"
+        ],
+        "summary": "Lookup",
+        "operationId": "lookup_desktop_v1_code_lookup_get",
+        "parameters": [
+          {
+            "name": "section_number",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Section Number"
+            }
+          },
+          {
+            "name": "as_of",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "date"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "As Of"
+            }
+          },
+          {
+            "name": "X-Townlight-Session",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Townlight-Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/desktop/v1/code/sections/{section_id}/history": {
+      "get": {
+        "tags": [
+          "native-code"
+        ],
+        "summary": "Section History",
+        "operationId": "section_history_desktop_v1_code_sections__section_id__history_get",
+        "parameters": [
+          {
+            "name": "section_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Section Id"
+            }
+          },
+          {
+            "name": "X-Townlight-Session",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Townlight-Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/desktop/v1/code/citation": {
+      "get": {
+        "tags": [
+          "native-code"
+        ],
+        "summary": "Citation",
+        "operationId": "citation_desktop_v1_code_citation_get",
+        "parameters": [
+          {
+            "name": "section_number",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Section Number"
+            }
+          },
+          {
+            "name": "as_of",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "date"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "As Of"
+            }
+          },
+          {
+            "name": "X-Townlight-Session",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Townlight-Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/desktop/v1/code/search": {
+      "get": {
+        "tags": [
+          "native-code"
+        ],
+        "summary": "Search",
+        "operationId": "search_desktop_v1_code_search_get",
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Q"
+            }
+          },
+          {
+            "name": "X-Townlight-Session",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Townlight-Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/desktop/v1/code/imports/{job_id}/tree": {
+      "get": {
+        "tags": [
+          "native-code"
+        ],
+        "summary": "Import Tree",
+        "operationId": "import_tree_desktop_v1_code_imports__job_id__tree_get",
+        "parameters": [
+          {
+            "name": "job_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Job Id"
+            }
+          },
+          {
+            "name": "X-Townlight-Session",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Townlight-Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/desktop/v1/code/imports/{job_id}/provenance": {
+      "get": {
+        "tags": [
+          "native-code"
+        ],
+        "summary": "Import Provenance",
+        "operationId": "import_provenance_desktop_v1_code_imports__job_id__provenance_get",
+        "parameters": [
+          {
+            "name": "job_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Job Id"
+            }
+          },
+          {
+            "name": "X-Townlight-Session",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Townlight-Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/desktop/v1/code/export": {
+      "get": {
+        "tags": [
+          "native-code"
+        ],
+        "summary": "Export Section",
+        "operationId": "export_section_desktop_v1_code_export_get",
+        "parameters": [
+          {
+            "name": "section_ref",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Section Ref"
+            }
+          },
+          {
+            "name": "as_of",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "date"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "As Of"
+            }
+          },
+          {
+            "name": "X-Townlight-Session",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Townlight-Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/desktop/v1/code/questions": {
+      "post": {
+        "tags": [
+          "native-code"
+        ],
+        "summary": "Questions",
+        "operationId": "questions_desktop_v1_code_questions_post",
+        "parameters": [
+          {
+            "name": "X-Townlight-Session",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Townlight-Session"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/QuestionAnswerRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/desktop/v1/code/sections/{section_id}/notes": {
+      "post": {
+        "tags": [
+          "native-code"
+        ],
+        "summary": "Create Note",
+        "operationId": "create_note_desktop_v1_code_sections__section_id__notes_post",
+        "parameters": [
+          {
+            "name": "section_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Section Id"
+            }
+          },
+          {
+            "name": "X-Townlight-Session",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Townlight-Session"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InterpretationNoteCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "native-code"
+        ],
+        "summary": "List Notes",
+        "operationId": "list_notes_desktop_v1_code_sections__section_id__notes_get",
+        "parameters": [
+          {
+            "name": "section_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Section Id"
+            }
+          },
+          {
+            "name": "X-Townlight-Session",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Townlight-Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/desktop/v1/code/sections/{section_id}/summaries": {
+      "post": {
+        "tags": [
+          "native-code"
+        ],
+        "summary": "Create Summary",
+        "operationId": "create_summary_desktop_v1_code_sections__section_id__summaries_post",
+        "parameters": [
+          {
+            "name": "section_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Section Id"
+            }
+          },
+          {
+            "name": "X-Townlight-Session",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Townlight-Session"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PlainLanguageSummaryCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "native-code"
+        ],
+        "summary": "List Summaries",
+        "operationId": "list_summaries_desktop_v1_code_sections__section_id__summaries_get",
+        "parameters": [
+          {
+            "name": "section_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Section Id"
+            }
+          },
+          {
+            "name": "X-Townlight-Session",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Townlight-Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/desktop/v1/code/summaries/{summary_id}/approve": {
+      "post": {
+        "tags": [
+          "native-code"
+        ],
+        "summary": "Approve Summary",
+        "operationId": "approve_summary_desktop_v1_code_summaries__summary_id__approve_post",
+        "parameters": [
+          {
+            "name": "summary_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Summary Id"
+            }
+          },
+          {
+            "name": "X-Townlight-Session",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Townlight-Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/desktop/v1/code/connections": {
+      "get": {
+        "summary": "List Connections",
+        "operationId": "list_connections_desktop_v1_code_connections_get",
+        "parameters": [
+          {
+            "name": "X-Townlight-Session",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Townlight-Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "summary": "Create Connection",
+        "operationId": "create_connection_desktop_v1_code_connections_post",
+        "parameters": [
+          {
+            "name": "X-Townlight-Session",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Townlight-Session"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Proposal"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/desktop/v1/code/connections/{connection_id}": {
+      "get": {
+        "summary": "Get Connection",
+        "operationId": "get_connection_desktop_v1_code_connections__connection_id__get",
+        "parameters": [
+          {
+            "name": "connection_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_-]{1,64}$",
+              "title": "Connection Id"
+            }
+          },
+          {
+            "name": "X-Townlight-Session",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Townlight-Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/desktop/v1/code/connections/{connection_id}/closeout": {
+      "post": {
+        "summary": "Closeout Connection",
+        "operationId": "closeout_connection_desktop_v1_code_connections__connection_id__closeout_post",
+        "parameters": [
+          {
+            "name": "connection_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_-]{1,64}$",
+              "title": "Connection Id"
+            }
+          },
+          {
+            "name": "X-Townlight-Session",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Townlight-Session"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Closeout"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/civiccode": {
+      "get": {
+        "summary": "Home",
+        "operationId": "home_civiccode_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/civiccode/search": {
+      "get": {
+        "summary": "Search",
+        "operationId": "search_civiccode_search_get",
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Q"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/civiccode/answer": {
+      "get": {
+        "summary": "Answer",
+        "operationId": "answer_civiccode_answer_get",
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Q"
+            }
+          },
+          {
+            "name": "section_number",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Section Number"
+            }
+          },
+          {
+            "name": "as_of",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "date"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "As Of"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/civiccode/sections/{section_ref}": {
+      "get": {
+        "summary": "Detail",
+        "operationId": "detail_civiccode_sections__section_ref__get",
+        "parameters": [
+          {
+            "name": "section_ref",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Section Ref"
+            }
+          },
+          {
+            "name": "as_of",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "date"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "As Of"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/civiccode/sections/{section_ref}/export": {
+      "get": {
+        "summary": "Export",
+        "operationId": "export_civiccode_sections__section_ref__export_get",
+        "parameters": [
+          {
+            "name": "section_ref",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Section Ref"
+            }
+          },
+          {
+            "name": "as_of",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "date"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "As Of"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "ChapterCreate": {
+        "properties": {
+          "chapter_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Chapter Id"
+          },
+          "title_id": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Title Id"
+          },
+          "chapter_number": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Chapter Number"
+          },
+          "chapter_name": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Chapter Name"
+          },
+          "sort_order": {
+            "type": "integer",
+            "title": "Sort Order",
+            "default": 0
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "title_id",
+          "chapter_number",
+          "chapter_name"
+        ],
+        "title": "ChapterCreate",
+        "description": "Request body for creating a code chapter."
+      },
+      "Closeout": {
+        "properties": {
+          "decision_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{1,64}$",
+            "title": "Decision Id"
+          },
+          "version_id": {
+            "type": "string",
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Version Id"
+          },
+          "source_id": {
+            "type": "string",
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Source Id"
+          },
+          "version_label": {
+            "type": "string",
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Version Label"
+          },
+          "body": {
+            "type": "string",
+            "maxLength": 1000000,
+            "minLength": 1,
+            "title": "Body"
+          },
+          "effective_start": {
+            "type": "string",
+            "format": "date",
+            "title": "Effective Start"
+          },
+          "effective_end": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Effective End"
+          },
+          "is_current": {
+            "type": "boolean",
+            "title": "Is Current"
+          },
+          "reconciliation_note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reconciliation Note"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "decision_id",
+          "version_id",
+          "source_id",
+          "version_label",
+          "body",
+          "effective_start",
+          "is_current"
+        ],
+        "title": "Closeout"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "type": "array",
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "title": "HTTPValidationError"
+      },
+      "ImportBundleCreate": {
+        "properties": {
+          "job_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Job Id"
+          },
+          "connector_type": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Connector Type"
+          },
+          "source": {
+            "$ref": "#/components/schemas/SourceCreate"
+          },
+          "sources": {
+            "items": {
+              "$ref": "#/components/schemas/SourceCreate"
+            },
+            "type": "array",
+            "title": "Sources"
+          },
+          "titles": {
+            "items": {
+              "$ref": "#/components/schemas/TitleCreate"
+            },
+            "type": "array",
+            "title": "Titles"
+          },
+          "chapters": {
+            "items": {
+              "$ref": "#/components/schemas/ChapterCreate"
+            },
+            "type": "array",
+            "title": "Chapters"
+          },
+          "sections": {
+            "items": {
+              "$ref": "#/components/schemas/SectionCreate"
+            },
+            "type": "array",
+            "title": "Sections"
+          },
+          "versions": {
+            "items": {
+              "$ref": "#/components/schemas/SectionVersionCreate"
+            },
+            "type": "array",
+            "title": "Versions"
+          },
+          "provenance": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Provenance"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "connector_type",
+          "source"
+        ],
+        "title": "ImportBundleCreate",
+        "description": "Request body for local fixture/file-drop import jobs."
+      },
+      "InterpretationNoteCreate": {
+        "properties": {
+          "note_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note Id"
+          },
+          "note_text": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Note Text"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status",
+            "default": "draft"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "note_text"
+        ],
+        "title": "InterpretationNoteCreate",
+        "description": "Request body for staff-only interpretation notes."
+      },
+      "PlainLanguageSummaryCreate": {
+        "properties": {
+          "summary_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Summary Id"
+          },
+          "section_version_id": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Section Version Id"
+          },
+          "summary_text": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Summary Text"
+          },
+          "language_code": {
+            "type": "string",
+            "title": "Language Code",
+            "default": "en"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status",
+            "default": "draft"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "section_version_id",
+          "summary_text"
+        ],
+        "title": "PlainLanguageSummaryCreate",
+        "description": "Request body for staff-drafted plain-language summaries."
+      },
+      "Proposal": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{1,64}$",
+            "title": "Id"
+          },
+          "version_id": {
+            "type": "string",
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Version Id"
+          },
+          "meeting_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Meeting Id"
+          },
+          "title": {
+            "type": "string",
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Title"
+          },
+          "ordinance_number": {
+            "type": "string",
+            "maxLength": 120,
+            "minLength": 1,
+            "title": "Ordinance Number"
+          },
+          "proposed_text": {
+            "type": "string",
+            "maxLength": 1000000,
+            "minLength": 1,
+            "title": "Proposed Text"
+          },
+          "supersedes_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9_-]{1,64}$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Supersedes Id"
+          },
+          "reconciliation_note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reconciliation Note"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "id",
+          "version_id",
+          "meeting_id",
+          "title",
+          "ordinance_number",
+          "proposed_text"
+        ],
+        "title": "Proposal"
+      },
+      "QuestionAnswerRequest": {
+        "properties": {
+          "question": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Question"
+          },
+          "section_number": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Section Number"
+          },
+          "as_of": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "As Of"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "question"
+        ],
+        "title": "QuestionAnswerRequest",
+        "description": "Request body for citation-grounded code Q&A."
+      },
+      "SectionCreate": {
+        "properties": {
+          "section_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Section Id"
+          },
+          "chapter_id": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Chapter Id"
+          },
+          "section_number": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Section Number"
+          },
+          "section_heading": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Section Heading"
+          },
+          "parent_section_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parent Section Id"
+          },
+          "sort_order": {
+            "type": "integer",
+            "title": "Sort Order",
+            "default": 0
+          },
+          "administrative_regulation_refs": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Administrative Regulation Refs"
+          },
+          "resolution_refs": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Resolution Refs"
+          },
+          "policy_refs": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Policy Refs"
+          },
+          "approved_summary_refs": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Approved Summary Refs"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "chapter_id",
+          "section_number",
+          "section_heading"
+        ],
+        "title": "SectionCreate",
+        "description": "Request body for creating a code section or subsection."
+      },
+      "SectionVersionCreate": {
+        "properties": {
+          "version_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Version Id"
+          },
+          "section_id": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Section Id"
+          },
+          "source_id": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Source Id"
+          },
+          "version_label": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Version Label"
+          },
+          "body": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Body"
+          },
+          "effective_start": {
+            "type": "string",
+            "format": "date",
+            "title": "Effective Start"
+          },
+          "effective_end": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Effective End"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status",
+            "default": "draft"
+          },
+          "is_current": {
+            "type": "boolean",
+            "title": "Is Current",
+            "default": false
+          },
+          "adoption_event_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Adoption Event Id"
+          },
+          "amendment_event_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Amendment Event Id"
+          },
+          "amendment_summary": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Amendment Summary"
+          },
+          "prior_version_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Prior Version Id"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "section_id",
+          "source_id",
+          "version_label",
+          "body",
+          "effective_start"
+        ],
+        "title": "SectionVersionCreate",
+        "description": "Request body for adding an immutable section version."
+      },
+      "SourceCreate": {
+        "properties": {
+          "source_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Id"
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Name"
+          },
+          "publisher": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Publisher"
+          },
+          "source_type": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Source Type"
+          },
+          "source_category": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Source Category"
+          },
+          "source_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Url"
+          },
+          "file_reference": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "File Reference"
+          },
+          "retrieved_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Retrieved At"
+          },
+          "retrieval_method": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Retrieval Method"
+          },
+          "checksum": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Checksum"
+          },
+          "source_owner": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Owner"
+          },
+          "is_official": {
+            "type": "boolean",
+            "title": "Is Official",
+            "default": true
+          },
+          "official_status_note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Official Status Note"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status",
+            "default": "draft"
+          },
+          "staff_notes": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Staff Notes"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "name",
+          "publisher",
+          "source_type",
+          "source_category"
+        ],
+        "title": "SourceCreate",
+        "description": "Request body for registering an official or explicitly labeled source."
+      },
+      "TitleCreate": {
+        "properties": {
+          "title_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title Id"
+          },
+          "title_number": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Title Number"
+          },
+          "title_name": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Title Name"
+          },
+          "sort_order": {
+            "type": "integer",
+            "title": "Sort Order",
+            "default": 0
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "title_number",
+          "title_name"
+        ],
+        "title": "TitleCreate",
+        "description": "Request body for creating a code title."
+      },
+      "ValidationError": {
+        "properties": {
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "type": "array",
+            "title": "Location"
+          },
+          "msg": {
+            "type": "string",
+            "title": "Message"
+          },
+          "type": {
+            "type": "string",
+            "title": "Error Type"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "ctx": {
+            "type": "object",
+            "title": "Context"
+          }
+        },
+        "type": "object",
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError"
+      }
+    },
+    "securitySchemes": {
+      "OAuth2PasswordBearer": {
+        "type": "oauth2",
+        "flows": {
+          "password": {
+            "scopes": {},
+            "tokenUrl": "auth/jwt/login"
+          }
+        }
+      }
+    }
+  }
+}

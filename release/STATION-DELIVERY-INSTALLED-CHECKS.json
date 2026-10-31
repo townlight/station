@@ -1,0 +1,67 @@
+{
+  "synthetic_only": true,
+  "headless": true,
+  "installed_files": 23716,
+  "first_run": "passed",
+  "staff_authentication_and_role_fence": "passed",
+  "station_checks": [
+    {
+      "name": "Real native staff session grants operator ticket",
+      "passed": true
+    },
+    {
+      "name": "Real headless operator live capture stop handoff logout",
+      "passed": true
+    },
+    {
+      "name": "Separate CivicCast SRT adapter received live bytes before capture stop",
+      "passed": true
+    },
+    {
+      "name": "Served recording hash equals completed output",
+      "passed": true
+    },
+    {
+      "name": "Captured synthetic audio video independently decode",
+      "passed": true
+    },
+    {
+      "name": "Normal Records request can read Station handoff",
+      "passed": true
+    },
+    {
+      "name": "Repeated handoff retains one canonical document",
+      "passed": true
+    },
+    {
+      "name": "Operator created explicit YouTube upload intent",
+      "passed": true
+    },
+    {
+      "name": "Installed upload worker reused real YouTube client with synthetic Google acknowledgements",
+      "passed": true
+    },
+    {
+      "name": "Exact packaged MP4 bytes sent with private visibility and reviewed title",
+      "passed": true
+    },
+    {
+      "name": "Upload left canonical recording unchanged",
+      "passed": true
+    },
+    {
+      "name": "Installed API prevents duplicate external upload",
+      "passed": true
+    },
+    {
+      "name": "Station original stays locked and private",
+      "passed": true
+    }
+  ],
+  "guest_uninstall_exit": 0,
+  "sandbox_stopped": true,
+  "external_youtube_requests": 0,
+  "physical_peg_broadcast_tested": false,
+  "signing_run": "41163156492",
+  "msi_sha256": "173c032b874e2cf4091cd79213f53c0663d272070fc11712701892d490e09883"
+}

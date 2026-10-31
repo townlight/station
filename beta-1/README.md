@@ -1,3 +1,5 @@
+> [Townlight Beta 1 Station delivery update](https://github.com/townlight/townlight/releases/tag/townlight-beta-1-station-delivery) · [Current manual](https://townlight.github.io/manuals/station.html). New live CivicCast feed and completed-recording YouTube uploads are documented in [DELIVERY-INTEGRATIONS.md](DELIVERY-INTEGRATIONS.md). The exact source archive preserves original private preparation notes.
+
 # Townlight Station service boundary
 
 This AGPL-3.0-only package owns the Station service/API, PostgreSQL job ledger,

@@ -43,6 +43,18 @@ playouts = sa.Table('playouts', metadata,
     sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.func.now()),
     sa.UniqueConstraint('creator', 'idempotency_key'))
 
+# Durable external upload intent, separate from capture and local publication.
+uploads = sa.Table('youtube_uploads', metadata,
+    sa.Column('id', sa.Uuid(as_uuid=False), primary_key=True),
+    sa.Column('creator', sa.String(64), nullable=False),
+    sa.Column('idempotency_key', sa.String(100), nullable=False),
+    sa.Column('request_hash', sa.String(64), nullable=False),
+    sa.Column('recording_id', sa.Uuid(as_uuid=False), nullable=False, unique=True),
+    sa.Column('status', sa.String(30), nullable=False),
+    sa.Column('details', JSONB, nullable=False),
+    sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.func.now()),
+    sa.UniqueConstraint('creator', 'idempotency_key'))
+
 # Single-row on-air state so switching/return-to-schedule survives restarts.
 station_state = sa.Table('station_state', metadata,
     sa.Column('id', sa.Integer, primary_key=True),
@@ -61,11 +73,11 @@ class Store:
                 conn.execute(version.insert().values(version=1))
             conn.execute(sa.text("ALTER TABLE station.recordings ADD COLUMN IF NOT EXISTS control jsonb NOT NULL DEFAULT '{}'::jsonb"))
             conn.execute(sa.text("INSERT INTO station.station_state (id, on_air) VALUES (1, '{}'::jsonb) ON CONFLICT (id) DO NOTHING"))
-            conn.execute(version.update().where(version.c.version.in_((1, 2))).values(version=3))
+            conn.execute(version.update().where(version.c.version.in_((1, 2, 3))).values(version=4))
             self.check(conn)
 
     def check(self, conn):
-        if conn.execute(sa.select(version.c.version)).scalars().all() != [3]:
+        if conn.execute(sa.select(version.c.version)).scalars().all() != [4]:
             raise RuntimeError('Station schema migration required')
 
     def ready(self):
@@ -86,13 +98,13 @@ class Store:
             return conn.scalar(sa.select(station_state.c.on_air).where(station_state.c.id == 1)) or {}
 
     @contextmanager
-    def worker_lock(self):
+    def worker_lock(self, key=1953721716):
         with self.engine.connect() as conn:
-            acquired = conn.scalar(sa.text('SELECT pg_try_advisory_lock(1953721716)'))
+            acquired = conn.scalar(sa.text('SELECT pg_try_advisory_lock(:key)'), {'key': key})
             conn.commit()
             try:
                 yield bool(acquired)
             finally:
                 if acquired:
-                    conn.execute(sa.text('SELECT pg_advisory_unlock(1953721716)'))
+                    conn.execute(sa.text('SELECT pg_advisory_unlock(:key)'), {'key': key})
                     conn.commit()

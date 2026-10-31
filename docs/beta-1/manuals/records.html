@@ -1,0 +1,958 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="description" content=""><title>Townlight
+Records Manual | Townlight Beta 1</title><style>
+:root{--ink:#182f3a;--muted:#526775;--accent:#006b64;--paper:#fff;--wash:#f1f6f5;--line:#cfdddf;--warm:#dceab2}
+*{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;background:var(--paper);color:var(--ink);font:17px/1.65 "Segoe UI",Arial,sans-serif}a{color:#006b64;text-underline-offset:3px}a:hover{text-decoration-thickness:2px}a:focus-visible,button:focus-visible,input:focus-visible{outline:3px solid #a25900;outline-offset:4px}.skip{position:absolute;left:-9999px}.skip:focus{left:1rem;top:1rem;background:white;padding:1rem;z-index:20}header{border-bottom:1px solid var(--line);padding:1.1rem 5vw;display:flex;align-items:center;gap:1.5rem;flex-wrap:wrap}header .brand{font-size:1.3rem;font-weight:750;letter-spacing:-.04em;text-decoration:none;color:var(--ink)}header nav{margin-left:auto;display:flex;gap:1.25rem;flex-wrap:wrap;font-size:.88rem}.edition{font:700 .72rem/1.5 "Segoe UI",sans-serif;letter-spacing:.12em;text-transform:uppercase;color:var(--accent)}.wrap{max-width:1240px;margin:auto;padding:0 4vw}.hero{padding:5rem 0 3.2rem;max-width:950px}.hero h1{font-size:clamp(2.5rem,5vw,4.7rem);line-height:1.08;letter-spacing:-.045em;margin:1rem 0 1.5rem;font-weight:650}.hero .lead{font-size:1.26rem;max-width:780px;color:var(--muted)}.actions{display:flex;gap:.8rem;flex-wrap:wrap;margin:1.8rem 0}.button{display:inline-block;padding:.7rem 1.15rem;border:1px solid var(--accent);border-radius:4px;text-decoration:none;font-weight:650}.button.primary{background:var(--accent);color:#fff}.facts{display:flex;gap:1.5rem;flex-wrap:wrap;font-size:.85rem;color:var(--muted)}.section{padding:3rem 0;border-top:1px solid var(--line)}h2{font-size:1.8rem;line-height:1.3;letter-spacing:-.025em;margin:2.5rem 0 1rem}h3{font-size:1.18rem;line-height:1.45;margin:1.8rem 0 .7rem}h4{font-size:1rem;margin:1.3rem 0 .6rem}p{margin:.85rem 0 1rem}ul,ol{padding-left:1.6rem}li{margin:.4rem 0}strong{font-weight:650}.grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:1.6rem}.product{border-top:3px solid var(--accent);padding:1.4rem 0}.product h3{font-size:1.65rem;margin:.4rem 0}.product p{color:var(--muted)}.number{font-size:.76rem;letter-spacing:.1em}.split{display:grid;grid-template-columns:1fr 1fr;gap:3rem}.flow{width:100%;height:auto;display:block;margin:1.8rem 0}.caption{font-size:.85rem;color:var(--muted)}.reading{max-width:860px}.doclayout{display:grid;grid-template-columns:245px minmax(0,1fr);gap:3rem;max-width:1320px;margin:auto;padding:2rem 4vw}.toc{font-size:.84rem;align-self:start;position:sticky;top:1rem;max-height:90vh;overflow:auto;padding-right:.8rem}.toc ul{list-style:none;padding:0}.toc li{margin:.5rem 0}.toc li li{padding-left:.8rem}.toc a{text-decoration:none}.docbody{min-width:0}.docbody h1{font-size:2.7rem;line-height:1.1;letter-spacing:-.04em}.docbody h2{border-top:1px solid var(--line);padding-top:1.8rem}.docbody img{max-width:100%;height:auto}.docmeta{color:var(--muted);font-size:.9rem}.docbody section{scroll-margin-top:1rem}table{width:100%;border-collapse:collapse;font-size:.87rem;line-height:1.5;margin:1.3rem 0;table-layout:auto}th{text-align:left;background:var(--wash);font-weight:650}th,td{padding:.65rem .7rem;border-bottom:1px solid var(--line);vertical-align:top;overflow-wrap:anywhere}thead{display:table-header-group}pre{background:#f2f5f6;padding:1rem;border:1px solid #dfe7e8;white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;font:13px/1.6 Consolas,monospace}code{font: .85em/1.6 Consolas,monospace;overflow-wrap:anywhere}pre code{font-size:inherit}blockquote{border-left:3px solid var(--accent);padding-left:1rem;margin-left:0;color:var(--muted)}.search{padding:.65rem;border:1px solid #789399;border-radius:4px;width:100%;font:inherit}.search-status{font-size:.8rem;color:var(--muted)}footer{border-top:1px solid var(--line);padding:2rem 5vw;margin-top:3rem;font-size:.85rem;color:var(--muted);display:flex;gap:2rem;justify-content:space-between;flex-wrap:wrap}.small{font-size:.9rem;color:var(--muted)}.api-entry{padding:1.2rem 0;border-top:1px solid var(--line)}.api-entry h3{overflow-wrap:anywhere}.method{font-size:.76rem;font-weight:750;color:var(--accent)}details{margin:1rem 0}summary{cursor:pointer;font-weight:650}.index-columns{columns:2;column-gap:2rem}.index-columns li{break-inside:avoid}
+@media(max-width:850px){.grid{grid-template-columns:1fr 1fr}.split{grid-template-columns:1fr}.doclayout{grid-template-columns:1fr;gap:1rem}.toc{position:static;max-height:none}.hero{padding-top:3rem}header nav{margin-left:0}.docbody h1{font-size:2.2rem}}
+@media(max-width:520px){.grid{grid-template-columns:1fr}.wrap{padding:0 6vw}header{padding:1rem 6vw}.hero h1{font-size:2.6rem}.index-columns{columns:1}table{font-size:.78rem}th,td{padding:.45rem}.doclayout{padding:1rem 6vw}.facts{gap:.5rem}}
+main,.toc a,.hero h1{overflow-wrap:anywhere}
+@page{size:Letter;margin:.7in .65in .75in}
+@media print{html{scroll-behavior:auto}body{font:10.5pt/1.45 Arial,sans-serif;color:#172f39}header,footer,.search-area,.screen-only{display:none}.doclayout{display:block;padding:0;max-width:none}.toc{position:static;max-height:none;overflow:visible;font-size:10pt;break-after:page}.toc>h2{border:0}.toc ul{columns:2;column-gap:.3in}.toc li{break-inside:avoid}.docbody h1{font-size:30pt}.docbody h2{font-size:19pt;break-after:avoid;padding-top:.15in;margin-top:.35in}.docbody h3{font-size:12pt;break-after:avoid}.docbody h4{break-after:avoid}p{orphans:3;widows:3}pre{font-size:8.2pt;line-height:1.4;padding:.1in;break-inside:auto}table{font-size:8.4pt;line-height:1.35}th,td{padding:.06in .07in}tr{break-inside:avoid}.flow{max-height:6in;object-fit:contain;break-inside:avoid}a{color:#172f39;text-decoration:underline}.cover{break-after:page;padding-top:1in}.cover .edition{font-size:11pt}.cover h1{font-size:32pt}.cover .lead{font-size:14pt}.api-entry{break-inside:auto}.api-entry h3{break-after:avoid}.index-columns{columns:2}}
+</style></head><body><a class="skip" href="#main">Skip to content</a><aside aria-label="Beta download" style="padding:1rem 5%;background:#e5f3ec;color:#123b30"><strong>Townlight Beta 1</strong> · <a href="https://github.com/townlight/townlight/releases/tag/townlight-beta-1-station-delivery">Signed Windows installer, source, documentation and acceptance</a>. Updated Station live feed and recorded-video delivery; existing component versions retained. <a href="https://townlight.github.io/versions.html">Candidate identity and retained baseline evidence</a>.</aside><header><a class="brand" href="../index.html">townlight<span aria-hidden="true"> ·</span></a><span class="edition">Townlight Beta 1</span><nav aria-label="Main"><a href="../index.html#products">Products</a><a href="../manuals/suite.html">Suite manual</a><a href="../reference/index.html">Technical reference</a><a href="../terms.html">Terms and license</a></nav></header>
+<main id="main"><div class="cover wrap"><div class="hero"><div class="edition">Townlight Beta 1</div><h1>Townlight
+Records
+Manual</h1><p class="lead">Staff guide and technical reference</p><p class="docmeta">Documentation edition 30 October 2026<br>Existing component versions retained<br>Signed suite installer 1.6.0.1<br>Private beta documentation companion</p></div></div><div class="doclayout"><aside class="toc" aria-label="Table of contents"><h2>Contents</h2><div class="search-area"><label for="find-section">Find a section</label><input class="search" id="find-section" type="search" placeholder="Type a heading"><p class="search-status" aria-live="polite"></p></div><ul>
+<li><a href="#using-this-manual" id="toc-using-this-manual">Using this
+manual</a></li>
+<li><a href="#beta-identity" id="toc-beta-identity">Beta
+identity</a></li>
+<li><a href="#first-run" id="toc-first-run">First run</a></li>
+<li><a href="#daily-workflow" id="toc-daily-workflow">Daily
+workflow</a></li>
+<li><a href="#connected-workflows"
+id="toc-connected-workflows">Connected workflows</a></li>
+<li><a href="#architecture" id="toc-architecture">Architecture</a></li>
+<li><a href="#fees-messages-notifications-and-local-intake"
+id="toc-fees-messages-notifications-and-local-intake">Fees messages
+notifications and local intake</a></li>
+<li><a href="#technical-specifications"
+id="toc-technical-specifications">Technical specifications</a></li>
+<li><a href="#configuration-and-administration"
+id="toc-configuration-and-administration">Configuration and
+administration</a></li>
+<li><a href="#api-and-integration-examples"
+id="toc-api-and-integration-examples">API and integration
+examples</a></li>
+<li><a href="#mcp-and-automation-boundary"
+id="toc-mcp-and-automation-boundary">MCP and automation
+boundary</a></li>
+<li><a href="#security-and-permissions"
+id="toc-security-and-permissions">Security and permissions</a></li>
+<li><a href="#backup-recovery-and-maintenance"
+id="toc-backup-recovery-and-maintenance">Backup recovery and
+maintenance</a></li>
+<li><a href="#troubleshooting"
+id="toc-troubleshooting">Troubleshooting</a></li>
+<li><a href="#verified-workflows-and-limits"
+id="toc-verified-workflows-and-limits">Verified workflows and
+limits</a></li>
+<li><a href="#terms-of-service-and-license"
+id="toc-terms-of-service-and-license">Terms of service and
+license</a></li>
+<li><a href="#glossary" id="toc-glossary">Glossary</a></li>
+<li><a href="#alphabetical-subject-index"
+id="toc-alphabetical-subject-index">Alphabetical subject index</a></li>
+<li><a href="#source-and-document-control"
+id="toc-source-and-document-control">Source and document
+control</a></li>
+</ul></aside><article class="docbody"><h2 id="using-this-manual">Using
+this manual</h2>
+<p>Townlight Records helps records officers, clerks and authorized
+reviewers. Records manages request intake, responsive evidence, review
+and the final response. Material received from another Townlight product
+is evidence for a request. Records separately controls release
+decisions, response approval, exports and fulfillment.</p>
+<p>Staff should begin with First run and Daily workflow. Administrators
+should also read Architecture, Technical specifications, Configuration,
+Security and Recovery. Developers should use the exact API/data
+dictionary and examples. The table of contents and alphabetical subject
+index link to the relevant sections in the HTML edition; the PDF
+preserves headings and searchable text. An editable Word edition is
+included with the same documentation companion.</p>
+<h2 id="beta-identity">Beta identity</h2>
+<table>
+<colgroup>
+<col style="width: 50%" />
+<col style="width: 50%" />
+</colgroup>
+<thead>
+<tr>
+<th>Identity</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Public documentation identity</td>
+<td>Townlight Beta 1</td>
+</tr>
+<tr>
+<td>Installer version</td>
+<td>1.6.0.1</td>
+</tr>
+<tr>
+<td>Product component</td>
+<td>civicrecords-ai 1.8.0.dev1</td>
+</tr>
+<tr>
+<td>Native desktop source version</td>
+<td>1.6.0-1</td>
+</tr>
+<tr>
+<td>Candidate MSI SHA256</td>
+<td><code>98bcdef11ebdf5c767f620c904ff49f85115fde3b5c23f62703b111e645aaf86</code></td>
+</tr>
+<tr>
+<td>Corresponding-source SHA256</td>
+<td><code>84a23e1297e42d17b16cfc9e51b2dd78bc46414c0de8ad7ebd2466c1a409d06b</code></td>
+</tr>
+<tr>
+<td>Current owned software license</td>
+<td>AGPL-3.0-only</td>
+</tr>
+<tr>
+<td>Supported acceptance profile</td>
+<td>Windows x64 fresh install; inspections-preview; separate Station
+configuration</td>
+</tr>
+</tbody>
+</table>
+<p>“Townlight Beta 1” identifies this coordinated beta delivery. It does
+not renumber the installer, native binary, Python packages or historical
+receipts. Component versions may differ. This documentation is a later
+companion to unchanged signed bytes, not a rebuilt installer. Historical
+release pages and manuals describe their own versions and are not the
+download instructions for this private candidate.</p>
+<h2 id="first-run">First run</h2>
+<ol type="1">
+<li>Obtain the identified signed private candidate and its
+corresponding-source companion from the beta coordinator. The landing
+pages in this documentation are not an installer download service.</li>
+<li>On the intended fresh Windows test installation, verify the MSI hash
+and publisher signature before installing. Preserve unrelated profiles
+and recovery material. This candidate has fresh-install acceptance;
+historical in-place upgrades are unverified.</li>
+<li>Launch Townlight under the intended named Windows account. Choose
+the storage folders. Select <strong>Townlight Inspections
+candidate</strong> (<code>inspections-preview</code>) for all eight
+desktop products. A narrower default selection will not expose all
+workspaces.</li>
+<li>Enter the city profile, time zone and contacts. Create the first
+named local administrator, sign in and choose protected backup storage.
+<strong>Continue without local AI</strong> is valid for the
+deterministic workflows.</li>
+<li>Run Health Check and wait for readiness. Open Townlight. In System
+Health select <strong>Finish Records Migration</strong> to activate the
+canonical Python/PostgreSQL runtime. Do not fabricate migration receipts
+or seed accounts.</li>
+<li>Create named staff through Settings. Import authorized sources using
+each product’s source library. All examples in this package are
+synthetic; they are not municipal authority.</li>
+<li>Provision Station separately if it is part of the beta exercise.
+Selecting the desktop composition does not start or configure Station.
+Configure vision explicitly only if automatic photo drafting is
+selected.</li>
+</ol>
+<h2 id="daily-workflow">Daily workflow</h2>
+<h3 id="workflow-1">1. Receive and identify the request</h3>
+<p>Create the request with its requester, description and recorded
+deadline basis. Save it and retain the request identifier. Record
+assignment, clarification and work in the request history.</p>
+<h3 id="workflow-2">2. Find responsive evidence</h3>
+<p>Search only the permitted sources. Inspect the source title, date,
+citation, visibility and version before attaching responsive material.
+Open the saved attachment to confirm that it is the intended
+evidence.</p>
+<h3 id="workflow-3">3. Preserve the original</h3>
+<p>Keep original bytes and their hash. Add a separately reviewed
+release-ready or redacted copy when needed. Renaming a private file does
+not remove private content.</p>
+<h3 id="workflow-4">4. Record each release decision</h3>
+<p>Explicitly record release, redact or exempt for the relevant
+document, with the applicable reason and source. Do not treat an AI
+suggestion or another product’s review as the Records legal
+decision.</p>
+<h3 id="workflow-5">5. Draft and approve</h3>
+<p>Draft the response and review the selected attachments. Record
+approval of the exact response text. Editing that text changes its hash
+and requires a new approval.</p>
+<h3 id="workflow-6">6. Export both artifacts</h3>
+<p>Export the approved response and the release package. If release is
+refused, inspect the missing decision, approval or source-permission
+message. Resolve that condition before trying again.</p>
+<h3 id="workflow-7">7. Fulfill and retain</h3>
+<p>Use the explicit fulfillment action only after checking the outgoing
+artifacts. Retain the response, package and history. A preview,
+attachment or export by itself does not fulfill the request.</p>
+<h3 id="working-safely">Working safely</h3>
+<p>Use your own named account and save before leaving a screen. A saved
+draft is durable; unsaved form text may not be. If a write has an
+unknown result, reopen its record before repeating it.</p>
+<p>Read source jurisdiction, dates, citation, version and visibility. A
+copied source hash identifies exact bytes, not their legal
+applicability. If a source changes or permission is removed, resolve the
+source problem rather than substituting stale cached content.</p>
+<p>Keep originals and derivatives separate. Review the intended audience
+before export. A public summary excludes private fields only through the
+applicable copy contract and your review. A renamed private packet is
+still private content.</p>
+<p>Drafting, review, approval, attachment, export, fulfillment and
+publication are separate operations. A Townlight workpaper does not
+itself adopt law, issue a permit, impose a fine or release a records
+response. The responsible staff member records the applicable
+decision.</p>
+<h2 id="connected-workflows">Connected workflows</h2>
+<p>Receives selected evidence from Meetings, Code, Zoning, Planning,
+Permitting, Inspections and Station. Station originals are locked
+private evidence. A product’s public copy remains subject to the Records
+response workflow.</p>
+<table>
+<colgroup>
+<col style="width: 50%" />
+<col style="width: 50%" />
+</colgroup>
+<thead>
+<tr>
+<th>Direction</th>
+<th>Material</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Input</td>
+<td>A request description and requester, authorized source documents,
+explicit cross-product evidence selections and a reviewer’s
+decisions.</td>
+</tr>
+<tr>
+<td>Output</td>
+<td>A retained request history, reviewed attachments, approved response
+text and a release package after the applicable release checks.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="product-boundary">Product boundary</h3>
+<p>The selected staff workflow is accepted. A resident internet
+deployment, every jurisdiction’s requirements, complete federation and
+exhaustive redaction/accessibility behavior are not certified by that
+acceptance. SMTP code exists; logging a message or outbox entry does not
+establish email delivery.</p>
+<h2 id="architecture">Architecture</h2>
+<p><img class="flow" src="../assets/records-architecture.svg" alt="Townlight Records architecture and evidence flow"></p>
+<p>The drawing shows the principal staff/evidence path. Native commands
+carry trusted identity to Python business services; PostgreSQL and
+retained original files hold durable state. A downstream copy does not
+silently transfer decision authority. Station has its own configured
+authority/media boundary, database and mutable files. The
+connected-workflow text supplies the drawing’s reading order and
+accessibility alternative.</p>
+<h2 id="fees-messages-notifications-and-local-intake">Fees messages
+notifications and local intake</h2>
+<h3 id="record-a-fee-line-or-waiver">Record a fee line or waiver</h3>
+<p>Open the saved request’s existing fee controls. Enter the
+description, adopted schedule/source basis and exact amount in dollars
+and cents. For example, a synthetic line can use description “Synthetic
+reproduction,” basis “Fictional test schedule” and amount
+<code>12.50</code>. Save and reopen the request. Inspect
+<code>fee_line_items</code>, <code>fee_status</code> and the resulting
+estimate. The native line validator accepts positive exact cents;
+additional fractional cents, negative values and a zero line are
+refused.</p>
+<p>To waive the request fee, record the actual waiver reason and save
+through the waiver control. Reopen the request and confirm waived status
+and the zero-dollar waiver explanation. Adding a later line preserves
+the waiver in the current workflow; do not assume it reinstates a
+payable balance. These are Records workflow amounts and decisions, not
+an official permit-fee calculator or payment service.</p>
+<p>A trusted native client uses <code>records_domain_request</code> with
+<code>operation: 'apply'</code>, the real <code>request_id</code>, and
+<code>action</code>/<code>payload</code> fields from the fragments below
+at the same level as <code>operation</code> and <code>request_id</code>.
+Examples of command payloads follow; IDs and permissions still come from
+the signed-in synthetic account.</p>
+<div class="sourceCode" id="cb1"><pre
+class="sourceCode json"><code class="sourceCode json"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a><span class="fu">{</span><span class="dt">&quot;action&quot;</span><span class="fu">:</span><span class="st">&quot;add-records-fee-line&quot;</span><span class="fu">,</span><span class="dt">&quot;payload&quot;</span><span class="fu">:{</span><span class="dt">&quot;feeLineDescription&quot;</span><span class="fu">:</span><span class="st">&quot;Synthetic reproduction&quot;</span><span class="fu">,</span><span class="dt">&quot;feeScheduleBasis&quot;</span><span class="fu">:</span><span class="st">&quot;Fictional test schedule&quot;</span><span class="fu">,</span><span class="dt">&quot;feeLineAmount&quot;</span><span class="fu">:</span><span class="st">&quot;12.50&quot;</span><span class="fu">}}</span></span></code></pre></div>
+<div class="sourceCode" id="cb2"><pre
+class="sourceCode json"><code class="sourceCode json"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a><span class="fu">{</span><span class="dt">&quot;action&quot;</span><span class="fu">:</span><span class="st">&quot;waive-records-fee&quot;</span><span class="fu">,</span><span class="dt">&quot;payload&quot;</span><span class="fu">:{</span><span class="dt">&quot;feeWaiverReason&quot;</span><span class="fu">:</span><span class="st">&quot;Synthetic public-interest exercise&quot;</span><span class="fu">}}</span></span></code></pre></div>
+<p>Use the exact outer apply contract in the API reference rather than
+sending these command fragments to an arbitrary URL. After either
+operation, read the request again; a saved amount does not approve or
+fulfill the response.</p>
+<h3 id="save-staff-and-requester-messages">Save staff and requester
+messages</h3>
+<p>In the saved request, enter a message and use its explicit send/save
+action. The native <code>add-records-message</code> command’s payload
+uses <code>requestMessageBody</code>, for example “Synthetic
+clarification received.” Inspect the retained message/timeline and
+intended audience before repeating the action. A persisted staff message
+or locally queued notification does not prove an email reached a
+requester. For a clarification requiring a response, retain the
+clarification note and keep the request’s actual status distinct from
+completion.</p>
+<h3 id="configure-templates-and-inspect-the-outbox">Configure templates
+and inspect the outbox</h3>
+<p>Administrators use the existing <code>/notifications/templates</code>
+create/list/update API under the application’s real authenticated
+authority. A template supplies <code>event_type</code>,
+<code>channel</code> (default <code>email</code>),
+<code>subject_template</code> and <code>body_template</code>. Use the
+event name actually produced by the selected workflow and the variables
+it supplies; template existence alone does not cause that event to be
+emitted. Staff inspect <code>/notifications/log</code> for recipient,
+rendered content, status and error information.</p>
+<p>The existing delivery function is
+<code>app.notifications.smtp_delivery.deliver_queued_notifications(session)</code>.
+A technical operator invokes it only in the matching configured
+application environment, with an application-owned async session. It
+processes <strong>queued email</strong> entries, commits
+<code>sent</code> or <code>failed</code> status, and returns counts.
+Missing SMTP configuration returns
+<code>reason: smtp_not_configured</code>. Missing rendered subject/body
+or recipient is a failure, not delivery.</p>
+<p>SMTP settings are <code>SMTP_HOST</code>, <code>SMTP_PORT</code>,
+<code>SMTP_USERNAME</code>, <code>SMTP_PASSWORD</code>,
+<code>SMTP_FROM_EMAIL</code> and <code>SMTP_USE_TLS</code>. Keep secrets
+in protected process configuration. Inspect the actual setting
+names/defaults in that reference before selecting a mail server. This
+beta has no automatic failed-entry retry or native “Retry email” button:
+failed rows are not selected by the queued-only delivery loop. Preserve
+errors and resolve the cause through the owning deployment’s supported
+process; do not invent a retry or reset database rows by hand. The
+native notification “sent” acknowledgement is not an SMTP transmission
+receipt. External mail remains a separately selected deployment
+configuration, not a requirement to send email during synthetic
+development.</p>
+<h3 id="exercise-existing-local-public-intake-and-tracking">Exercise
+existing local public intake and tracking</h3>
+<p>This is the existing local contract, not a new internet portal
+deployment. Under the application’s configured portal posture, a
+synthetic client can submit
+<code>POST /desktop/v1/public/requests</code> with:</p>
+<div class="sourceCode" id="cb3"><pre
+class="sourceCode json"><code class="sourceCode json"><span id="cb3-1"><a href="#cb3-1" aria-hidden="true" tabindex="-1"></a><span class="fu">{</span><span class="dt">&quot;requester&quot;</span><span class="fu">:</span><span class="st">&quot;Synthetic resident&quot;</span><span class="fu">,</span><span class="dt">&quot;requesterContact&quot;</span><span class="fu">:</span><span class="st">&quot;synthetic@example.invalid&quot;</span><span class="fu">,</span><span class="dt">&quot;summary&quot;</span><span class="fu">:</span><span class="st">&quot;Synthetic minutes request&quot;</span><span class="fu">,</span><span class="dt">&quot;deadline&quot;</span><span class="fu">:</span><span class="st">&quot;&quot;</span><span class="fu">}</span></span></code></pre></div>
+<p>Retain the returned tracking information privately.
+<code>POST /desktop/v1/public/lookup</code> requires
+<strong>both</strong> <code>trackingNumber</code> and matching
+<code>requesterContact</code>; it returns the permitted public status
+rather than staff notes. <code>/desktop/v1/public/messages</code>
+additionally requires <code>publicRequestMessage</code>. Read the
+status/response detail and treat a portal-mode or identity refusal as a
+refusal. Do not remove that gate, expose tracking/contact values in logs
+or assume that changing <code>PORTAL_MODE</code> commissions a public
+website. Named staff still use their own authenticated workspace.</p>
+<p>Source contracts: <code>app/desktop_bridge/schemas.py</code>,
+<code>app/requests/workflow.py</code>, notification service/router/SMTP
+delivery, and the public desktop bridge routes. Full outer command
+shapes and endpoint authentication remain in the Records API
+reference.</p>
+<h2 id="technical-specifications">Technical specifications</h2>
+<h3 id="runtime-and-storage">Runtime and storage</h3>
+<p>The accepted package targets <strong>Windows x64 fresh
+installation</strong>. Its native shell uses <strong>Rust 2021, Tauri 2
+and Microsoft WebView2</strong>; browser assets are JavaScript built
+with <strong>Vite 8.1.6</strong>. This describes the native desktop
+frontend; Station has a separate React operator, specified below or in
+its product manual. Canonical business workflows use bundled
+<strong>CPython 3.13.5, FastAPI, Pydantic, SQLAlchemy and
+Alembic</strong>, with <strong>PostgreSQL 17 / PostGIS</strong> and
+managed original files. The installed runtime tested here contains
+FastAPI 0.162.0. Package minimum Python requirements can differ from the
+bundled executable; the metadata reference preserves both. No stack
+rewrite is implied by the beta label.</p>
+<p>The native transport is fixed to loopback
+<code>127.0.0.1:15480</code>; PostgreSQL uses the configured local
+runtime port (default <code>15432</code>). Optional local model service
+defaults to <code>127.0.0.1:15434</code>. Those are deployment defaults,
+not internet endpoints. The runtime has health, module and readiness
+endpoints; readiness is stronger than process existence. The task queue
+is the existing local Core task infrastructure, not an assertion that a
+separate Redis service is required for this desktop composition.</p>
+<p>The default native profile is <code>%LOCALAPPDATA%\CivicSuite</code>;
+the historical directory name remains part of compatibility. Do not
+rename it to Townlight. A configured <code>TOWNLIGHT_PROFILE_ROOT</code>
+must be absolute. Local configuration and secrets live under that
+profile; protected managed files and database state must be backed up
+coherently. Source/runtime identity is distinct from a product’s display
+label.</p>
+<h3 id="data-and-consistency">Data and consistency</h3>
+<p>Requests; assignments and deadlines; search sessions; evidence
+attachments and original hashes; release copies; exemption decisions;
+messages; fee line items; response approvals; export artifacts and audit
+events.</p>
+<p>Versioned saves use expected prior revision identifiers where
+defined. Reopen and reconcile on conflict. Exact exports and handoffs
+use source IDs, current visibility, revision and SHA256. Review belongs
+to the saved revision and does not transfer silently to edited text.
+Database changes use the owning product’s migrations; a request or
+readiness check is not an authorization to mutate schema.</p>
+<h3 id="capacity-and-platform-statements">Capacity and platform
+statements</h3>
+<p>This beta has synthetic single-profile workflow evidence. It does not
+have a published benchmark for concurrent staff capacity, minimum
+RAM/CPU, large-source limits or a field SLA. Do not turn a developer
+machine’s specification into a supported minimum. Installer size is
+2,092,122,112 bytes before installation; allow additional disk for
+extracted runtime, database, originals, exports, media and backups.
+Select equipment/storage after sizing those actual workloads.</p>
+<p>The exact <a href="../reference/runtime-payload-lock.json">runtime
+payload lock</a> records pinned files, sizes and hashes. The <a
+href="../reference/component-metadata.json">component metadata</a>
+records shipped dependency declarations. These references are more
+precise than a manually copied dependency list. Third-party and
+historical license notices must accompany their matching payloads.</p>
+<h2 id="configuration-and-administration">Configuration and
+administration</h2>
+<h3 id="native-deployment-configuration">Native deployment
+configuration</h3>
+<p>Use Setup, Settings and System Health for supported staff operation.
+Administrators provision folders, backup storage, named accounts and the
+city profile. Select <code>inspections-preview</code> for the full
+eight-workspace desktop. Station remains a separate service boundary. Do
+not use a standalone product’s demo server as a substitute for the
+installed workspace.</p>
+<p>Technical deployments use <code>TOWNLIGHT_PRODUCT_PROFILE</code>,
+<code>TOWNLIGHT_PROFILE_ROOT</code>, <code>DATABASE_URL</code>,
+<code>CIVICSUITE_RUNTIME_PORT</code>, <code>PORTAL_MODE</code> and the
+runtime-managed secret files. Treat database URLs and native session
+proofs as secrets. The installed native domain runtime explicitly
+refuses non-loopback binding. <code>PORTAL_MODE=private</code> is the
+accepted posture; changing it does not by itself commission an internet
+portal, authentication provider or reverse proxy.</p>
+<p>The isolated documentation exporter sets a fictional profile and
+unusable synthetic database origin only to read schemas; those values
+are not deployment configuration. Keep deployment values in the intended
+process/account scope. An already-running process does not automatically
+inherit later environment edits.</p>
+<h3 id="communications-and-review-configuration">Communications and
+review configuration</h3>
+<p>SMTP settings include host, port, username/password, sender address
+and TLS choice. Configure and verify actual delivery only for a
+deployment that selects external mail. Connector host allowlists and
+encrypted data-source configuration are separate controls. Records fee
+schedules concern the records workflow; they do not authorize Permitting
+to calculate an official permit fee. Keep resident portal posture and
+self-registration separate from named local staff setup.</p>
+<h2 id="api-and-integration-examples">API and integration examples</h2>
+<h3 id="native-command-example">Native command example</h3>
+<p>The following JavaScript belongs in the existing trusted Townlight
+frontend/development environment with <code>invoke</code> imported from
+<code>@tauri-apps/api/core</code>. It is not a command for an arbitrary
+web page or an instruction for nontechnical staff. IDs must come from
+records created in an isolated synthetic exercise.</p>
+<div class="sourceCode" id="cb4"><pre
+class="sourceCode javascript"><code class="sourceCode javascript"><span id="cb4-1"><a href="#cb4-1" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> { invoke } <span class="im">from</span> <span class="st">&#39;@tauri-apps/api/core&#39;</span><span class="op">;</span></span>
+<span id="cb4-2"><a href="#cb4-2" aria-hidden="true" tabindex="-1"></a><span class="kw">const</span> result <span class="op">=</span> <span class="cf">await</span> <span class="fu">invoke</span>(<span class="st">&#39;records_domain_request&#39;</span><span class="op">,</span> {<span class="dt">request</span><span class="op">:</span> {<span class="dt">operation</span><span class="op">:</span> <span class="st">&#39;view&#39;</span><span class="op">,</span> <span class="dt">request_id</span><span class="op">:</span> requestId}})<span class="op">;</span></span>
+<span id="cb4-3"><a href="#cb4-3" aria-hidden="true" tabindex="-1"></a><span class="bu">console</span><span class="op">.</span><span class="fu">log</span>(result)<span class="op">;</span></span></code></pre></div>
+<h3 id="trusted-local-http-example">Trusted local HTTP example</h3>
+<p>An administrator/developer can inspect an already-configured isolated
+runtime from a trusted local process. This PowerShell example reads the
+signed-in synthetic profile’s existing proof into memory; it does not
+create a user, seed a session, reveal the proof in output or bypass a
+permission check. Do not use real city data in development examples. A
+read response does not prove approval or publication.</p>
+<div class="sourceCode" id="cb5"><pre
+class="sourceCode powershell"><code class="sourceCode powershell"><span id="cb5-1"><a href="#cb5-1" aria-hidden="true" tabindex="-1"></a><span class="va">$profilePath</span> <span class="op">=</span> <span class="fu">Join-Path</span> <span class="va">$env</span><span class="op">:</span><span class="va">LOCALAPPDATA</span> <span class="st">&#39;CivicSuite&#39;</span></span>
+<span id="cb5-2"><a href="#cb5-2" aria-hidden="true" tabindex="-1"></a><span class="va">$sessionPath</span> <span class="op">=</span> <span class="fu">Join-Path</span> <span class="va">$profilePath</span> <span class="st">&#39;config\local-session.json&#39;</span></span>
+<span id="cb5-3"><a href="#cb5-3" aria-hidden="true" tabindex="-1"></a><span class="va">$session</span> <span class="op">=</span> <span class="fu">Get-Content</span> <span class="op">-</span>LiteralPath <span class="va">$sessionPath</span> <span class="op">-</span>Raw <span class="op">|</span> <span class="fu">ConvertFrom-Json</span></span>
+<span id="cb5-4"><a href="#cb5-4" aria-hidden="true" tabindex="-1"></a><span class="va">$headers</span> <span class="op">=</span> @<span class="op">{</span> <span class="st">&#39;X-Townlight-Session&#39;</span> <span class="op">=</span> <span class="va">$session</span><span class="op">.</span><span class="fu">session_hash</span> <span class="op">}</span></span>
+<span id="cb5-5"><a href="#cb5-5" aria-hidden="true" tabindex="-1"></a><span class="fu">Invoke-RestMethod</span> <span class="op">-</span>Uri <span class="st">&#39;http://127.0.0.1:15480/desktop/v1/records-state&#39;</span> <span class="op">-</span>Headers <span class="va">$headers</span></span>
+<span id="cb5-6"><a href="#cb5-6" aria-hidden="true" tabindex="-1"></a><span class="fu">Remove-Variable</span> session<span class="op">,</span> headers</span></code></pre></div>
+<h3 id="a-synthetic-write-with-subsequent-readback">A synthetic write
+with subsequent readback</h3>
+<p>This example demonstrates the existing Meetings HTTP contract in an
+isolated exercise. It is intentionally fictional. It does not start a
+service. Its authentication setup is included so it can be run
+independently under the signed-in synthetic account. If a write times
+out, inspect current records before repeating it.</p>
+<div class="sourceCode" id="cb6"><pre
+class="sourceCode powershell"><code class="sourceCode powershell"><span id="cb6-1"><a href="#cb6-1" aria-hidden="true" tabindex="-1"></a><span class="va">$profilePath</span> <span class="op">=</span> <span class="fu">Join-Path</span> <span class="va">$env</span><span class="op">:</span><span class="va">LOCALAPPDATA</span> <span class="st">&#39;CivicSuite&#39;</span></span>
+<span id="cb6-2"><a href="#cb6-2" aria-hidden="true" tabindex="-1"></a><span class="va">$sessionPath</span> <span class="op">=</span> <span class="fu">Join-Path</span> <span class="va">$profilePath</span> <span class="st">&#39;config/local-session.json&#39;</span></span>
+<span id="cb6-3"><a href="#cb6-3" aria-hidden="true" tabindex="-1"></a><span class="va">$session</span> <span class="op">=</span> <span class="fu">Get-Content</span> <span class="op">-</span>LiteralPath <span class="va">$sessionPath</span> <span class="op">-</span>Raw <span class="op">|</span> <span class="fu">ConvertFrom-Json</span></span>
+<span id="cb6-4"><a href="#cb6-4" aria-hidden="true" tabindex="-1"></a><span class="va">$headers</span> <span class="op">=</span> @<span class="op">{</span> <span class="st">&#39;X-Townlight-Session&#39;</span> <span class="op">=</span> <span class="va">$session</span><span class="op">.</span><span class="fu">session_hash</span> <span class="op">}</span></span>
+<span id="cb6-5"><a href="#cb6-5" aria-hidden="true" tabindex="-1"></a><span class="va">$body</span> <span class="op">=</span> @<span class="op">{</span></span>
+<span id="cb6-6"><a href="#cb6-6" aria-hidden="true" tabindex="-1"></a>  title <span class="op">=</span> <span class="st">&#39;Synthetic documentation exercise&#39;</span></span>
+<span id="cb6-7"><a href="#cb6-7" aria-hidden="true" tabindex="-1"></a>  scheduled_start <span class="op">=</span> <span class="st">&#39;2026-11-05T18:00:00-07:00&#39;</span></span>
+<span id="cb6-8"><a href="#cb6-8" aria-hidden="true" tabindex="-1"></a>  location <span class="op">=</span> <span class="st">&#39;Synthetic room&#39;</span></span>
+<span id="cb6-9"><a href="#cb6-9" aria-hidden="true" tabindex="-1"></a>  meeting_type <span class="op">=</span> <span class="st">&#39;regular&#39;</span></span>
+<span id="cb6-10"><a href="#cb6-10" aria-hidden="true" tabindex="-1"></a><span class="op">}</span> <span class="op">|</span> <span class="fu">ConvertTo-Json</span></span>
+<span id="cb6-11"><a href="#cb6-11" aria-hidden="true" tabindex="-1"></a><span class="va">$meeting</span> <span class="op">=</span> <span class="fu">Invoke-RestMethod</span> <span class="op">-</span>Method Post `</span>
+<span id="cb6-12"><a href="#cb6-12" aria-hidden="true" tabindex="-1"></a>  <span class="op">-</span>Uri <span class="st">&#39;http://127.0.0.1:15480/desktop/v1/meetings/meetings&#39;</span> `</span>
+<span id="cb6-13"><a href="#cb6-13" aria-hidden="true" tabindex="-1"></a>  <span class="op">-</span>Headers <span class="va">$headers</span> <span class="op">-</span>ContentType <span class="st">&#39;application/json&#39;</span> <span class="op">-</span>Body <span class="va">$body</span></span>
+<span id="cb6-14"><a href="#cb6-14" aria-hidden="true" tabindex="-1"></a><span class="fu">Invoke-RestMethod</span> `</span>
+<span id="cb6-15"><a href="#cb6-15" aria-hidden="true" tabindex="-1"></a>  <span class="op">-</span>Uri <span class="op">(</span><span class="st">&#39;http://127.0.0.1:15480/desktop/v1/meetings/meetings/&#39;</span> <span class="op">+</span> <span class="va">$meeting</span><span class="op">.</span><span class="fu">id</span><span class="op">)</span> `</span>
+<span id="cb6-16"><a href="#cb6-16" aria-hidden="true" tabindex="-1"></a>  <span class="op">-</span>Headers <span class="va">$headers</span></span>
+<span id="cb6-17"><a href="#cb6-17" aria-hidden="true" tabindex="-1"></a><span class="fu">Remove-Variable</span> session<span class="op">,</span> headers</span></code></pre></div>
+<p>This write requires Meetings to be enabled and the signed-in staff
+role to permit it. It is a cross-suite integration example; for this
+product’s request models, use the complete technical reference
+below.</p>
+<h3 id="complete-technical-contract">Complete technical contract</h3>
+<p>Read the <a href="../api/records.html">Records API reference</a> for
+every documented operation, request field, constraint, response
+declaration and source supplement. Download the <a
+href="../api/records-openapi.json">OpenAPI JSON</a> for tools. For
+Station this is the suite-side schema only; its separate service
+contract is documented in the API supplement. The <a
+href="../reference/index.html">reference directory</a> includes
+configuration/source inventories, dependency declarations, native
+command contracts, MCP signatures and candidate evidence.</p>
+<h2 id="mcp-and-automation-boundary">MCP and automation boundary</h2>
+<p>No direct product MCP server is exposed by the accepted Townlight
+desktop or Station boundary. Do not configure an invented
+<code>townlight mcp</code> command or assume an AI client has staff
+permissions. The integration surfaces for this beta are native IPC, the
+documented HTTP APIs, source bundle imports, exact exports and the
+existing Station CLI.</p>
+<p>The bundled transcription code includes a <strong>TextFlowKit MCP
+adapter</strong> as a separate source capability. It offers job-based
+<code>transcribe_media</code>, <code>get_transcript</code>,
+<code>list_jobs</code>, <code>get_job_status</code> and
+<code>export_transcript</code>, and additional tools declared in that
+adapter. It uses stdio first and optional Streamable HTTP, with the MCP
+SDK as an optional extra. It is not automatically launched,
+authenticated as Townlight staff or accepted as a Townlight product MCP
+deployment. This documentation does not add such a service.</p>
+<p>For a transcription client already provisioned separately, an
+illustrative tool call is:</p>
+<div class="sourceCode" id="cb7"><pre
+class="sourceCode json"><code class="sourceCode json"><span id="cb7-1"><a href="#cb7-1" aria-hidden="true" tabindex="-1"></a><span class="fu">{</span><span class="dt">&quot;name&quot;</span><span class="fu">:</span><span class="st">&quot;get_job_status&quot;</span><span class="fu">,</span><span class="dt">&quot;arguments&quot;</span><span class="fu">:{</span><span class="dt">&quot;job_id&quot;</span><span class="fu">:</span><span class="st">&quot;synthetic-existing-job-id&quot;</span><span class="fu">}}</span></span></code></pre></div>
+<p>Use a job ID returned by that transcription service. This example
+does not create a Townlight record or bypass its review/Records handoff.
+The exact optional adapter tool signatures are supplied in the <a
+href="../reference/mcp.html">MCP source reference</a>. Station meeting
+capture does not become live speech recognition because this optional
+donor adapter exists.</p>
+<h2 id="security-and-permissions">Security and permissions</h2>
+<p>Use your own named account and save before leaving a screen. A saved
+draft is durable; unsaved form text may not be. If a write has an
+unknown result, reopen its record before repeating it.</p>
+<p>Read source jurisdiction, dates, citation, version and visibility. A
+copied source hash identifies exact bytes, not their legal
+applicability. If a source changes or permission is removed, resolve the
+source problem rather than substituting stale cached content.</p>
+<p>Keep originals and derivatives separate. Review the intended audience
+before export. A public summary excludes private fields only through the
+applicable copy contract and your review. A renamed private packet is
+still private content.</p>
+<p>Drafting, review, approval, attachment, export, fulfillment and
+publication are separate operations. A Townlight workpaper does not
+itself adopt law, issue a permit, impose a fine or release a records
+response. The responsible staff member records the applicable
+decision.</p>
+<p>The native session is validated and mapped to a persisted SQL
+identity. An editable actor/reviewer label is not authentication.
+Product/module permissions and source visibility apply at the server
+boundary. Revoked/unavailable authority fails closed for new Station
+operations; a previous permission result is not a perpetual
+authorization.</p>
+<p>Use protected local folders, account permissions and credential
+storage. Never include the native session file, database passwords,
+provider keys or unredacted support bundles in a public issue or
+generated public documentation. A local public view is not automatically
+a secured internet deployment. Keep network exposure and real equipment
+acceptance specific to the chosen beta site.</p>
+<h2 id="backup-recovery-and-maintenance">Backup recovery and
+maintenance</h2>
+<p>Save work and use Core’s canonical <strong>Backup Now</strong> before
+maintenance. That operation stops writers. Preserve the coherent
+profile/database/document backup and its receipt, then use
+<strong>Start</strong> to resume. A source export is not a full
+backup.</p>
+<p>Use <strong>Restore Latest Backup</strong> through the supported
+controls. If the result says <strong>Restore needs service
+start</strong>, use <strong>Start</strong>, then <strong>Check</strong>,
+and reopen a known record. Do not repeat restore merely because services
+need to start. The fresh-profile acceptance verified that a fulfilled
+request survived restore and a post-backup marker did not.</p>
+<p>Keep Station’s dedicated database and media evidence together in its
+own backup. Core’s native-profile backup must not be assumed to include
+an external Station data directory. Stop writers during a coordinated
+backup. Preserve failed media attempts and logs.</p>
+<p>On failure, record the time, selected composition,
+component/installer versions and exact message. Check System Health for
+stopped, starting, ready or failed dependencies. Use the existing Retry
+control after readiness; do not create duplicate business records to
+refresh a stale view. Share only a redacted diagnostic bundle. Preserve
+secrets, original evidence, recovery material and unrelated
+installations.</p>
+<h2 id="troubleshooting">Troubleshooting</h2>
+<table>
+<colgroup>
+<col style="width: 33%" />
+<col style="width: 33%" />
+<col style="width: 33%" />
+</colgroup>
+<thead>
+<tr>
+<th>Symptom</th>
+<th>Likely meaning</th>
+<th>Next action</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Workspace absent</td>
+<td>Wrong product composition or unavailable canonical runtime.</td>
+<td>Check selected composition; activate through Finish Records
+Migration; wait for readiness.</td>
+</tr>
+<tr>
+<td>Cannot sign in / 401</td>
+<td>Missing or expired named account session.</td>
+<td>Sign in normally; reopen a Station launch ticket if applicable.</td>
+</tr>
+<tr>
+<td>Permission denied / 403</td>
+<td>Account, module, source or browser-origin permission.</td>
+<td>Ask the authorized administrator to inspect the intended permission;
+do not invent role headers.</td>
+</tr>
+<tr>
+<td>Save conflict / 409</td>
+<td>The saved revision, expected source hash or lifecycle changed.</td>
+<td>Keep edits, reopen current state and reconcile deliberately.</td>
+</tr>
+<tr>
+<td>Invalid input / 422</td>
+<td>Required field, format, geometry, source envelope or state is
+invalid.</td>
+<td>Read the field detail and correct the input/source; preserve
+originals.</td>
+</tr>
+<tr>
+<td>Service unavailable / 503</td>
+<td>Database, schema, connected source or configuration
+unavailable.</td>
+<td>Inspect System Health and the named dependency. Preserve work; retry
+only after readiness.</td>
+</tr>
+<tr>
+<td>Export refused</td>
+<td>Missing exact review, approval, audience or source
+authorization.</td>
+<td>Read the refusal and complete the owning product’s explicit
+decision.</td>
+</tr>
+<tr>
+<td>Restore needs service start</td>
+<td>The snapshot was restored but services have not resumed.</td>
+<td>Use Start, then Check and verify a saved record; do not blindly
+repeat restore.</td>
+</tr>
+</tbody>
+</table>
+<h2 id="verified-workflows-and-limits">Verified workflows and
+limits</h2>
+<table>
+<colgroup>
+<col style="width: 33%" />
+<col style="width: 33%" />
+<col style="width: 33%" />
+</colgroup>
+<thead>
+<tr>
+<th>Product</th>
+<th>Recorded result</th>
+<th>Precisely exercised</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Records</td>
+<td>PASS</td>
+<td>Intake, note, original attachment/readback, separate release copy,
+explicit release decision, draft/approval, approved response and release
+package exports, fulfillment/readback and native workspace.</td>
+</tr>
+</tbody>
+</table>
+<p>These results come from the identified signed candidate’s fresh
+normal-profile Sandbox exercise: real native IPC/HTTP/PostgreSQL and
+selected headless controls. All accounts, source bundles and media were
+synthetic. The guest install/uninstall and recovery passed, and the
+owned Sandbox stopped. No host installed application or standalone
+CivicCast was changed. This documentation task reuses those receipts; it
+does not claim a new software acceptance run.</p>
+<p>The <a href="../reference/workflow-matrix.json">workflow matrix</a>
+identifies raw receipt filenames. The <a
+href="../reference/sandbox-evidence-index.json">evidence index</a>
+retains their original hashes; raw receipts remain in the private beta
+handoff rather than being silently republished with the documentation
+site.</p>
+<p>The limits remain: actual city field acceptance and equipment/network
+commissioning; Station automatic provisioning/SCM commissioning; every
+UI/role combination; field recognition accuracy; and historical in-place
+upgrades are not certified. They are not five invented feature
+requirements. Fresh-install controlled beta handoff remains the accepted
+scope. This package makes no city-deployment, publication or
+general-availability claim.</p>
+<h2 id="terms-of-service-and-license">Terms of service and license</h2>
+<h3 id="scope-and-status">Scope and status</h3>
+<p>These terms describe the Townlight Beta 1 software and this
+documentation package. This is a locally prepared private beta, not a
+hosted-service subscription, a city deployment agreement or a public
+release. No uptime commitment, support response time, indemnity,
+data-processing agreement or paid service is created by these documents.
+A separate signed agreement, if any, governs services it actually
+provides.</p>
+<h3 id="software-license-and-rights">Software license and rights</h3>
+<p>Current Townlight-owned distributions identified in this candidate
+use <strong>AGPL-3.0-only</strong>. The full license is supplied with
+this documentation and with the source companion. The license governs
+rights to run, copy, modify and convey the covered software; these
+operational terms do not add restrictions to those rights. Historical
+grants and dependency licenses retain their own terms. CivicCast remains
+a separate product and is not relicensed by this documentation work.</p>
+<p>When conveying covered software, retain applicable notices and
+provide the corresponding source and installation/build information
+required by the license. For a modified version supporting remote
+network interaction, follow section 13’s source-offer requirement. The
+companion archive identifies the source for this candidate; a link to a
+different public branch is not a substitute for the matching source.
+Read the supplied license for the complete conditions. See the <a
+href="https://www.gnu.org/licenses/agpl-3.0.html">GNU license
+reference</a> and <a
+href="https://www.gnu.org/licenses/gpl-faq.en.html">GNU licensing
+FAQ</a>.</p>
+<h3 id="data-ownership-and-access">Data ownership and access</h3>
+<p>Importing a document does not transfer its ownership or grant
+permission to publish it. The operating organization controls its
+accounts, access decisions, lawful source use, retention and
+review/release policy. Keep resident information, credentials, private
+notes and restricted evidence in their authorized locations.
+Documentation examples contain fictional data. No real city account,
+credential or record is required to exercise these examples in an
+isolated test environment.</p>
+<h3 id="local-operation-and-external-processors">Local operation and
+external processors</h3>
+<p>The accepted beta workflow is local and uses named staff accounts.
+Station has separate storage and credentials. Configure backup
+destinations and optional model/network providers deliberately. A
+configured external provider may receive submitted prompts, images or
+audio according to that configuration and provider’s terms; this
+documentation does not promise that every optional configuration is
+offline. An email outbox or local public view does not establish
+external delivery or an internet deployment. This static documentation
+site has no analytics, account collection or remote font dependency.</p>
+<h3 id="staff-decisions-and-source-applicability">Staff decisions and
+source applicability</h3>
+<p>Staff verify the jurisdiction, source currency, permissions,
+citations and proposed audience. Model output and generated guidance
+require review. No draft is automatically an official legal
+interpretation, zoning determination, permit approval, fee assessment,
+enforcement notice or records-release decision. Official permit fee
+authority remains with the adopted source and responsible organization;
+imported amounts do not become a new authoritative calculation.</p>
+<h3 id="beta-operation-and-recovery">Beta operation and recovery</h3>
+<p>Use the identified candidate in its supported fresh-install scope.
+Preserve backups and original evidence. Test physical equipment and
+chosen network/service configuration before relying on them. The
+supplied acceptance describes selected synthetic workflows, not every
+screen, vendor, field condition or upgrade. Operators decide whether a
+particular deployment meets their own operational obligations.</p>
+<h3 id="warranty-and-liability">Warranty and liability</h3>
+<p>The covered software’s warranty and liability conditions are those in
+sections 15–17 of the supplied AGPL and any applicable separate written
+undertaking. This documentation creates no additional warranty or
+limitation beyond those terms. Third-party software is subject to its
+retained license notices. Nothing here removes rights that applicable
+law makes nonwaivable.</p>
+<h3 id="support-and-incident-reporting">Support and incident
+reporting</h3>
+<p>Use the project’s existing SUPPORT and SECURITY guidance for its
+matching repository. Report reproducible behavior with the version,
+operation and redacted logs. Do not put credentials, resident records or
+unredacted evidence in a public issue. Coordinate sensitive reports
+through the channel designated in SECURITY. No new support address or
+service commitment is invented here.</p>
+<h3 id="ending-a-beta-exercise-and-document-changes">Ending a beta
+exercise and document changes</h3>
+<p>When an organization ends testing, it controls retention/export and
+removes access according to its policy. Uninstall may retain data; back
+up and inspect the selected removal options. Ending an exercise does not
+revoke rights already granted by AGPL. Later software/documentation
+versions must identify their changed candidate and scope; historical
+receipts retain their original identities. These terms do not claim that
+a city has accepted a contract merely by reading a manual.</p>
+<h2 id="glossary">Glossary</h2>
+<table>
+<colgroup>
+<col style="width: 50%" />
+<col style="width: 50%" />
+</colgroup>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Approval</td>
+<td>An explicit authorized decision on the saved text/artifact. It is
+separate from saving or attachment.</td>
+</tr>
+<tr>
+<td>Canonical record</td>
+<td>The owning product’s retained identity and saved version, rather
+than an editable copied label.</td>
+</tr>
+<tr>
+<td>Composition</td>
+<td>The selected set of desktop modules; inspections-preview exposes the
+eight staff products.</td>
+</tr>
+<tr>
+<td>Corresponding source</td>
+<td>The source/build material matching the delivered covered program,
+subject to its license.</td>
+</tr>
+<tr>
+<td>Derivative / Records copy</td>
+<td>A separately prepared document with its own intended audience and
+hash.</td>
+</tr>
+<tr>
+<td>Hash / SHA256</td>
+<td>A fingerprint of exact bytes. It detects change; it does not
+establish legal authority.</td>
+</tr>
+<tr>
+<td>Idempotency</td>
+<td>Repeating the same identified request has the same intended effect;
+changing its payload can be refused.</td>
+</tr>
+<tr>
+<td>IPC</td>
+<td>The native desktop command boundary between its browser interface
+and Rust host.</td>
+</tr>
+<tr>
+<td>MCP</td>
+<td>Model Context Protocol; no direct Townlight product server is
+enabled by this beta.</td>
+</tr>
+<tr>
+<td>Original</td>
+<td>Retained source bytes. A reviewed derivative does not replace
+them.</td>
+</tr>
+<tr>
+<td>Provenance</td>
+<td>Source, version, date, actor and relationship information retained
+with evidence.</td>
+</tr>
+<tr>
+<td>Revision</td>
+<td>An immutable saved version. Later edits do not inherit an earlier
+review automatically.</td>
+</tr>
+<tr>
+<td>Snapshot</td>
+<td>A fixed audience-specific copy tied to a source/reviewed
+revision.</td>
+</tr>
+<tr>
+<td>Station</td>
+<td>Townlight’s separate media boundary using a pinned CivicCast-derived
+engine; standalone CivicCast remains separate.</td>
+</tr>
+</tbody>
+</table>
+<h2 id="alphabetical-subject-index">Alphabetical subject index</h2>
+<ul>
+<li><strong>Accounts and authentication</strong> — <a
+href="#security-and-permissions">Security and permissions</a>.</li>
+<li><strong>AGPL and source</strong> — <a
+href="#terms-of-service-and-license">Terms of service and
+license</a>.</li>
+<li><strong>API contracts</strong> — <a
+href="#api-and-integration-examples">API and integration
+examples</a>.</li>
+<li><strong>Architecture</strong> — <a
+href="#architecture">Architecture</a>.</li>
+<li><strong>Backup</strong> — <a
+href="#backup-recovery-and-maintenance">Backup recovery and
+maintenance</a>.</li>
+<li><strong>Beta version</strong> — <a href="#beta-identity">Beta
+identity</a>.</li>
+<li><strong>Configuration</strong> — <a
+href="#configuration-and-administration">Configuration and
+administration</a>.</li>
+<li><strong>Evidence and acceptance</strong> — <a
+href="#verified-workflows-and-limits">Verified workflows and
+limits</a>.</li>
+<li><strong>Fees and official decisions</strong> — <a
+href="#terms-of-service-and-license">Terms of service and
+license</a>.</li>
+<li><strong>First run</strong> — <a href="#first-run">First
+run</a>.</li>
+<li><strong>Handoffs and audience</strong> — <a
+href="#connected-workflows">Connected workflows</a>.</li>
+<li><strong>MCP</strong> — <a href="#mcp-and-automation-boundary">MCP
+and automation boundary</a>.</li>
+<li><strong>Originals and provenance</strong> — <a
+href="#security-and-permissions">Security and permissions</a>.</li>
+<li><strong>Recovery</strong> — <a
+href="#backup-recovery-and-maintenance">Backup recovery and
+maintenance</a>.</li>
+<li><strong>Staff procedures</strong> — <a href="#daily-workflow">Daily
+workflow</a>.</li>
+<li><strong>Station configuration</strong> — <a
+href="#configuration-and-administration">Configuration and
+administration</a>.</li>
+<li><strong>Technical stack</strong> — <a
+href="#technical-specifications">Technical specifications</a>.</li>
+<li><strong>Troubleshooting</strong> — <a
+href="#troubleshooting">Troubleshooting</a>.</li>
+</ul>
+<h3 id="operating-subject-links">Operating subject links</h3>
+<ul>
+<li><strong>Configure templates and inspect the outbox</strong> — <a
+href="#configure-templates-and-inspect-the-outbox">Configure templates
+and inspect the outbox</a>.</li>
+<li><strong>Exercise existing local public intake and tracking</strong>
+— <a href="#exercise-existing-local-public-intake-and-tracking">Exercise
+existing local public intake and tracking</a>.</li>
+<li><strong>Fees messages notifications and local intake</strong> — <a
+href="#fees-messages-notifications-and-local-intake">Fees messages
+notifications and local intake</a>.</li>
+<li><strong>Record a fee line or waiver</strong> — <a
+href="#record-a-fee-line-or-waiver">Record a fee line or
+waiver</a>.</li>
+<li><strong>Save staff and requester messages</strong> — <a
+href="#save-staff-and-requester-messages">Save staff and requester
+messages</a>.</li>
+</ul>
+<h2 id="source-and-document-control">Source and document control</h2>
+<p>This edition is authored from the immutable corresponding-source
+companion, the generated installed-domain schema and the retained
+workflow receipts. The current software versions and signed artifacts
+are unchanged. Public historical pages are not synchronized or published
+by this local documentation task.</p>
+<h3 id="workflow-subject-index">Workflow subject index</h3>
+<ul>
+<li><p><strong>Draft and approve</strong> — <a href="#workflow-5">Daily
+workflow, step 5</a>.</p></li>
+<li><p><strong>Export both artifacts</strong> — <a
+href="#workflow-6">Daily workflow, step 6</a>.</p></li>
+<li><p><strong>Find responsive evidence</strong> — <a
+href="#workflow-2">Daily workflow, step 2</a>.</p></li>
+<li><p><strong>Fulfill and retain</strong> — <a href="#workflow-7">Daily
+workflow, step 7</a>.</p></li>
+<li><p><strong>Preserve the original</strong> — <a
+href="#workflow-3">Daily workflow, step 3</a>.</p></li>
+<li><p><strong>Receive and identify the request</strong> — <a
+href="#workflow-1">Daily workflow, step 1</a>.</p></li>
+<li><p><strong>Record each release decision</strong> — <a
+href="#workflow-4">Daily workflow, step 4</a>.</p></li>
+<li><p><a href="../reference/source-inventory.json">Source inventory and
+file hashes</a></p></li>
+<li><p><a href="../reference/component-metadata.json">All component
+metadata</a></p></li>
+<li><p><a href="../reference/desktop-domain-openapi.json">Installed
+domain OpenAPI</a></p></li>
+<li><p><a href="../reference/workflow-matrix.json">Workflow
+matrix</a></p></li>
+<li><p><a href="../reference/AGPL-3.0.txt">Full AGPL text</a></p></li>
+</ul></article></div></main><footer><span>Townlight Beta 1 · Townlight Beta 1 documentation · AGPL-3.0-only</span><span><a href="../versions.html">Exact versions and candidate</a> · CivicCast remains separate</span></footer>
+<script>const search=document.getElementById('find-section');if(search)search.addEventListener('input',()=>{const q=search.value.toLowerCase();let n=0;document.querySelectorAll('.toc li').forEach(li=>{const match=li.textContent.toLowerCase().includes(q);li.hidden=!match;if(match)n++;});document.querySelector('.search-status').textContent=q?n+' matching entries':'';});</script></body></html>

@@ -1,0 +1,2035 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="description" content=""><title>Townlight
+Core API Reference | Townlight Beta 1</title><style>
+:root{--ink:#182f3a;--muted:#526775;--accent:#006b64;--paper:#fff;--wash:#f1f6f5;--line:#cfdddf;--warm:#dceab2}
+*{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;background:var(--paper);color:var(--ink);font:17px/1.65 "Segoe UI",Arial,sans-serif}a{color:#006b64;text-underline-offset:3px}a:hover{text-decoration-thickness:2px}a:focus-visible,button:focus-visible,input:focus-visible{outline:3px solid #a25900;outline-offset:4px}.skip{position:absolute;left:-9999px}.skip:focus{left:1rem;top:1rem;background:white;padding:1rem;z-index:20}header{border-bottom:1px solid var(--line);padding:1.1rem 5vw;display:flex;align-items:center;gap:1.5rem;flex-wrap:wrap}header .brand{font-size:1.3rem;font-weight:750;letter-spacing:-.04em;text-decoration:none;color:var(--ink)}header nav{margin-left:auto;display:flex;gap:1.25rem;flex-wrap:wrap;font-size:.88rem}.edition{font:700 .72rem/1.5 "Segoe UI",sans-serif;letter-spacing:.12em;text-transform:uppercase;color:var(--accent)}.wrap{max-width:1240px;margin:auto;padding:0 4vw}.hero{padding:5rem 0 3.2rem;max-width:950px}.hero h1{font-size:clamp(2.5rem,5vw,4.7rem);line-height:1.08;letter-spacing:-.045em;margin:1rem 0 1.5rem;font-weight:650}.hero .lead{font-size:1.26rem;max-width:780px;color:var(--muted)}.actions{display:flex;gap:.8rem;flex-wrap:wrap;margin:1.8rem 0}.button{display:inline-block;padding:.7rem 1.15rem;border:1px solid var(--accent);border-radius:4px;text-decoration:none;font-weight:650}.button.primary{background:var(--accent);color:#fff}.facts{display:flex;gap:1.5rem;flex-wrap:wrap;font-size:.85rem;color:var(--muted)}.section{padding:3rem 0;border-top:1px solid var(--line)}h2{font-size:1.8rem;line-height:1.3;letter-spacing:-.025em;margin:2.5rem 0 1rem}h3{font-size:1.18rem;line-height:1.45;margin:1.8rem 0 .7rem}h4{font-size:1rem;margin:1.3rem 0 .6rem}p{margin:.85rem 0 1rem}ul,ol{padding-left:1.6rem}li{margin:.4rem 0}strong{font-weight:650}.grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:1.6rem}.product{border-top:3px solid var(--accent);padding:1.4rem 0}.product h3{font-size:1.65rem;margin:.4rem 0}.product p{color:var(--muted)}.number{font-size:.76rem;letter-spacing:.1em}.split{display:grid;grid-template-columns:1fr 1fr;gap:3rem}.flow{width:100%;height:auto;display:block;margin:1.8rem 0}.caption{font-size:.85rem;color:var(--muted)}.reading{max-width:860px}.doclayout{display:grid;grid-template-columns:245px minmax(0,1fr);gap:3rem;max-width:1320px;margin:auto;padding:2rem 4vw}.toc{font-size:.84rem;align-self:start;position:sticky;top:1rem;max-height:90vh;overflow:auto;padding-right:.8rem}.toc ul{list-style:none;padding:0}.toc li{margin:.5rem 0}.toc li li{padding-left:.8rem}.toc a{text-decoration:none}.docbody{min-width:0}.docbody h1{font-size:2.7rem;line-height:1.1;letter-spacing:-.04em}.docbody h2{border-top:1px solid var(--line);padding-top:1.8rem}.docbody img{max-width:100%;height:auto}.docmeta{color:var(--muted);font-size:.9rem}.docbody section{scroll-margin-top:1rem}table{width:100%;border-collapse:collapse;font-size:.87rem;line-height:1.5;margin:1.3rem 0;table-layout:auto}th{text-align:left;background:var(--wash);font-weight:650}th,td{padding:.65rem .7rem;border-bottom:1px solid var(--line);vertical-align:top;overflow-wrap:anywhere}thead{display:table-header-group}pre{background:#f2f5f6;padding:1rem;border:1px solid #dfe7e8;white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;font:13px/1.6 Consolas,monospace}code{font: .85em/1.6 Consolas,monospace;overflow-wrap:anywhere}pre code{font-size:inherit}blockquote{border-left:3px solid var(--accent);padding-left:1rem;margin-left:0;color:var(--muted)}.search{padding:.65rem;border:1px solid #789399;border-radius:4px;width:100%;font:inherit}.search-status{font-size:.8rem;color:var(--muted)}footer{border-top:1px solid var(--line);padding:2rem 5vw;margin-top:3rem;font-size:.85rem;color:var(--muted);display:flex;gap:2rem;justify-content:space-between;flex-wrap:wrap}.small{font-size:.9rem;color:var(--muted)}.api-entry{padding:1.2rem 0;border-top:1px solid var(--line)}.api-entry h3{overflow-wrap:anywhere}.method{font-size:.76rem;font-weight:750;color:var(--accent)}details{margin:1rem 0}summary{cursor:pointer;font-weight:650}.index-columns{columns:2;column-gap:2rem}.index-columns li{break-inside:avoid}
+@media(max-width:850px){.grid{grid-template-columns:1fr 1fr}.split{grid-template-columns:1fr}.doclayout{grid-template-columns:1fr;gap:1rem}.toc{position:static;max-height:none}.hero{padding-top:3rem}header nav{margin-left:0}.docbody h1{font-size:2.2rem}}
+@media(max-width:520px){.grid{grid-template-columns:1fr}.wrap{padding:0 6vw}header{padding:1rem 6vw}.hero h1{font-size:2.6rem}.index-columns{columns:1}table{font-size:.78rem}th,td{padding:.45rem}.doclayout{padding:1rem 6vw}.facts{gap:.5rem}}
+main,.toc a,.hero h1{overflow-wrap:anywhere}
+@page{size:Letter;margin:.7in .65in .75in}
+@media print{html{scroll-behavior:auto}body{font:10.5pt/1.45 Arial,sans-serif;color:#172f39}header,footer,.search-area,.screen-only{display:none}.doclayout{display:block;padding:0;max-width:none}.toc{position:static;max-height:none;overflow:visible;font-size:10pt;break-after:page}.toc>h2{border:0}.toc ul{columns:2;column-gap:.3in}.toc li{break-inside:avoid}.docbody h1{font-size:30pt}.docbody h2{font-size:19pt;break-after:avoid;padding-top:.15in;margin-top:.35in}.docbody h3{font-size:12pt;break-after:avoid}.docbody h4{break-after:avoid}p{orphans:3;widows:3}pre{font-size:8.2pt;line-height:1.4;padding:.1in;break-inside:auto}table{font-size:8.4pt;line-height:1.35}th,td{padding:.06in .07in}tr{break-inside:avoid}.flow{max-height:6in;object-fit:contain;break-inside:avoid}a{color:#172f39;text-decoration:underline}.cover{break-after:page;padding-top:1in}.cover .edition{font-size:11pt}.cover h1{font-size:32pt}.cover .lead{font-size:14pt}.api-entry{break-inside:auto}.api-entry h3{break-after:avoid}.index-columns{columns:2}}
+</style></head><body><a class="skip" href="#main">Skip to content</a><aside aria-label="Beta download" style="padding:1rem 5%;background:#e5f3ec;color:#123b30"><strong>Townlight Beta 1</strong> · <a href="https://github.com/townlight/townlight/releases/tag/townlight-beta-1-station-delivery">Signed Windows installer, source, documentation and acceptance</a>. Updated Station live feed and recorded-video delivery; existing component versions retained. <a href="https://townlight.github.io/versions.html">Candidate identity and retained baseline evidence</a>.</aside><header><a class="brand" href="../index.html">townlight<span aria-hidden="true"> ·</span></a><span class="edition">Townlight Beta 1</span><nav aria-label="Main"><a href="../index.html#products">Products</a><a href="../manuals/suite.html">Suite manual</a><a href="../reference/index.html">Technical reference</a><a href="../terms.html">Terms and license</a></nav></header>
+<main id="main"><div class="cover wrap"><div class="hero"><div class="edition">Townlight Beta 1</div><h1>Townlight
+Core API
+Reference</h1><p class="lead">Staff guide and technical reference</p><p class="docmeta">Documentation edition 30 October 2026<br>Existing component versions retained<br>Signed suite installer 1.6.0.1<br>Private beta documentation companion</p></div></div><div class="doclayout"><aside class="toc" aria-label="Table of contents"><h2>Contents</h2><div class="search-area"><label for="find-section">Find a section</label><input class="search" id="find-section" type="search" placeholder="Type a heading"><p class="search-status" aria-live="polite"></p></div><ul>
+<li><a href="#api-reference-scope" id="toc-api-reference-scope">API
+reference scope</a></li>
+<li><a href="#installed-desktop-http-operations"
+id="toc-installed-desktop-http-operations">Installed desktop HTTP
+operations</a></li>
+<li><a href="#request-and-response-data-dictionary"
+id="toc-request-and-response-data-dictionary">Request and response data
+dictionary</a></li>
+<li><a href="#source-route-and-validation-supplement"
+id="toc-source-route-and-validation-supplement">Source route and
+validation supplement</a></li>
+<li><a href="#alphabetical-contract-index"
+id="toc-alphabetical-contract-index">Alphabetical contract
+index</a></li>
+</ul></aside><article class="docbody"><h2 id="api-reference-scope">API
+reference scope</h2>
+<p>This is the <strong>Townlight Beta 1</strong> technical contract for
+Core. The desktop-domain entries below come from the installed
+candidate’s generated OpenAPI schema. Export did not start a server,
+enter application lifespan, run migrations or contact a database. It is
+schema evidence, not proof of every endpoint’s runtime behavior. The
+acceptance section of the operating manual identifies exercised
+paths.</p>
+<p>The complete filtered <a href="core-openapi.json">OpenAPI JSON</a>
+preserves request bodies, parameters, response declarations, constraints
+and referenced schemas. An empty response schema means that this
+application did not declare a structured response model; do not infer a
+stronger contract from a green HTTP status. HTTP authorization enforced
+inside dependencies is still required when an automatically generated
+header parameter says optional.</p>
+<h3 id="origins-and-authentication">Origins and authentication</h3>
+<p>The canonical native domain transport uses
+<code>http://127.0.0.1:15480</code>. The native shell supplies
+<code>X-Townlight-Session</code> and maps it to a persisted SQL
+identity; browser code must not invent an actor or role. A trusted local
+integration must protect that proof as a credential and revalidate
+current authority. Standalone <code>/auth/jwt/login</code> uses the
+existing bearer-token flow; that token is not interchangeable with
+native proof. Public routes have their own permission and deployment
+gates. Do not bind the native domain runtime to a non-loopback
+interface.</p>
+<p>Station defaults to explicit loopback port <code>8756</code>. Its
+service revalidates Townlight authority. Its browser exchanges a one-use
+60-second ticket for a 900-second HttpOnly SameSite Strict operator
+cookie. Browser mutations require the exact Origin and
+<code>X-Station-UI: 1</code>. Native session proof must not be put in a
+URL or shipped to an MCP client.</p>
+<h3 id="failure-and-retry-contract">Failure and retry contract</h3>
+<p><code>401</code> means missing/expired identity; <code>403</code>
+means permission or origin denial; <code>404</code> means a missing or
+unavailable resource; <code>409</code> commonly means revision,
+source-hash, lifecycle or idempotency conflict; <code>422</code> means
+invalid input; <code>429</code> means a bounded rate/capacity refusal;
+<code>503</code> means an unavailable dependency, configuration or
+schema. Individual routes may use only a subset and source-derived
+checks can add errors absent from generated response declarations.
+Preserve edits, read the detail and inspect current state before
+retrying a write. Neither a retry nor an idempotency key authorizes a
+changed payload.</p>
+<h3 id="effective-installed-runtime-contract">Effective installed
+runtime contract</h3>
+<p>The inner domain export in
+<code>reference/desktop-domain-openapi.json</code> has 243 paths and 245
+schemas. The installed host is a second FastAPI application: it
+registers <strong>GET /health</strong>, <strong>GET /modules</strong>
+and <strong>GET /ready</strong> before mounting that domain application
+at <code>/</code>. Its <code>/health</code> therefore
+<strong>overrides</strong> the inner <code>app.main.health</code> at the
+installed origin. The effective composition has 245 unique URI paths.
+The filtered downloads for Suite, Core and Records compose those real
+outer routes over their inner-domain selection; the original inner and
+outer exports remain separate evidence files.</p>
+<table>
+<colgroup>
+<col style="width: 50%" />
+<col style="width: 50%" />
+</colgroup>
+<thead>
+<tr>
+<th>Outer operation</th>
+<th>Actual response and use</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>GET /health</code></td>
+<td>Runtime <code>status</code> (<code>ok</code> or
+<code>degraded</code>), service/version, product profile, module checks,
+database check and <code>local_only</code>. HTTP 200 when healthy,
+otherwise 503. This is not the inner app’s simple status/version
+handler.</td>
+</tr>
+<tr>
+<td><code>GET /modules</code></td>
+<td>The same runtime health payload and HTTP status as
+<code>/health</code>; not a second independent readiness proof.</td>
+</tr>
+<tr>
+<td><code>GET /ready</code></td>
+<td><code>status</code> (<code>ready</code> or <code>not-ready</code>)
+and <code>reason</code>; HTTP 200/503 after the applicable activation,
+schema and provider checks. Use this for domain readiness.</td>
+</tr>
+</tbody>
+</table>
+<p>For example, a ready result has shape
+<code>{"status":"ready","reason":"&lt;actual profile-specific readiness reason&gt;"}</code>;
+an inactive domain returns
+<code>{"status":"not-ready","reason":"domain-inactive"}</code> with 503.
+These are source-derived shapes, not new execution receipts. Read the
+actual reason rather than treating a listening process or
+<code>/health</code> alone as canonical readiness.</p>
+<p>The native origin remains <code>http://127.0.0.1:15480</code>.
+Station’s separately paired suite process can use another explicitly
+configured loopback port; its Station origin and the Station service’s
+suite origin must agree. The Station operating guide supplies that setup
+without disabling normal activation.</p>
+<h2 id="installed-desktop-http-operations">Installed desktop HTTP
+operations</h2>
+<h3 id="get-configportal-mode">GET /config/portal-mode</h3>
+<p>Get the deployment’s current portal posture.</p>
+<p>Operation ID: <code>get_portal_mode_config_portal_mode_get</code>.
+Tags: public.</p>
+<table>
+<thead>
+<tr>
+<th>Declared status</th>
+<th>Description</th>
+<th>Response model</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>200</td>
+<td>Successful Response</td>
+<td>application/json: PortalModeResponse</td>
+</tr>
+</tbody>
+</table>
+<h3 id="get-city-profile">GET /city-profile</h3>
+<p>Get City Profile</p>
+<p>Operation ID: <code>get_city_profile_city_profile_get</code>. Tags:
+city-profile.</p>
+<table>
+<colgroup>
+<col style="width: 33%" />
+<col style="width: 33%" />
+<col style="width: 33%" />
+</colgroup>
+<thead>
+<tr>
+<th>Declared status</th>
+<th>Description</th>
+<th>Response model</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>200</td>
+<td>Successful Response</td>
+<td>application/json: CityProfileRead or null</td>
+</tr>
+</tbody>
+</table>
+<h3 id="post-city-profile">POST /city-profile</h3>
+<p>Create City Profile</p>
+<p>Operation ID: <code>create_city_profile_city_profile_post</code>.
+Tags: city-profile.</p>
+<p>Request body: <code>application/json</code>; required. Model:
+<code>CityProfileCreate</code>.</p>
+<table>
+<thead>
+<tr>
+<th>Declared status</th>
+<th>Description</th>
+<th>Response model</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>201</td>
+<td>Successful Response</td>
+<td>application/json: CityProfileRead</td>
+</tr>
+<tr>
+<td>422</td>
+<td>Validation Error</td>
+<td>application/json: HTTPValidationError</td>
+</tr>
+</tbody>
+</table>
+<h3 id="patch-city-profile">PATCH /city-profile</h3>
+<p>Update City Profile</p>
+<p>Operation ID: <code>update_city_profile_city_profile_patch</code>.
+Tags: city-profile.</p>
+<p>Request body: <code>application/json</code>; required. Model:
+<code>CityProfileUpdate</code>.</p>
+<table>
+<thead>
+<tr>
+<th>Declared status</th>
+<th>Description</th>
+<th>Response model</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>200</td>
+<td>Successful Response</td>
+<td>application/json: CityProfileRead</td>
+</tr>
+<tr>
+<td>422</td>
+<td>Validation Error</td>
+<td>application/json: HTTPValidationError</td>
+</tr>
+</tbody>
+</table>
+<h3 id="get-catalogdomains">GET /catalog/domains</h3>
+<p>List Domains</p>
+<p>Operation ID: <code>list_domains_catalog_domains_get</code>. Tags:
+catalog.</p>
+<table>
+<thead>
+<tr>
+<th>Declared status</th>
+<th>Description</th>
+<th>Response model</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>200</td>
+<td>Successful Response</td>
+<td>application/json: Unspecified JSON shape</td>
+</tr>
+</tbody>
+</table>
+<h3 id="get-catalogsystems">GET /catalog/systems</h3>
+<p>List Systems</p>
+<p>Operation ID: <code>list_systems_catalog_systems_get</code>. Tags:
+catalog.</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Location</th>
+<th>Required</th>
+<th>Type and constraints</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>domain</code></td>
+<td>query</td>
+<td>no at schema level</td>
+<td>string or null</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>Declared status</th>
+<th>Description</th>
+<th>Response model</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>200</td>
+<td>Successful Response</td>
+<td>application/json: Unspecified JSON shape</td>
+</tr>
+<tr>
+<td>422</td>
+<td>Validation Error</td>
+<td>application/json: HTTPValidationError</td>
+</tr>
+</tbody>
+</table>
+<h3 id="get-catalogconnectors">GET /catalog/connectors</h3>
+<p>List Connectors</p>
+<p>Operation ID: <code>list_connectors_catalog_connectors_get</code>.
+Tags: catalog.</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Location</th>
+<th>Required</th>
+<th>Type and constraints</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>domain</code></td>
+<td>query</td>
+<td>yes</td>
+<td>string</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>Declared status</th>
+<th>Description</th>
+<th>Response model</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>200</td>
+<td>Successful Response</td>
+<td>application/json: Unspecified JSON shape</td>
+</tr>
+<tr>
+<td>422</td>
+<td>Validation Error</td>
+<td>application/json: HTTPValidationError</td>
+</tr>
+</tbody>
+</table>
+<h3 id="post-catalogload">POST /catalog/load</h3>
+<p>Trigger Catalog Load</p>
+<p>Operation ID: <code>trigger_catalog_load_catalog_load_post</code>.
+Tags: catalog.</p>
+<table>
+<thead>
+<tr>
+<th>Declared status</th>
+<th>Description</th>
+<th>Response model</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>200</td>
+<td>Successful Response</td>
+<td>application/json: Unspecified JSON shape</td>
+</tr>
+</tbody>
+</table>
+<h3 id="get-departments">GET /departments/</h3>
+<p>List Departments</p>
+<p>Operation ID: <code>list_departments_departments__get</code>. Tags:
+departments.</p>
+<table>
+<colgroup>
+<col style="width: 33%" />
+<col style="width: 33%" />
+<col style="width: 33%" />
+</colgroup>
+<thead>
+<tr>
+<th>Declared status</th>
+<th>Description</th>
+<th>Response model</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>200</td>
+<td>Successful Response</td>
+<td>application/json: array of DepartmentRead</td>
+</tr>
+</tbody>
+</table>
+<h3 id="post-departments">POST /departments/</h3>
+<p>Create Department</p>
+<p>Operation ID: <code>create_department_departments__post</code>. Tags:
+departments.</p>
+<p>Request body: <code>application/json</code>; required. Model:
+<code>DepartmentCreate</code>.</p>
+<table>
+<thead>
+<tr>
+<th>Declared status</th>
+<th>Description</th>
+<th>Response model</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>201</td>
+<td>Successful Response</td>
+<td>application/json: DepartmentRead</td>
+</tr>
+<tr>
+<td>422</td>
+<td>Validation Error</td>
+<td>application/json: HTTPValidationError</td>
+</tr>
+</tbody>
+</table>
+<h3 id="get-departmentsdept_id">GET /departments/{dept_id}</h3>
+<p>Get Department</p>
+<p>Operation ID: <code>get_department_departments__dept_id__get</code>.
+Tags: departments.</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Location</th>
+<th>Required</th>
+<th>Type and constraints</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>dept_id</code></td>
+<td>path</td>
+<td>yes</td>
+<td>string; format=uuid</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>Declared status</th>
+<th>Description</th>
+<th>Response model</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>200</td>
+<td>Successful Response</td>
+<td>application/json: DepartmentRead</td>
+</tr>
+<tr>
+<td>422</td>
+<td>Validation Error</td>
+<td>application/json: HTTPValidationError</td>
+</tr>
+</tbody>
+</table>
+<h3 id="patch-departmentsdept_id">PATCH /departments/{dept_id}</h3>
+<p>Update Department</p>
+<p>Operation ID:
+<code>update_department_departments__dept_id__patch</code>. Tags:
+departments.</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Location</th>
+<th>Required</th>
+<th>Type and constraints</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>dept_id</code></td>
+<td>path</td>
+<td>yes</td>
+<td>string; format=uuid</td>
+</tr>
+</tbody>
+</table>
+<p>Request body: <code>application/json</code>; required. Model:
+<code>DepartmentUpdate</code>.</p>
+<table>
+<thead>
+<tr>
+<th>Declared status</th>
+<th>Description</th>
+<th>Response model</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>200</td>
+<td>Successful Response</td>
+<td>application/json: DepartmentRead</td>
+</tr>
+<tr>
+<td>422</td>
+<td>Validation Error</td>
+<td>application/json: HTTPValidationError</td>
+</tr>
+</tbody>
+</table>
+<h3 id="delete-departmentsdept_id">DELETE /departments/{dept_id}</h3>
+<p>Delete Department</p>
+<p>Operation ID:
+<code>delete_department_departments__dept_id__delete</code>. Tags:
+departments.</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Location</th>
+<th>Required</th>
+<th>Type and constraints</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>dept_id</code></td>
+<td>path</td>
+<td>yes</td>
+<td>string; format=uuid</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>Declared status</th>
+<th>Description</th>
+<th>Response model</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>204</td>
+<td>Successful Response</td>
+<td>No content model declared</td>
+</tr>
+<tr>
+<td>422</td>
+<td>Validation Error</td>
+<td>application/json: HTTPValidationError</td>
+</tr>
+</tbody>
+</table>
+<h3 id="get-health">GET /health</h3>
+<p>Runtime Health</p>
+<p>Operation ID: <code>runtime_health_health_get</code>. Tags: .</p>
+<table>
+<thead>
+<tr>
+<th>Declared status</th>
+<th>Description</th>
+<th>Response model</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>200</td>
+<td>Successful Response</td>
+<td>application/json: Unspecified JSON shape</td>
+</tr>
+</tbody>
+</table>
+<h3 id="get-desktopv1accessstate">GET /desktop/v1/access/state</h3>
+<p>Access State</p>
+<p>Operation ID: <code>access_state_desktop_v1_access_state_get</code>.
+Tags: native-access.</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Location</th>
+<th>Required</th>
+<th>Type and constraints</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>X-Townlight-Session</code></td>
+<td>header</td>
+<td>no at schema level</td>
+<td>string or null</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>Declared status</th>
+<th>Description</th>
+<th>Response model</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>200</td>
+<td>Successful Response</td>
+<td>application/json: Unspecified JSON shape</td>
+</tr>
+<tr>
+<td>422</td>
+<td>Validation Error</td>
+<td>application/json: HTTPValidationError</td>
+</tr>
+</tbody>
+</table>
+<h3 id="post-desktopv1accessreview-context">POST
+/desktop/v1/access/review-context</h3>
+<p>Review Context</p>
+<p>Operation ID:
+<code>review_context_desktop_v1_access_review_context_post</code>. Tags:
+native-access.</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Location</th>
+<th>Required</th>
+<th>Type and constraints</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>X-Townlight-Session</code></td>
+<td>header</td>
+<td>no at schema level</td>
+<td>string or null</td>
+</tr>
+</tbody>
+</table>
+<p>Request body: <code>application/json</code>; required. Model:
+<code>ReviewInput</code>.</p>
+<table>
+<thead>
+<tr>
+<th>Declared status</th>
+<th>Description</th>
+<th>Response model</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>200</td>
+<td>Successful Response</td>
+<td>application/json: Unspecified JSON shape</td>
+</tr>
+<tr>
+<td>422</td>
+<td>Validation Error</td>
+<td>application/json: HTTPValidationError</td>
+</tr>
+</tbody>
+</table>
+<h3 id="post-desktopv1accessreviews">POST
+/desktop/v1/access/reviews</h3>
+<p>Save Review</p>
+<p>Operation ID:
+<code>save_review_desktop_v1_access_reviews_post</code>. Tags:
+native-access.</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Location</th>
+<th>Required</th>
+<th>Type and constraints</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>X-Townlight-Session</code></td>
+<td>header</td>
+<td>no at schema level</td>
+<td>string or null</td>
+</tr>
+</tbody>
+</table>
+<p>Request body: <code>application/json</code>; required. Model:
+<code>SaveReview</code>.</p>
+<table>
+<thead>
+<tr>
+<th>Declared status</th>
+<th>Description</th>
+<th>Response model</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>200</td>
+<td>Successful Response</td>
+<td>application/json: Unspecified JSON shape</td>
+</tr>
+<tr>
+<td>422</td>
+<td>Validation Error</td>
+<td>application/json: HTTPValidationError</td>
+</tr>
+</tbody>
+</table>
+<h3 id="post-desktopv1accessreviewsreview_iddelete">POST
+/desktop/v1/access/reviews/{review_id}/delete</h3>
+<p>Delete Review</p>
+<p>Operation ID:
+<code>delete_review_desktop_v1_access_reviews__review_id__delete_post</code>.
+Tags: native-access.</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Location</th>
+<th>Required</th>
+<th>Type and constraints</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>review_id</code></td>
+<td>path</td>
+<td>yes</td>
+<td>string; format=uuid</td>
+</tr>
+<tr>
+<td><code>X-Townlight-Session</code></td>
+<td>header</td>
+<td>no at schema level</td>
+<td>string or null</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>Declared status</th>
+<th>Description</th>
+<th>Response model</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>200</td>
+<td>Successful Response</td>
+<td>application/json: Unspecified JSON shape</td>
+</tr>
+<tr>
+<td>422</td>
+<td>Validation Error</td>
+<td>application/json: HTTPValidationError</td>
+</tr>
+</tbody>
+</table>
+<h3 id="post-desktopv1accesstools">POST /desktop/v1/access/tools</h3>
+<p>Tool</p>
+<p>Operation ID: <code>tool_desktop_v1_access_tools_post</code>. Tags:
+native-access.</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Location</th>
+<th>Required</th>
+<th>Type and constraints</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>X-Townlight-Session</code></td>
+<td>header</td>
+<td>no at schema level</td>
+<td>string or null</td>
+</tr>
+</tbody>
+</table>
+<p>Request body: <code>application/json</code>; required. Model:
+<code>object</code>.</p>
+<table>
+<thead>
+<tr>
+<th>Declared status</th>
+<th>Description</th>
+<th>Response model</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>200</td>
+<td>Successful Response</td>
+<td>application/json: Unspecified JSON shape</td>
+</tr>
+<tr>
+<td>422</td>
+<td>Validation Error</td>
+<td>application/json: HTTPValidationError</td>
+</tr>
+</tbody>
+</table>
+<h3 id="post-desktopv1accessrewrite-context">POST
+/desktop/v1/access/rewrite-context</h3>
+<p>Rewrite Context</p>
+<p>Operation ID:
+<code>rewrite_context_desktop_v1_access_rewrite_context_post</code>.
+Tags: native-access.</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Location</th>
+<th>Required</th>
+<th>Type and constraints</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>X-Townlight-Session</code></td>
+<td>header</td>
+<td>no at schema level</td>
+<td>string or null</td>
+</tr>
+</tbody>
+</table>
+<p>Request body: <code>application/json</code>; required. Model:
+<code>RewriteInput</code>.</p>
+<table>
+<thead>
+<tr>
+<th>Declared status</th>
+<th>Description</th>
+<th>Response model</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>200</td>
+<td>Successful Response</td>
+<td>application/json: Unspecified JSON shape</td>
+</tr>
+<tr>
+<td>422</td>
+<td>Validation Error</td>
+<td>application/json: HTTPValidationError</td>
+</tr>
+</tbody>
+</table>
+<h3 id="post-desktopv1accessrewrite-result">POST
+/desktop/v1/access/rewrite-result</h3>
+<p>Rewrite Result</p>
+<p>Operation ID:
+<code>rewrite_result_desktop_v1_access_rewrite_result_post</code>. Tags:
+native-access.</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Location</th>
+<th>Required</th>
+<th>Type and constraints</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>X-Townlight-Session</code></td>
+<td>header</td>
+<td>no at schema level</td>
+<td>string or null</td>
+</tr>
+</tbody>
+</table>
+<p>Request body: <code>application/json</code>; required. Model:
+<code>RewriteResult</code>.</p>
+<table>
+<thead>
+<tr>
+<th>Declared status</th>
+<th>Description</th>
+<th>Response model</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>200</td>
+<td>Successful Response</td>
+<td>application/json: Unspecified JSON shape</td>
+</tr>
+<tr>
+<td>422</td>
+<td>Validation Error</td>
+<td>application/json: HTTPValidationError</td>
+</tr>
+</tbody>
+</table>
+<h3 id="post-desktopv1accessreviewsreview_idexport">POST
+/desktop/v1/access/reviews/{review_id}/export</h3>
+<p>Prepare Export</p>
+<p>Operation ID:
+<code>prepare_export_desktop_v1_access_reviews__review_id__export_post</code>.
+Tags: native-access.</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Location</th>
+<th>Required</th>
+<th>Type and constraints</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>review_id</code></td>
+<td>path</td>
+<td>yes</td>
+<td>string; format=uuid</td>
+</tr>
+<tr>
+<td><code>X-Townlight-Session</code></td>
+<td>header</td>
+<td>no at schema level</td>
+<td>string or null</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>Declared status</th>
+<th>Description</th>
+<th>Response model</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>200</td>
+<td>Successful Response</td>
+<td>application/json: Unspecified JSON shape</td>
+</tr>
+<tr>
+<td>422</td>
+<td>Validation Error</td>
+<td>application/json: HTTPValidationError</td>
+</tr>
+</tbody>
+</table>
+<h3 id="post-desktopv1accessexportsartifact_idcomplete">POST
+/desktop/v1/access/exports/{artifact_id}/complete</h3>
+<p>Complete Export</p>
+<p>Operation ID:
+<code>complete_export_desktop_v1_access_exports__artifact_id__complete_post</code>.
+Tags: native-access.</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Location</th>
+<th>Required</th>
+<th>Type and constraints</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>artifact_id</code></td>
+<td>path</td>
+<td>yes</td>
+<td>string; format=uuid</td>
+</tr>
+<tr>
+<td><code>X-Townlight-Session</code></td>
+<td>header</td>
+<td>no at schema level</td>
+<td>string or null</td>
+</tr>
+</tbody>
+</table>
+<p>Request body: <code>application/json</code>; required. Model:
+<code>ExportReceipt</code>.</p>
+<table>
+<thead>
+<tr>
+<th>Declared status</th>
+<th>Description</th>
+<th>Response model</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>200</td>
+<td>Successful Response</td>
+<td>application/json: Unspecified JSON shape</td>
+</tr>
+<tr>
+<td>422</td>
+<td>Validation Error</td>
+<td>application/json: HTTPValidationError</td>
+</tr>
+</tbody>
+</table>
+<h3 id="get-desktopv1suitestate">GET /desktop/v1/suite/state</h3>
+<p>Suite State</p>
+<p>Operation ID: <code>suite_state_desktop_v1_suite_state_get</code>.
+Tags: native-records-snapshot.</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Location</th>
+<th>Required</th>
+<th>Type and constraints</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>X-Townlight-Session</code></td>
+<td>header</td>
+<td>no at schema level</td>
+<td>string or null</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>Declared status</th>
+<th>Description</th>
+<th>Response model</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>200</td>
+<td>Successful Response</td>
+<td>application/json: Unspecified JSON shape</td>
+</tr>
+<tr>
+<td>422</td>
+<td>Validation Error</td>
+<td>application/json: HTTPValidationError</td>
+</tr>
+</tbody>
+</table>
+<h3 id="post-desktopv1suitesearch">POST /desktop/v1/suite/search</h3>
+<p>Search</p>
+<p>Operation ID: <code>search_desktop_v1_suite_search_post</code>. Tags:
+native-records-snapshot.</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Location</th>
+<th>Required</th>
+<th>Type and constraints</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>X-Townlight-Session</code></td>
+<td>header</td>
+<td>no at schema level</td>
+<td>string or null</td>
+</tr>
+</tbody>
+</table>
+<p>Request body: <code>application/json</code>; required. Model:
+<code>SearchInput</code>.</p>
+<table>
+<thead>
+<tr>
+<th>Declared status</th>
+<th>Description</th>
+<th>Response model</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>200</td>
+<td>Successful Response</td>
+<td>application/json: Unspecified JSON shape</td>
+</tr>
+<tr>
+<td>422</td>
+<td>Validation Error</td>
+<td>application/json: HTTPValidationError</td>
+</tr>
+</tbody>
+</table>
+<h3 id="get-modules">GET /modules</h3>
+<p>Runtime Health</p>
+<p>Operation ID: <code>runtime_health_modules_get</code>. Tags: .</p>
+<table>
+<thead>
+<tr>
+<th>Declared status</th>
+<th>Description</th>
+<th>Response model</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>200</td>
+<td>Successful Response</td>
+<td>application/json: Unspecified JSON shape</td>
+</tr>
+</tbody>
+</table>
+<h3 id="get-ready">GET /ready</h3>
+<p>Domain Ready</p>
+<p>Operation ID: <code>domain_ready_ready_get</code>. Tags: .</p>
+<table>
+<thead>
+<tr>
+<th>Declared status</th>
+<th>Description</th>
+<th>Response model</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>200</td>
+<td>Successful Response</td>
+<td>application/json: Unspecified JSON shape</td>
+</tr>
+</tbody>
+</table>
+<h2 id="request-and-response-data-dictionary">Request and response data
+dictionary</h2>
+<p>Fields below retain the actual schema requirements and constraints.
+<code>null</code> and omitted are distinct where a model distinguishes
+them. Additional-property rules apply per schema. Full discriminators,
+nested definitions and defaults are retained in the JSON.</p>
+<h3 id="adaplan">AdaPlan</h3>
+<p>Additional properties: false.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Required</th>
+<th>Type and constraints</th>
+<th>Default or description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>action</code></td>
+<td>yes</td>
+<td>string; value ada-title-ii</td>
+<td></td>
+</tr>
+<tr>
+<td><code>serviceArea</code></td>
+<td>yes</td>
+<td>string; minLength=1; maxLength=500</td>
+<td></td>
+</tr>
+<tr>
+<td><code>hasCoordinatorReview</code></td>
+<td>no</td>
+<td>boolean</td>
+<td>default false.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="cityprofilecreate">CityProfileCreate</h3>
+<p>Additional properties: not explicitly declared.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Required</th>
+<th>Type and constraints</th>
+<th>Default or description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>city_name</code></td>
+<td>yes</td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>state</code></td>
+<td>no</td>
+<td>string or null</td>
+<td></td>
+</tr>
+<tr>
+<td><code>county</code></td>
+<td>no</td>
+<td>string or null</td>
+<td></td>
+</tr>
+<tr>
+<td><code>population_band</code></td>
+<td>no</td>
+<td>string or null</td>
+<td></td>
+</tr>
+<tr>
+<td><code>email_platform</code></td>
+<td>no</td>
+<td>string or null</td>
+<td></td>
+</tr>
+<tr>
+<td><code>has_dedicated_it</code></td>
+<td>no</td>
+<td>boolean or null</td>
+<td></td>
+</tr>
+<tr>
+<td><code>monthly_request_volume</code></td>
+<td>no</td>
+<td>string or null</td>
+<td></td>
+</tr>
+<tr>
+<td><code>profile_data</code></td>
+<td>no</td>
+<td>object</td>
+<td>default {}.</td>
+</tr>
+<tr>
+<td><code>gap_map</code></td>
+<td>no</td>
+<td>object</td>
+<td>default {}.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="cityprofileread">CityProfileRead</h3>
+<p>Additional properties: not explicitly declared.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Required</th>
+<th>Type and constraints</th>
+<th>Default or description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>id</code></td>
+<td>yes</td>
+<td>string; format=uuid</td>
+<td></td>
+</tr>
+<tr>
+<td><code>city_name</code></td>
+<td>yes</td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>state</code></td>
+<td>yes</td>
+<td>string or null</td>
+<td></td>
+</tr>
+<tr>
+<td><code>county</code></td>
+<td>yes</td>
+<td>string or null</td>
+<td></td>
+</tr>
+<tr>
+<td><code>population_band</code></td>
+<td>yes</td>
+<td>string or null</td>
+<td></td>
+</tr>
+<tr>
+<td><code>email_platform</code></td>
+<td>yes</td>
+<td>string or null</td>
+<td></td>
+</tr>
+<tr>
+<td><code>has_dedicated_it</code></td>
+<td>yes</td>
+<td>boolean or null</td>
+<td></td>
+</tr>
+<tr>
+<td><code>monthly_request_volume</code></td>
+<td>yes</td>
+<td>string or null</td>
+<td></td>
+</tr>
+<tr>
+<td><code>onboarding_status</code></td>
+<td>yes</td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>profile_data</code></td>
+<td>yes</td>
+<td>object</td>
+<td></td>
+</tr>
+<tr>
+<td><code>gap_map</code></td>
+<td>yes</td>
+<td>object</td>
+<td></td>
+</tr>
+<tr>
+<td><code>created_at</code></td>
+<td>yes</td>
+<td>string; format=date-time</td>
+<td></td>
+</tr>
+<tr>
+<td><code>updated_at</code></td>
+<td>yes</td>
+<td>string; format=date-time</td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<h3 id="cityprofileupdate">CityProfileUpdate</h3>
+<p>Additional properties: not explicitly declared.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Required</th>
+<th>Type and constraints</th>
+<th>Default or description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>city_name</code></td>
+<td>no</td>
+<td>string or null</td>
+<td></td>
+</tr>
+<tr>
+<td><code>state</code></td>
+<td>no</td>
+<td>string or null</td>
+<td></td>
+</tr>
+<tr>
+<td><code>county</code></td>
+<td>no</td>
+<td>string or null</td>
+<td></td>
+</tr>
+<tr>
+<td><code>population_band</code></td>
+<td>no</td>
+<td>string or null</td>
+<td></td>
+</tr>
+<tr>
+<td><code>email_platform</code></td>
+<td>no</td>
+<td>string or null</td>
+<td></td>
+</tr>
+<tr>
+<td><code>has_dedicated_it</code></td>
+<td>no</td>
+<td>boolean or null</td>
+<td></td>
+</tr>
+<tr>
+<td><code>monthly_request_volume</code></td>
+<td>no</td>
+<td>string or null</td>
+<td></td>
+</tr>
+<tr>
+<td><code>onboarding_status</code></td>
+<td>no</td>
+<td>string or null</td>
+<td></td>
+</tr>
+<tr>
+<td><code>profile_data</code></td>
+<td>no</td>
+<td>object or null</td>
+<td></td>
+</tr>
+<tr>
+<td><code>gap_map</code></td>
+<td>no</td>
+<td>object or null</td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<h3 id="departmentcreate">DepartmentCreate</h3>
+<p>Additional properties: not explicitly declared.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Required</th>
+<th>Type and constraints</th>
+<th>Default or description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>name</code></td>
+<td>yes</td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>code</code></td>
+<td>yes</td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>contact_email</code></td>
+<td>no</td>
+<td>string or null</td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<h3 id="departmentread">DepartmentRead</h3>
+<p>Additional properties: not explicitly declared.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Required</th>
+<th>Type and constraints</th>
+<th>Default or description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>id</code></td>
+<td>yes</td>
+<td>string; format=uuid</td>
+<td></td>
+</tr>
+<tr>
+<td><code>name</code></td>
+<td>yes</td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>code</code></td>
+<td>yes</td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>contact_email</code></td>
+<td>yes</td>
+<td>string or null</td>
+<td></td>
+</tr>
+<tr>
+<td><code>created_at</code></td>
+<td>yes</td>
+<td>string; format=date-time</td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<h3 id="departmentupdate">DepartmentUpdate</h3>
+<p>Additional properties: not explicitly declared.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Required</th>
+<th>Type and constraints</th>
+<th>Default or description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>name</code></td>
+<td>no</td>
+<td>string or null</td>
+<td></td>
+</tr>
+<tr>
+<td><code>code</code></td>
+<td>no</td>
+<td>string or null</td>
+<td></td>
+</tr>
+<tr>
+<td><code>contact_email</code></td>
+<td>no</td>
+<td>string or null</td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<h3 id="exportreceipt">ExportReceipt</h3>
+<p>Additional properties: false.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Required</th>
+<th>Type and constraints</th>
+<th>Default or description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>export_path</code></td>
+<td>yes</td>
+<td>string; minLength=1; maxLength=32768</td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<h3 id="formplan">FormPlan</h3>
+<p>Additional properties: false.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Required</th>
+<th>Type and constraints</th>
+<th>Default or description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>action</code></td>
+<td>yes</td>
+<td>string; value form-plan</td>
+<td></td>
+</tr>
+<tr>
+<td><code>formName</code></td>
+<td>no</td>
+<td>string; maxLength=500</td>
+<td>default ““.</td>
+</tr>
+<tr>
+<td><code>fields</code></td>
+<td>no</td>
+<td>array of string; maxItems=50</td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<h3 id="httpvalidationerror">HTTPValidationError</h3>
+<p>Additional properties: not explicitly declared.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Required</th>
+<th>Type and constraints</th>
+<th>Default or description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>detail</code></td>
+<td>no</td>
+<td>array of ValidationError</td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<h3 id="portalmoderesponse">PortalModeResponse</h3>
+<p>T5D — schema for <code>GET /config/portal-mode</code>.</p>
+<p>Exposed to the frontend on boot so it can branch routing without a
+user-identity lookup. The payload is intentionally the single field
+below — no staff config, no user state, no schema version.</p>
+<p>Additional properties: not explicitly declared.</p>
+<table>
+<colgroup>
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+</colgroup>
+<thead>
+<tr>
+<th>Field</th>
+<th>Required</th>
+<th>Type and constraints</th>
+<th>Default or description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>mode</code></td>
+<td>yes</td>
+<td>string; values public, private</td>
+<td>Active portal posture for this deployment. <code>public</code> =
+minimal resident surface (landing + authenticated records-request
+submission + resident registration) reachable without staff auth.
+<code>private</code> = staff-only; no public routes, no resident
+self-registration.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="publishingplan">PublishingPlan</h3>
+<p>Additional properties: false.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Required</th>
+<th>Type and constraints</th>
+<th>Default or description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>action</code></td>
+<td>yes</td>
+<td>string; value publishing-workflow</td>
+<td></td>
+</tr>
+<tr>
+<td><code>title</code></td>
+<td>no</td>
+<td>string; maxLength=500</td>
+<td>default ““.</td>
+</tr>
+<tr>
+<td><code>hasReview</code></td>
+<td>no</td>
+<td>boolean</td>
+<td>default false.</td>
+</tr>
+<tr>
+<td><code>hasPlainLanguage</code></td>
+<td>no</td>
+<td>boolean</td>
+<td>default false.</td>
+</tr>
+<tr>
+<td><code>hasTranslationReview</code></td>
+<td>no</td>
+<td>boolean</td>
+<td>default false.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="reviewinput">ReviewInput</h3>
+<p>Additional properties: false.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Required</th>
+<th>Type and constraints</th>
+<th>Default or description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>title</code></td>
+<td>no</td>
+<td>string; maxLength=500</td>
+<td>default ““.</td>
+</tr>
+<tr>
+<td><code>body</code></td>
+<td>no</td>
+<td>string; maxLength=5000</td>
+<td>default ““.</td>
+</tr>
+<tr>
+<td><code>hasAltText</code></td>
+<td>no</td>
+<td>boolean</td>
+<td>default false.</td>
+</tr>
+<tr>
+<td><code>language</code></td>
+<td>no</td>
+<td>string; maxLength=80</td>
+<td>default “en”.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="rewriteinput">RewriteInput</h3>
+<p>Additional properties: false.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Required</th>
+<th>Type and constraints</th>
+<th>Default or description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>action</code></td>
+<td>yes</td>
+<td>string; values plain-language, language-variant</td>
+<td></td>
+</tr>
+<tr>
+<td><code>text</code></td>
+<td>yes</td>
+<td>string; minLength=1; maxLength=5000</td>
+<td></td>
+</tr>
+<tr>
+<td><code>language</code></td>
+<td>no</td>
+<td>string; maxLength=80</td>
+<td>default ““.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="rewriteresult">RewriteResult</h3>
+<p>Additional properties: false.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Required</th>
+<th>Type and constraints</th>
+<th>Default or description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>action</code></td>
+<td>yes</td>
+<td>string; values plain-language, language-variant</td>
+<td></td>
+</tr>
+<tr>
+<td><code>text</code></td>
+<td>yes</td>
+<td>string; minLength=1; maxLength=5000</td>
+<td></td>
+</tr>
+<tr>
+<td><code>language</code></td>
+<td>no</td>
+<td>string; maxLength=80</td>
+<td>default ““.</td>
+</tr>
+<tr>
+<td><code>outcome</code></td>
+<td>yes</td>
+<td>string; values generated, unavailable</td>
+<td></td>
+</tr>
+<tr>
+<td><code>generated</code></td>
+<td>no</td>
+<td>string; maxLength=100000 or null</td>
+<td></td>
+</tr>
+<tr>
+<td><code>model</code></td>
+<td>no</td>
+<td>string; maxLength=200 or null</td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<h3 id="savereview">SaveReview</h3>
+<p>Additional properties: false.</p>
+<table>
+<colgroup>
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+</colgroup>
+<thead>
+<tr>
+<th>Field</th>
+<th>Required</th>
+<th>Type and constraints</th>
+<th>Default or description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>title</code></td>
+<td>no</td>
+<td>string; maxLength=500</td>
+<td>default ““.</td>
+</tr>
+<tr>
+<td><code>body</code></td>
+<td>no</td>
+<td>string; maxLength=5000</td>
+<td>default ““.</td>
+</tr>
+<tr>
+<td><code>hasAltText</code></td>
+<td>no</td>
+<td>boolean</td>
+<td>default false.</td>
+</tr>
+<tr>
+<td><code>language</code></td>
+<td>no</td>
+<td>string; maxLength=80</td>
+<td>default “en”.</td>
+</tr>
+<tr>
+<td><code>ai_analysis</code></td>
+<td>no</td>
+<td>string; maxLength=100000 or null</td>
+<td></td>
+</tr>
+<tr>
+<td><code>ai_analysis_model</code></td>
+<td>no</td>
+<td>string; maxLength=200 or null</td>
+<td></td>
+</tr>
+<tr>
+<td><code>ai_outcome</code></td>
+<td>yes</td>
+<td>string; values generated, unavailable, failed</td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<h3 id="searchinput">SearchInput</h3>
+<p>Additional properties: false.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Required</th>
+<th>Type and constraints</th>
+<th>Default or description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>query</code></td>
+<td>yes</td>
+<td>string; minLength=1; maxLength=5000</td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<h3 id="taggedplan">TaggedPlan</h3>
+<p>Additional properties: false.</p>
+<table>
+<colgroup>
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+</colgroup>
+<thead>
+<tr>
+<th>Field</th>
+<th>Required</th>
+<th>Type and constraints</th>
+<th>Default or description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>action</code></td>
+<td>yes</td>
+<td>string; value tagged-pdf</td>
+<td></td>
+</tr>
+<tr>
+<td><code>headingLevels</code></td>
+<td>no</td>
+<td>array of integer; minimum=0.0; maximum=4294967295.0;
+maxItems=50</td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<h3 id="validationerror">ValidationError</h3>
+<p>Additional properties: not explicitly declared.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Required</th>
+<th>Type and constraints</th>
+<th>Default or description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>loc</code></td>
+<td>yes</td>
+<td>array of string or integer</td>
+<td></td>
+</tr>
+<tr>
+<td><code>msg</code></td>
+<td>yes</td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>type</code></td>
+<td>yes</td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>input</code></td>
+<td>no</td>
+<td>object</td>
+<td></td>
+</tr>
+<tr>
+<td><code>ctx</code></td>
+<td>no</td>
+<td>object</td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<h2 id="source-route-and-validation-supplement">Source route and
+validation supplement</h2>
+<p>These declarations are extracted from the immutable candidate source.
+Package standalone routes are <strong>a different deployment
+surface</strong> from the mounted installed domain. They are listed to
+document existing code, not to claim they all have installed or city
+acceptance. A source declaration without a resolved include-router mount
+is identified as such. Full signatures, direct HTTP refusals and schema
+fields are retained in the <a
+href="../reference/source-inventory.json">source inventory</a>.</p>
+<h3 id="router.py">router.py</h3>
+<p>Candidate source:
+<code>installed-owned-source/civiccore/llm/registry/router.py</code>.</p>
+<p><strong>GET <code>/admin/models</code></strong> — handler
+<code>list_models</code>, line 46. Declared router prefix included.</p>
+<div class="sourceCode" id="cb1"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a>list_models(session: AsyncSession<span class="op">=</span>Depends(get_session))</span></code></pre></div>
+<p><strong>GET <code>/admin/models/{model_id}</code></strong> — handler
+<code>get_model</code>, line 53. Declared router prefix included.</p>
+<div class="sourceCode" id="cb2"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a>get_model(model_id: <span class="bu">int</span>, session: AsyncSession<span class="op">=</span>Depends(get_session))</span></code></pre></div>
+<p>Direct handler refusals:
+<code>HTTPException(status_code=404, detail=f'Model {model_id} not found')</code>.</p>
+<p><strong>POST <code>/admin/models</code></strong> — handler
+<code>create_model</code>, line 61. Declared router prefix included.</p>
+<div class="sourceCode" id="cb3"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb3-1"><a href="#cb3-1" aria-hidden="true" tabindex="-1"></a>create_model(payload: ModelRegistryCreate, session: AsyncSession<span class="op">=</span>Depends(get_session))</span></code></pre></div>
+<p><strong>PATCH <code>/admin/models/{model_id}</code></strong> —
+handler <code>update_model</code>, line 73. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb4"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb4-1"><a href="#cb4-1" aria-hidden="true" tabindex="-1"></a>update_model(model_id: <span class="bu">int</span>, payload: ModelRegistryUpdate, session: AsyncSession<span class="op">=</span>Depends(get_session))</span></code></pre></div>
+<p>Direct handler refusals:
+<code>HTTPException(status_code=404, detail=f'Model {model_id} not found')</code>.</p>
+<p><strong>DELETE <code>/admin/models/{model_id}</code></strong> —
+handler <code>delete_model</code>, line 89. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb5"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb5-1"><a href="#cb5-1" aria-hidden="true" tabindex="-1"></a>delete_model(model_id: <span class="bu">int</span>, session: AsyncSession<span class="op">=</span>Depends(get_session))</span></code></pre></div>
+<p>Direct handler refusals:
+<code>HTTPException(status_code=404, detail=f'Model {model_id} not found')</code>.</p>
+<h3 id="services.py">services.py</h3>
+<p>Candidate source:
+<code>installed-owned-source/civicsuite_runtime/services.py</code>.</p>
+<p><strong>GET <code>/health</code></strong> — handler
+<code>runtime_health</code>, line 439. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb6"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb6-1"><a href="#cb6-1" aria-hidden="true" tabindex="-1"></a>runtime_health()</span></code></pre></div>
+<p><strong>GET <code>/modules</code></strong> — handler
+<code>runtime_health</code>, line 439. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb7"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb7-1"><a href="#cb7-1" aria-hidden="true" tabindex="-1"></a>runtime_health()</span></code></pre></div>
+<p><strong>GET <code>/ready</code></strong> — handler
+<code>domain_ready</code>, line 444. Declared router prefix
+included.</p>
+<div class="sourceCode" id="cb8"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb8-1"><a href="#cb8-1" aria-hidden="true" tabindex="-1"></a>domain_ready()</span></code></pre></div>
+<h2 id="alphabetical-contract-index">Alphabetical contract index</h2>
+<ul>
+<li><p><strong>AdaPlan</strong> — request/response data
+dictionary.</p></li>
+<li><p><strong>CityProfileCreate</strong> — request/response data
+dictionary.</p></li>
+<li><p><strong>CityProfileRead</strong> — request/response data
+dictionary.</p></li>
+<li><p><strong>CityProfileUpdate</strong> — request/response data
+dictionary.</p></li>
+<li><p><strong>DepartmentCreate</strong> — request/response data
+dictionary.</p></li>
+<li><p><strong>DepartmentRead</strong> — request/response data
+dictionary.</p></li>
+<li><p><strong>DepartmentUpdate</strong> — request/response data
+dictionary.</p></li>
+<li><p><strong>ExportReceipt</strong> — request/response data
+dictionary.</p></li>
+<li><p><strong>FormPlan</strong> — request/response data
+dictionary.</p></li>
+<li><p><strong>HTTPValidationError</strong> — request/response data
+dictionary.</p></li>
+<li><p><strong>PortalModeResponse</strong> — request/response data
+dictionary.</p></li>
+<li><p><strong>PublishingPlan</strong> — request/response data
+dictionary.</p></li>
+<li><p><strong>ReviewInput</strong> — request/response data
+dictionary.</p></li>
+<li><p><strong>RewriteInput</strong> — request/response data
+dictionary.</p></li>
+<li><p><strong>RewriteResult</strong> — request/response data
+dictionary.</p></li>
+<li><p><strong>SaveReview</strong> — request/response data
+dictionary.</p></li>
+<li><p><strong>SearchInput</strong> — request/response data
+dictionary.</p></li>
+<li><p><strong>TaggedPlan</strong> — request/response data
+dictionary.</p></li>
+<li><p><strong>ValidationError</strong> — request/response data
+dictionary.</p></li>
+<li><p>Authentication: Origins and authentication.</p></li>
+<li><p>Conflicts and retry: Failure and retry contract.</p></li>
+<li><p>Fields and validation: Request and response data
+dictionary.</p></li>
+<li><p>HTTP operations: Installed desktop HTTP operations.</p></li>
+<li><p>Standalone boundaries: Source route and validation
+supplement.</p></li>
+</ul></article></div></main><footer><span>Townlight Beta 1 · Townlight Beta 1 documentation · AGPL-3.0-only</span><span><a href="../versions.html">Exact versions and candidate</a> · CivicCast remains separate</span></footer>
+<script>const search=document.getElementById('find-section');if(search)search.addEventListener('input',()=>{const q=search.value.toLowerCase();let n=0;document.querySelectorAll('.toc li').forEach(li=>{const match=li.textContent.toLowerCase().includes(q);li.hidden=!match;if(match)n++;});document.querySelector('.search-status').textContent=q?n+' matching entries':'';});</script></body></html>

@@ -1,0 +1,1259 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Townlight Records",
+    "description": "Townlight Beta 1 documentation view of the installed desktop domain schema. Component API version is unchanged. Exported without lifespan or database access; schema generation is not endpoint acceptance.",
+    "version": "1.8.0.dev1"
+  },
+  "paths": {
+    "/desktop/v1/permitting/requirements": {
+      "post": {
+        "tags": [
+          "native-permitting"
+        ],
+        "summary": "Import Requirements",
+        "operationId": "import_requirements_desktop_v1_permitting_requirements_post",
+        "parameters": [
+          {
+            "name": "X-Townlight-Session",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Townlight-Session"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/civicsuite_runtime__permitting_bridge__Import"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "native-permitting"
+        ],
+        "summary": "Requirements",
+        "operationId": "requirements_desktop_v1_permitting_requirements_get",
+        "parameters": [
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 100000,
+              "minimum": 0,
+              "default": 0,
+              "title": "Offset"
+            }
+          },
+          {
+            "name": "X-Townlight-Session",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Townlight-Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/desktop/v1/permitting/requirements/{revision_id}": {
+      "get": {
+        "tags": [
+          "native-permitting"
+        ],
+        "summary": "Requirement",
+        "operationId": "requirement_desktop_v1_permitting_requirements__revision_id__get",
+        "parameters": [
+          {
+            "name": "revision_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Revision Id"
+            }
+          },
+          {
+            "name": "X-Townlight-Session",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Townlight-Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/desktop/v1/permitting/cases": {
+      "get": {
+        "tags": [
+          "native-permitting"
+        ],
+        "summary": "Cases",
+        "operationId": "cases_desktop_v1_permitting_cases_get",
+        "parameters": [
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 100000,
+              "minimum": 0,
+              "default": 0,
+              "title": "Offset"
+            }
+          },
+          {
+            "name": "X-Townlight-Session",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Townlight-Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "native-permitting"
+        ],
+        "summary": "Create Case",
+        "operationId": "create_case_desktop_v1_permitting_cases_post",
+        "parameters": [
+          {
+            "name": "X-Townlight-Session",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Townlight-Session"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IntakeInput"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/desktop/v1/permitting/cases/{case_id}": {
+      "get": {
+        "tags": [
+          "native-permitting"
+        ],
+        "summary": "Case",
+        "operationId": "case_desktop_v1_permitting_cases__case_id__get",
+        "parameters": [
+          {
+            "name": "case_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Case Id"
+            }
+          },
+          {
+            "name": "X-Townlight-Session",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Townlight-Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/desktop/v1/permitting/cases/{case_id}/revisions": {
+      "post": {
+        "tags": [
+          "native-permitting"
+        ],
+        "summary": "Revise",
+        "operationId": "revise_desktop_v1_permitting_cases__case_id__revisions_post",
+        "parameters": [
+          {
+            "name": "case_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Case Id"
+            }
+          },
+          {
+            "name": "X-Townlight-Session",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Townlight-Session"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IntakeInput"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/desktop/v1/permitting/cases/{case_id}/history": {
+      "get": {
+        "tags": [
+          "native-permitting"
+        ],
+        "summary": "History",
+        "operationId": "history_desktop_v1_permitting_cases__case_id__history_get",
+        "parameters": [
+          {
+            "name": "case_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Case Id"
+            }
+          },
+          {
+            "name": "X-Townlight-Session",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Townlight-Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/desktop/v1/permitting/cases/{case_id}/packets": {
+      "post": {
+        "tags": [
+          "native-permitting"
+        ],
+        "summary": "Packet",
+        "operationId": "packet_desktop_v1_permitting_cases__case_id__packets_post",
+        "parameters": [
+          {
+            "name": "case_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Case Id"
+            }
+          },
+          {
+            "name": "X-Townlight-Session",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Townlight-Session"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Packet"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/desktop/v1/permitting/packets/{packet_id}": {
+      "get": {
+        "tags": [
+          "native-permitting"
+        ],
+        "summary": "Document",
+        "operationId": "document_desktop_v1_permitting_packets__packet_id__get",
+        "parameters": [
+          {
+            "name": "packet_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Packet Id"
+            }
+          },
+          {
+            "name": "X-Townlight-Session",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Townlight-Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/desktop/v1/permitting/pathway": {
+      "post": {
+        "tags": [
+          "native-permitting"
+        ],
+        "summary": "Pathway",
+        "description": "Cited likely permit pathway, attachments and timeline; informational only.\n\n``use_model_assistance`` does not exist here: the resident live-model\nassistance flag (F-07) stays excluded, so only the deterministic cited\npathway is reachable from the shared shell.",
+        "operationId": "pathway_desktop_v1_permitting_pathway_post",
+        "parameters": [
+          {
+            "name": "X-Townlight-Session",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Townlight-Session"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Pathway"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/desktop/v1/permitting/connections/search": {
+      "post": {
+        "tags": [
+          "native-permitting"
+        ],
+        "summary": "Connections",
+        "operationId": "connections_desktop_v1_permitting_connections_search_post",
+        "parameters": [
+          {
+            "name": "X-Townlight-Session",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Townlight-Session"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/civicsuite_runtime__permitting_bridge__Search"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "type": "array",
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "title": "HTTPValidationError"
+      },
+      "IntakeInput": {
+        "properties": {
+          "expected_revision": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Revision"
+          },
+          "project_name": {
+            "type": "string",
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Project Name"
+          },
+          "project_description": {
+            "type": "string",
+            "maxLength": 10000,
+            "minLength": 1,
+            "title": "Project Description"
+          },
+          "location": {
+            "type": "string",
+            "maxLength": 1000,
+            "minLength": 1,
+            "title": "Location"
+          },
+          "applicant_contact": {
+            "type": "string",
+            "maxLength": 2000,
+            "title": "Applicant Contact",
+            "default": ""
+          },
+          "requirement_revision": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Requirement Revision"
+          },
+          "materials": {
+            "items": {
+              "$ref": "#/components/schemas/MaterialReview"
+            },
+            "type": "array",
+            "maxItems": 100,
+            "minItems": 1,
+            "title": "Materials"
+          },
+          "linked_sources": {
+            "items": {
+              "$ref": "#/components/schemas/civicpermit__workflow_models__SourceLink"
+            },
+            "type": "array",
+            "maxItems": 30,
+            "title": "Linked Sources"
+          },
+          "staff_notes": {
+            "type": "string",
+            "maxLength": 10000,
+            "title": "Staff Notes",
+            "default": ""
+          },
+          "assigned_to": {
+            "type": "string",
+            "maxLength": 255,
+            "title": "Assigned To",
+            "default": ""
+          },
+          "review_state": {
+            "type": "string",
+            "enum": [
+              "draft",
+              "follow_up",
+              "reviewed"
+            ],
+            "title": "Review State",
+            "default": "draft"
+          },
+          "review_notes": {
+            "type": "string",
+            "maxLength": 4000,
+            "title": "Review Notes",
+            "default": ""
+          },
+          "public_summary": {
+            "type": "string",
+            "maxLength": 10000,
+            "title": "Public Summary",
+            "default": ""
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "project_name",
+          "project_description",
+          "location",
+          "requirement_revision",
+          "materials"
+        ],
+        "title": "IntakeInput"
+      },
+      "Material": {
+        "properties": {
+          "material_id": {
+            "type": "string",
+            "pattern": "^[a-zA-Z0-9_-]{1,80}$",
+            "title": "Material Id"
+          },
+          "description": {
+            "type": "string",
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Description"
+          },
+          "citation": {
+            "type": "string",
+            "maxLength": 1000,
+            "minLength": 1,
+            "title": "Citation"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "material_id",
+          "description",
+          "citation"
+        ],
+        "title": "Material"
+      },
+      "MaterialReview": {
+        "properties": {
+          "material_id": {
+            "type": "string",
+            "maxLength": 80,
+            "minLength": 1,
+            "title": "Material Id"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "not_reviewed",
+              "provided",
+              "missing",
+              "unclear"
+            ],
+            "title": "Status",
+            "default": "not_reviewed"
+          },
+          "note": {
+            "type": "string",
+            "maxLength": 2000,
+            "title": "Note",
+            "default": ""
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "material_id"
+        ],
+        "title": "MaterialReview"
+      },
+      "Packet": {
+        "properties": {
+          "expected_revision": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Expected Revision"
+          },
+          "visibility": {
+            "type": "string",
+            "enum": [
+              "staff_only",
+              "records_copy"
+            ],
+            "title": "Visibility"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "expected_revision",
+          "visibility"
+        ],
+        "title": "Packet"
+      },
+      "Pathway": {
+        "properties": {
+          "project_type": {
+            "type": "string",
+            "maxLength": 120,
+            "minLength": 1,
+            "title": "Project Type"
+          },
+          "proposal": {
+            "type": "string",
+            "maxLength": 4000,
+            "title": "Proposal",
+            "default": ""
+          },
+          "location_context": {
+            "type": "string",
+            "maxLength": 1000,
+            "title": "Location Context",
+            "default": ""
+          },
+          "requirement_revision": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Requirement Revision"
+          },
+          "fee_link": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/civicpermit__workflow_models__SourceLink"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "project_type"
+        ],
+        "title": "Pathway"
+      },
+      "PathwayStep": {
+        "properties": {
+          "step": {
+            "type": "string",
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Step"
+          },
+          "citation": {
+            "type": "string",
+            "maxLength": 1000,
+            "minLength": 1,
+            "title": "Citation"
+          },
+          "typical_time": {
+            "type": "string",
+            "maxLength": 1000,
+            "title": "Typical Time",
+            "default": ""
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "step",
+          "citation"
+        ],
+        "title": "PathwayStep"
+      },
+      "RequirementBundle": {
+        "properties": {
+          "requirement_id": {
+            "type": "string",
+            "pattern": "^[a-zA-Z0-9_-]{1,100}$",
+            "title": "Requirement Id"
+          },
+          "title": {
+            "type": "string",
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Title"
+          },
+          "jurisdiction": {
+            "type": "string",
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Jurisdiction"
+          },
+          "project_type": {
+            "type": "string",
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Project Type"
+          },
+          "source_reference": {
+            "type": "string",
+            "maxLength": 1000,
+            "minLength": 1,
+            "title": "Source Reference"
+          },
+          "source_date": {
+            "type": "string",
+            "format": "date",
+            "title": "Source Date"
+          },
+          "effective_on": {
+            "type": "string",
+            "format": "date",
+            "title": "Effective On"
+          },
+          "dataset_kind": {
+            "type": "string",
+            "enum": [
+              "municipal",
+              "fictional"
+            ],
+            "title": "Dataset Kind"
+          },
+          "filename": {
+            "type": "string",
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,150}$",
+            "title": "Filename"
+          },
+          "content_base64": {
+            "type": "string",
+            "maxLength": 14000000,
+            "minLength": 1,
+            "title": "Content Base64"
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$",
+            "title": "Sha256"
+          },
+          "materials": {
+            "items": {
+              "$ref": "#/components/schemas/Material"
+            },
+            "type": "array",
+            "maxItems": 100,
+            "minItems": 1,
+            "title": "Materials"
+          },
+          "pathway": {
+            "items": {
+              "$ref": "#/components/schemas/PathwayStep"
+            },
+            "type": "array",
+            "maxItems": 100,
+            "title": "Pathway"
+          },
+          "fee_link": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/civicpermit__workflow_models__SourceLink"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "staff_note": {
+            "type": "string",
+            "maxLength": 4000,
+            "title": "Staff Note",
+            "default": ""
+          },
+          "change_note": {
+            "type": "string",
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Change Note"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "requirement_id",
+          "title",
+          "jurisdiction",
+          "project_type",
+          "source_reference",
+          "source_date",
+          "effective_on",
+          "dataset_kind",
+          "filename",
+          "content_base64",
+          "sha256",
+          "materials",
+          "change_note"
+        ],
+        "title": "RequirementBundle"
+      },
+      "ValidationError": {
+        "properties": {
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "type": "array",
+            "title": "Location"
+          },
+          "msg": {
+            "type": "string",
+            "title": "Message"
+          },
+          "type": {
+            "type": "string",
+            "title": "Error Type"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "ctx": {
+            "type": "object",
+            "title": "Context"
+          }
+        },
+        "type": "object",
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError"
+      },
+      "civicpermit__workflow_models__SourceLink": {
+        "properties": {
+          "provider": {
+            "type": "string",
+            "enum": [
+              "code",
+              "zoning"
+            ],
+            "title": "Provider"
+          },
+          "source_id": {
+            "type": "string",
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Source Id"
+          },
+          "expected_sha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$",
+            "title": "Expected Sha256"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "provider",
+          "source_id",
+          "expected_sha256"
+        ],
+        "title": "SourceLink"
+      },
+      "civicsuite_runtime__permitting_bridge__Import": {
+        "properties": {
+          "bundle": {
+            "$ref": "#/components/schemas/RequirementBundle"
+          },
+          "expected_revision": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Revision"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "bundle"
+        ],
+        "title": "Import"
+      },
+      "civicsuite_runtime__permitting_bridge__Search": {
+        "properties": {
+          "provider": {
+            "type": "string",
+            "enum": [
+              "code",
+              "zoning"
+            ],
+            "title": "Provider"
+          },
+          "query": {
+            "type": "string",
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Query"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "provider",
+          "query"
+        ],
+        "title": "Search"
+      }
+    },
+    "securitySchemes": {
+      "OAuth2PasswordBearer": {
+        "type": "oauth2",
+        "flows": {
+          "password": {
+            "scopes": {},
+            "tokenUrl": "auth/jwt/login"
+          }
+        }
+      }
+    }
+  }
+}
