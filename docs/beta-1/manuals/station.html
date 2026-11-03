@@ -1,6 +1,6 @@
-<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="description" content="Townlight
-Beta 1 staff and technical documentation"><title>Townlight Station
-Manual | Townlight Beta 1</title><style>
+<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Townlight Station Manual | Townlight candidate</title><style>
 :root{--ink:#182f3a;--muted:#526775;--accent:#006b64;--paper:#fff;--wash:#f1f6f5;--line:#cfdddf;--warm:#dceab2}
 *{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;background:var(--paper);color:var(--ink);font:17px/1.65 "Segoe UI",Arial,sans-serif}a{color:#006b64;text-underline-offset:3px}a:hover{text-decoration-thickness:2px}a:focus-visible,button:focus-visible,input:focus-visible{outline:3px solid #a25900;outline-offset:4px}.skip{position:absolute;left:-9999px}.skip:focus{left:1rem;top:1rem;background:white;padding:1rem;z-index:20}header{border-bottom:1px solid var(--line);padding:1.1rem 5vw;display:flex;align-items:center;gap:1.5rem;flex-wrap:wrap}header .brand{font-size:1.3rem;font-weight:750;letter-spacing:-.04em;text-decoration:none;color:var(--ink)}header nav{margin-left:auto;display:flex;gap:1.25rem;flex-wrap:wrap;font-size:.88rem}.edition{font:700 .72rem/1.5 "Segoe UI",sans-serif;letter-spacing:.12em;text-transform:uppercase;color:var(--accent)}.wrap{max-width:1240px;margin:auto;padding:0 4vw}.hero{padding:5rem 0 3.2rem;max-width:950px}.hero h1{font-size:clamp(2.5rem,5vw,4.7rem);line-height:1.08;letter-spacing:-.045em;margin:1rem 0 1.5rem;font-weight:650}.hero .lead{font-size:1.26rem;max-width:780px;color:var(--muted)}.actions{display:flex;gap:.8rem;flex-wrap:wrap;margin:1.8rem 0}.button{display:inline-block;padding:.7rem 1.15rem;border:1px solid var(--accent);border-radius:4px;text-decoration:none;font-weight:650}.button.primary{background:var(--accent);color:#fff}.facts{display:flex;gap:1.5rem;flex-wrap:wrap;font-size:.85rem;color:var(--muted)}.section{padding:3rem 0;border-top:1px solid var(--line)}h2{font-size:1.8rem;line-height:1.3;letter-spacing:-.025em;margin:2.5rem 0 1rem}h3{font-size:1.18rem;line-height:1.45;margin:1.8rem 0 .7rem}h4{font-size:1rem;margin:1.3rem 0 .6rem}p{margin:.85rem 0 1rem}ul,ol{padding-left:1.6rem}li{margin:.4rem 0}strong{font-weight:650}.grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:1.6rem}.product{border-top:3px solid var(--accent);padding:1.4rem 0}.product h3{font-size:1.65rem;margin:.4rem 0}.product p{color:var(--muted)}.number{font-size:.76rem;letter-spacing:.1em}.split{display:grid;grid-template-columns:1fr 1fr;gap:3rem}.flow{width:100%;height:auto;display:block;margin:1.8rem 0}.caption{font-size:.85rem;color:var(--muted)}.reading{max-width:860px}.doclayout{display:grid;grid-template-columns:245px minmax(0,1fr);gap:3rem;max-width:1320px;margin:auto;padding:2rem 4vw}.toc{font-size:.84rem;align-self:start;position:sticky;top:1rem;max-height:90vh;overflow:auto;padding-right:.8rem}.toc ul{list-style:none;padding:0}.toc li{margin:.5rem 0}.toc li li{padding-left:.8rem}.toc a{text-decoration:none}.docbody{min-width:0}.docbody h1{font-size:2.7rem;line-height:1.1;letter-spacing:-.04em}.docbody h2{border-top:1px solid var(--line);padding-top:1.8rem}.docbody img{max-width:100%;height:auto}.docmeta{color:var(--muted);font-size:.9rem}.docbody section{scroll-margin-top:1rem}table{width:100%;border-collapse:collapse;font-size:.87rem;line-height:1.5;margin:1.3rem 0;table-layout:auto}th{text-align:left;background:var(--wash);font-weight:650}th,td{padding:.65rem .7rem;border-bottom:1px solid var(--line);vertical-align:top;overflow-wrap:anywhere}thead{display:table-header-group}pre{background:#f2f5f6;padding:1rem;border:1px solid #dfe7e8;white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;font:13px/1.6 Consolas,monospace}code{font: .85em/1.6 Consolas,monospace;overflow-wrap:anywhere}pre code{font-size:inherit}blockquote{border-left:3px solid var(--accent);padding-left:1rem;margin-left:0;color:var(--muted)}.search{padding:.65rem;border:1px solid #789399;border-radius:4px;width:100%;font:inherit}.search-status{font-size:.8rem;color:var(--muted)}footer{border-top:1px solid var(--line);padding:2rem 5vw;margin-top:3rem;font-size:.85rem;color:var(--muted);display:flex;gap:2rem;justify-content:space-between;flex-wrap:wrap}.small{font-size:.9rem;color:var(--muted)}.api-entry{padding:1.2rem 0;border-top:1px solid var(--line)}.api-entry h3{overflow-wrap:anywhere}.method{font-size:.76rem;font-weight:750;color:var(--accent)}details{margin:1rem 0}summary{cursor:pointer;font-weight:650}.index-columns{columns:2;column-gap:2rem}.index-columns li{break-inside:avoid}
 @media(max-width:850px){.grid{grid-template-columns:1fr 1fr}.split{grid-template-columns:1fr}.doclayout{grid-template-columns:1fr;gap:1rem}.toc{position:static;max-height:none}.hero{padding-top:3rem}header nav{margin-left:0}.docbody h1{font-size:2.2rem}}
@@ -8,10 +8,20 @@ Manual | Townlight Beta 1</title><style>
 main,.toc a,.hero h1{overflow-wrap:anywhere}
 @page{size:Letter;margin:.7in .65in .75in}
 @media print{html{scroll-behavior:auto}body{font:10.5pt/1.45 Arial,sans-serif;color:#172f39}header,footer,.search-area,.screen-only{display:none}.doclayout{display:block;padding:0;max-width:none}.toc{position:static;max-height:none;overflow:visible;font-size:10pt;break-after:page}.toc>h2{border:0}.toc ul{columns:2;column-gap:.3in}.toc li{break-inside:avoid}.docbody h1{font-size:30pt}.docbody h2{font-size:19pt;break-after:avoid;padding-top:.15in;margin-top:.35in}.docbody h3{font-size:12pt;break-after:avoid}.docbody h4{break-after:avoid}p{orphans:3;widows:3}pre{font-size:8.2pt;line-height:1.4;padding:.1in;break-inside:auto}table{font-size:8.4pt;line-height:1.35}th,td{padding:.06in .07in}tr{break-inside:avoid}.flow{max-height:6in;object-fit:contain;break-inside:avoid}a{color:#172f39;text-decoration:underline}.cover{break-after:page;padding-top:1in}.cover .edition{font-size:11pt}.cover h1{font-size:32pt}.cover .lead{font-size:14pt}.api-entry{break-inside:auto}.api-entry h3{break-after:avoid}.index-columns{columns:2}}
-</style></head><body><aside aria-label="Beta download" style="padding:1rem 5%;background:#e5f3ec;color:#123b30"><strong>Townlight Beta 1</strong> · <a href="https://github.com/townlight/townlight/releases/tag/townlight-beta-1-station-delivery">Signed Windows installer, source, documentation and acceptance</a>. Updated Station live feed and recorded-video delivery; existing component versions retained. <a href="https://townlight.github.io/versions.html">Candidate identity and retained baseline evidence</a>.</aside><a class="skip" href="#main">Skip to content</a><header><a class="brand" href="../index.html">townlight<span aria-hidden="true"> ·</span></a><span class="edition">Townlight Beta 1</span><nav aria-label="Main"><a href="../index.html#products">Products</a><a href="../manuals/suite.html">Suite manual</a><a href="../reference/index.html">Technical reference</a><a href="../terms.html">Terms and license</a></nav></header>
-<main id="main"><div class="cover wrap"><div class="hero"><div class="edition">Townlight Beta 1</div><h1>Townlight
-Station
-Manual</h1><p class="lead">Staff guide and technical reference</p><p class="docmeta">Documentation edition 30 October 2026<br>Existing component versions retained<br>Signed suite installer 1.6.0.1<br>Private beta documentation companion</p></div></div><div class="doclayout"><aside class="toc" aria-label="Table of contents"><h2>Contents</h2><div class="search-area"><label for="find-section">Find a section</label><input class="search" id="find-section" type="search" placeholder="Type a heading"><p class="search-status" aria-live="polite"></p></div><ul>
+</style></head>
+<body><a class="skip" href="#main">Skip to content</a>
+<header><a class="brand" href="../index.html">Townlight</a>
+<nav aria-label="Main"><a href="../manuals/suite.html">Suite manual</a>
+<a href="../versions.html">Versions and candidate status</a>
+<a href="../terms.html">Terms and license</a></nav></header>
+<main id="main" class="reading wrap"><p class="edition">Naming, Access and Notice source candidate · 2 November 2026</p>
+<p>Prepared documentation. Build, signing, installed acceptance and publication remain pending.</p>
+
+<nav id="TOC" role="doc-toc">
+<ul>
+<li><a href="#townlight-station-manual"
+id="toc-townlight-station-manual">Townlight Station Manual</a>
+<ul>
 <li><a href="#using-this-manual" id="toc-using-this-manual">Using this
 manual</a></li>
 <li><a href="#beta-identity" id="toc-beta-identity">Beta
@@ -61,16 +71,16 @@ id="toc-completed-recordings-on-youtube-and-live-civiccast-coverage">Completed
 recordings on YouTube and live CivicCast coverage</a></li>
 <li><a href="#delivery-subject-index"
 id="toc-delivery-subject-index">Delivery subject index</a></li>
-</ul></aside><article class="docbody"><blockquote>
-<p><strong>Townlight Beta 1 — Station delivery update, 31 October
-2026.</strong> <a
-href="https://github.com/townlight/townlight/releases/tag/townlight-beta-1-station-delivery">Signed
-Windows installer, source, documentation and acceptance</a>. This
-edition documents the Sandbox-tested Station delivery additions.
-Existing component versions are retained. Earlier baseline results
-remain identified as historical evidence; the new acceptance report
-identifies the new installer.</p>
-</blockquote>
+</ul></li>
+</ul>
+</nav>
+<h1 id="townlight-station-manual">Townlight Station Manual</h1>
+<p>Prepared naming, Access and Notice candidate — 2 November 2026.
+Station’s existing Beta 1 Python service remains
+<code>townlight-station</code> 0.3.0 / <code>townlight_station</code>.
+Its separate Rust development line and standalone CivicCast are outside
+this migration. Exact signed Windows installed acceptance and
+publication for the coordinated candidate remain pending.</p>
 <h2 id="using-this-manual">Using this manual</h2>
 <p>Townlight Station helps station operators, clerks, records staff and
 deployment administrators. Station adapts a pinned CivicCast media
@@ -100,64 +110,61 @@ included with the same documentation companion.</p>
 </thead>
 <tbody>
 <tr>
-<td>Public documentation identity</td>
-<td>Townlight Beta 1</td>
+<td>Documentation</td>
+<td>Townlight naming, Access and Notice candidate</td>
 </tr>
 <tr>
-<td>Installer version</td>
-<td>1.6.0.1</td>
+<td>Intended installer</td>
+<td>1.7.0.1; build and installed acceptance pending</td>
 </tr>
 <tr>
-<td>Product component</td>
-<td>townlight-station 0.3.0</td>
+<td>Desktop source</td>
+<td>1.7.0-1</td>
 </tr>
 <tr>
-<td>Native desktop source version</td>
-<td>1.6.0-1</td>
+<td>Runtime distribution</td>
+<td>townlight-runtime 0.2.0</td>
 </tr>
 <tr>
-<td>Candidate artifact identity</td>
-<td>Station delivery update; use the release SHA256SUMS.txt</td>
+<td>Station distribution/import</td>
+<td>townlight-station 0.3.0 / townlight_station</td>
 </tr>
 <tr>
-<td>Corresponding source</td>
-<td>Updated Station delivery candidate source companion</td>
+<td>Acceptance composition</td>
+<td>Fresh Windows x64; inspections-preview; Station configured
+separately</td>
 </tr>
 <tr>
-<td>Current owned software license</td>
+<td>Candidate hashes/signature</td>
+<td>Pending new build and signing</td>
+</tr>
+<tr>
+<td>Owned software license</td>
 <td>AGPL-3.0-only</td>
-</tr>
-<tr>
-<td>Supported acceptance profile</td>
-<td>Windows x64 fresh install; inspections-preview; separate Station
-configuration</td>
 </tr>
 </tbody>
 </table>
-<p>“Townlight Beta 1” identifies this coordinated beta delivery. It does
-not renumber the installer, native binary, Python packages or historical
-receipts. Component versions may differ. This edition accompanies the
-newly packaged and signed MSI containing the Station delivery additions.
-The native desktop and other native payload files retain their accepted
-signed bytes. Historical release pages and manuals describe their own
-versions and are not the download instructions for this Station delivery
-candidate.</p>
+<p>This edition updates the paired-runtime instructions for the naming
+candidate. It does not rename historical Station artifacts or claim new
+Station software features. Use an empty database and fresh profile; no
+in-place legacy upgrade or old import shim is supported. Preserve
+existing city data and the prior release. The approved profile path
+remains <code>%LOCALAPPDATA%\CivicSuite</code> for that path only.</p>
 <h2 id="first-run">First run</h2>
 <ol type="1">
-<li>Download the signed Windows installer and matching
-source/documentation companions from the <a
-href="https://github.com/townlight/townlight/releases/tag/townlight-beta-1-station-delivery">Station
-delivery release</a>. Use that release’s checksums and publisher
-signature to identify the candidate.</li>
+<li>When the identified new signed candidate and corresponding-source
+companion are available, verify their exact release identity with the
+beta coordinator. The landing pages in this documentation are not an
+installer download service.</li>
 <li>On the intended fresh Windows test installation, verify the MSI hash
 and publisher signature before installing. Preserve unrelated profiles
-and recovery material. This candidate has fresh-install acceptance;
-historical in-place upgrades are unverified.</li>
+and recovery material. Installed acceptance for this naming candidate
+remains pending; no in-place legacy upgrade is supported.</li>
 <li>Launch Townlight under the intended named Windows account. Choose
 the storage folders. Select <strong>Townlight Inspections
-candidate</strong> (<code>inspections-preview</code>) for all eight
-desktop products. A narrower default selection will not expose all
-workspaces.</li>
+candidate</strong> (<code>inspections-preview</code>) for the bounded
+desktop composition, including Access and Notice. A narrower default
+selection will not expose all workspaces.</li>
 <li>Enter the city profile, time zone and contacts. Create the first
 named local administrator, sign in and choose protected backup storage.
 <strong>Continue without local AI</strong> is valid for the
@@ -270,7 +277,7 @@ remote identity, SCM commissioning, CDN delivery and long-duration field
 quality are not certified. Station does not perform automatic meeting
 speech recognition.</p>
 <h2 id="architecture">Architecture</h2>
-<p><img class="flow" src="../assets/station-architecture.svg" alt="Townlight Station architecture and evidence flow"></p>
+<p><img class="flow" src="docs/beta-1/assets/station-architecture.svg" alt="Townlight Station architecture and evidence flow"></p>
 <p>The drawing shows the principal staff/evidence path. Native commands
 carry trusted identity to Python business services; PostgreSQL and
 retained original files hold durable state. A downstream copy does not
@@ -461,11 +468,12 @@ machine’s specification into a supported minimum. Installer size is
 2,092,122,112 bytes before installation; allow additional disk for
 extracted runtime, database, originals, exports, media and backups.
 Select equipment/storage after sizing those actual workloads.</p>
-<p>The exact <a href="../reference/runtime-payload-lock.json">runtime
-payload lock</a> records pinned files, sizes and hashes. The <a
-href="../reference/component-metadata.json">component metadata</a>
-records shipped dependency declarations. These references are more
-precise than a manually copied dependency list. Third-party and
+<p>The exact <a
+href="../reference/runtime-payload-lock.json">runtime payload
+lock</a> records pinned files, sizes and hashes. The <a
+href="../reference/component-metadata.json">component
+metadata</a> records shipped dependency declarations. These references
+are more precise than a manually copied dependency list. Third-party and
 historical license notices must accompany their matching payloads.</p>
 <h3 id="station-operator-and-media-components">Station operator and
 media components</h3>
@@ -588,13 +596,13 @@ class="sourceCode powershell"><code class="sourceCode powershell"><span id="cb4-
 <span id="cb4-4"><a href="#cb4-4" aria-hidden="true" tabindex="-1"></a><span class="va">$nativePassword</span> <span class="op">=</span> <span class="op">(</span><span class="fu">Get-Content</span> <span class="op">-</span>LiteralPath <span class="op">(</span><span class="fu">Join-Path</span> <span class="va">$profilePath</span> <span class="st">&#39;config\secrets\postgres-password.txt&#39;</span><span class="op">)</span> <span class="op">-</span>Raw<span class="op">).</span><span class="fu">Trim</span><span class="op">()</span></span>
 <span id="cb4-5"><a href="#cb4-5" aria-hidden="true" tabindex="-1"></a><span class="va">$encodedNative</span> <span class="op">=</span> <span class="op">[</span>uri<span class="op">]::</span>EscapeDataString<span class="op">(</span><span class="va">$nativePassword</span><span class="op">)</span></span>
 <span id="cb4-6"><a href="#cb4-6" aria-hidden="true" tabindex="-1"></a><span class="va">$env</span><span class="op">:</span><span class="va">TOWNLIGHT_PROFILE_ROOT</span> <span class="op">=</span> <span class="va">$profilePath</span></span>
-<span id="cb4-7"><a href="#cb4-7" aria-hidden="true" tabindex="-1"></a><span class="va">$env</span><span class="op">:</span><span class="va">CIVICSUITE_DATA_DIR</span> <span class="op">=</span> <span class="fu">Join-Path</span> <span class="va">$profilePath</span> <span class="st">&#39;Data&#39;</span></span>
-<span id="cb4-8"><a href="#cb4-8" aria-hidden="true" tabindex="-1"></a><span class="va">$env</span><span class="op">:</span><span class="va">CIVICSUITE_FILE_STORAGE_DIR</span> <span class="op">=</span> <span class="fu">Join-Path</span> <span class="va">$profilePath</span> <span class="st">&#39;Data\files&#39;</span></span>
-<span id="cb4-9"><a href="#cb4-9" aria-hidden="true" tabindex="-1"></a><span class="va">$env</span><span class="op">:</span><span class="va">DATABASE_URL</span> <span class="op">=</span> <span class="st">&quot;postgresql+asyncpg://civicsuite:</span><span class="pp">${</span><span class="va">encodedNative</span><span class="pp">}</span><span class="st">@127.0.0.1:15432/civicsuite&quot;</span></span>
+<span id="cb4-7"><a href="#cb4-7" aria-hidden="true" tabindex="-1"></a><span class="va">$env</span><span class="op">:</span><span class="va">TOWNLIGHT_DATA_DIR</span> <span class="op">=</span> <span class="fu">Join-Path</span> <span class="va">$profilePath</span> <span class="st">&#39;Data&#39;</span></span>
+<span id="cb4-8"><a href="#cb4-8" aria-hidden="true" tabindex="-1"></a><span class="va">$env</span><span class="op">:</span><span class="va">TOWNLIGHT_FILE_STORAGE_DIR</span> <span class="op">=</span> <span class="fu">Join-Path</span> <span class="va">$profilePath</span> <span class="st">&#39;Data\files&#39;</span></span>
+<span id="cb4-9"><a href="#cb4-9" aria-hidden="true" tabindex="-1"></a><span class="va">$env</span><span class="op">:</span><span class="va">DATABASE_URL</span> <span class="op">=</span> <span class="st">&quot;postgresql+asyncpg://townlight:</span><span class="pp">${</span><span class="va">encodedNative</span><span class="pp">}</span><span class="st">@127.0.0.1:15432/townlight&quot;</span></span>
 <span id="cb4-10"><a href="#cb4-10" aria-hidden="true" tabindex="-1"></a><span class="va">$env</span><span class="op">:</span><span class="va">TOWNLIGHT_PRODUCT_PROFILE</span> <span class="op">=</span> <span class="st">&#39;inspections-preview&#39;</span></span>
 <span id="cb4-11"><a href="#cb4-11" aria-hidden="true" tabindex="-1"></a><span class="va">$env</span><span class="op">:</span><span class="va">PORTAL_MODE</span> <span class="op">=</span> <span class="st">&#39;private&#39;</span></span>
-<span id="cb4-12"><a href="#cb4-12" aria-hidden="true" tabindex="-1"></a><span class="va">$env</span><span class="op">:</span><span class="va">CIVICSUITE_RUNTIME_HOST</span> <span class="op">=</span> <span class="st">&#39;127.0.0.1&#39;</span></span>
-<span id="cb4-13"><a href="#cb4-13" aria-hidden="true" tabindex="-1"></a><span class="va">$env</span><span class="op">:</span><span class="va">CIVICSUITE_RUNTIME_PORT</span> <span class="op">=</span> <span class="st">&#39;15481&#39;</span></span>
+<span id="cb4-12"><a href="#cb4-12" aria-hidden="true" tabindex="-1"></a><span class="va">$env</span><span class="op">:</span><span class="va">TOWNLIGHT_RUNTIME_HOST</span> <span class="op">=</span> <span class="st">&#39;127.0.0.1&#39;</span></span>
+<span id="cb4-13"><a href="#cb4-13" aria-hidden="true" tabindex="-1"></a><span class="va">$env</span><span class="op">:</span><span class="va">TOWNLIGHT_RUNTIME_PORT</span> <span class="op">=</span> <span class="st">&#39;15481&#39;</span></span>
 <span id="cb4-14"><a href="#cb4-14" aria-hidden="true" tabindex="-1"></a><span class="va">$env</span><span class="op">:</span><span class="va">TOWNLIGHT_STATION_URL</span> <span class="op">=</span> <span class="st">&#39;http://127.0.0.1:8756&#39;</span></span>
 <span id="cb4-15"><a href="#cb4-15" aria-hidden="true" tabindex="-1"></a><span class="va">$env</span><span class="op">:</span><span class="va">TOWNLIGHT_STATION_SUITE_URL</span> <span class="op">=</span> <span class="st">&#39;http://127.0.0.1:15481&#39;</span></span>
 <span id="cb4-16"><a href="#cb4-16" aria-hidden="true" tabindex="-1"></a><span class="va">$env</span><span class="op">:</span><span class="va">TOWNLIGHT_STATION_DATA_ROOT</span> <span class="op">=</span> <span class="fu">Join-Path</span> <span class="va">$stationRoot</span> <span class="st">&#39;data&#39;</span></span>
@@ -632,7 +640,7 @@ class="sourceCode powershell"><code class="sourceCode powershell"><span id="cb5-
 <span id="cb5-8"><a href="#cb5-8" aria-hidden="true" tabindex="-1"></a><span class="vs">url = make_url(os.environ[&#39;TOWNLIGHT_STATION_DATABASE_URL&#39;])</span></span>
 <span id="cb5-9"><a href="#cb5-9" aria-hidden="true" tabindex="-1"></a><span class="vs">profile = Path(os.environ[&#39;TOWNLIGHT_PROFILE_ROOT&#39;])</span></span>
 <span id="cb5-10"><a href="#cb5-10" aria-hidden="true" tabindex="-1"></a><span class="vs">password = (profile/&#39;config/secrets/postgres-password.txt&#39;).read_text().strip()</span></span>
-<span id="cb5-11"><a href="#cb5-11" aria-hidden="true" tabindex="-1"></a><span class="vs">conn = psycopg2.connect(host=&#39;127.0.0.1&#39;, port=15432, user=&#39;civicsuite&#39;,</span></span>
+<span id="cb5-11"><a href="#cb5-11" aria-hidden="true" tabindex="-1"></a><span class="vs">conn = psycopg2.connect(host=&#39;127.0.0.1&#39;, port=15432, user=&#39;townlight&#39;,</span></span>
 <span id="cb5-12"><a href="#cb5-12" aria-hidden="true" tabindex="-1"></a><span class="vs">                        password=password, dbname=&#39;postgres&#39;)</span></span>
 <span id="cb5-13"><a href="#cb5-13" aria-hidden="true" tabindex="-1"></a><span class="vs">conn.autocommit = True</span></span>
 <span id="cb5-14"><a href="#cb5-14" aria-hidden="true" tabindex="-1"></a><span class="vs">try:</span></span>
@@ -686,7 +694,7 @@ class="sourceCode powershell"><code class="sourceCode powershell"><span id="cb6-
 <span id="cb6-18"><a href="#cb6-18" aria-hidden="true" tabindex="-1"></a>  <span class="op">}</span></span>
 <span id="cb6-19"><a href="#cb6-19" aria-hidden="true" tabindex="-1"></a>  <span class="cf">throw</span> <span class="st">&quot;Readiness not established: </span><span class="va">$url</span><span class="st">; inspect the owned logs&quot;</span></span>
 <span id="cb6-20"><a href="#cb6-20" aria-hidden="true" tabindex="-1"></a><span class="op">}</span></span>
-<span id="cb6-21"><a href="#cb6-21" aria-hidden="true" tabindex="-1"></a><span class="va">$suite</span> <span class="op">=</span> Start-StationRole <span class="st">&#39;paired-suite&#39;</span> <span class="op">@(</span><span class="st">&#39;-B&#39;</span><span class="op">,</span><span class="st">&#39;-m&#39;</span><span class="op">,</span><span class="st">&#39;civicsuite_runtime.services&#39;</span><span class="op">)</span></span>
+<span id="cb6-21"><a href="#cb6-21" aria-hidden="true" tabindex="-1"></a><span class="va">$suite</span> <span class="op">=</span> Start-StationRole <span class="st">&#39;paired-suite&#39;</span> <span class="op">@(</span><span class="st">&#39;-B&#39;</span><span class="op">,</span><span class="st">&#39;-m&#39;</span><span class="op">,</span><span class="st">&#39;townlight_runtime.services&#39;</span><span class="op">)</span></span>
 <span id="cb6-22"><a href="#cb6-22" aria-hidden="true" tabindex="-1"></a>Wait-StationReady <span class="st">&#39;http://127.0.0.1:15481/ready&#39;</span> <span class="va">$suite</span></span>
 <span id="cb6-23"><a href="#cb6-23" aria-hidden="true" tabindex="-1"></a><span class="va">$api</span> <span class="op">=</span> Start-StationRole <span class="st">&#39;station-api&#39;</span> <span class="op">@(</span><span class="st">&#39;-B&#39;</span><span class="op">,</span><span class="st">&#39;-m&#39;</span><span class="op">,</span><span class="st">&#39;townlight_station.cli&#39;</span><span class="op">,</span><span class="st">&#39;serve&#39;</span><span class="op">,</span><span class="st">&#39;--port&#39;</span><span class="op">,</span><span class="st">&#39;8756&#39;</span><span class="op">)</span></span>
 <span id="cb6-24"><a href="#cb6-24" aria-hidden="true" tabindex="-1"></a>Wait-StationReady <span class="st">&#39;http://127.0.0.1:8756/health&#39;</span> <span class="va">$api</span></span>
@@ -842,11 +850,11 @@ completed recording’s hash. A mismatched hash must fail. Repeating the
 identical completed handoff is idempotent; it does not create a release
 copy or fulfill a request.</p>
 <h3 id="complete-technical-contract">Complete technical contract</h3>
-<p>Read the <a href="../api/station.html">Station API reference</a> for
-every documented operation, request field, constraint, response
-declaration and source supplement. Download the <a
-href="../api/station-openapi.json">OpenAPI JSON</a> for tools. For
-Station this is the suite-side schema only; its separate service
+<p>Read the <a href="../api/station.html">Station API
+reference</a> for every documented operation, request field, constraint,
+response declaration and source supplement. Download the <a
+href="../api/station-openapi.json">OpenAPI JSON</a> for tools.
+For Station this is the suite-side schema only; its separate service
 contract is documented in the API supplement. The <a
 href="../reference/index.html">reference directory</a> includes
 configuration/source inventories, dependency declarations, native
@@ -874,9 +882,9 @@ class="sourceCode json"><code class="sourceCode json"><span id="cb15-1"><a href=
 <p>Use a job ID returned by that transcription service. This example
 does not create a Townlight record or bypass its review/Records handoff.
 The exact optional adapter tool signatures are supplied in the <a
-href="../reference/mcp.html">MCP source reference</a>. Station meeting
-capture does not become live speech recognition because this optional
-donor adapter exists.</p>
+href="../reference/mcp.html">MCP source reference</a>. Station
+meeting capture does not become live speech recognition because this
+optional donor adapter exists.</p>
 <h2 id="security-and-permissions">Security and permissions</h2>
 <p>Use your own named account and save before leaving a screen. A saved
 draft is durable; unsaved form text may not be. If a write has an
@@ -917,8 +925,10 @@ backup.</p>
 controls. If the result says <strong>Restore needs service
 start</strong>, use <strong>Start</strong>, then <strong>Check</strong>,
 and reopen a known record. Do not repeat restore merely because services
-need to start. The fresh-profile acceptance verified that a fulfilled
-request survived restore and a post-backup marker did not.</p>
+need to start. The prior accepted profile exercise verified
+request/marker recovery for its identified artifact. Repeat the required
+recovery proof for this changed signed candidate before calling it
+accepted.</p>
 <p>Keep Station’s dedicated database and media evidence together in its
 own backup. Core’s native-profile backup must not be assumed to include
 an external Station data directory. Stop writers during a coordinated
@@ -1016,57 +1026,30 @@ completed media.</td>
 </table>
 <h2 id="verified-workflows-and-limits">Verified workflows and
 limits</h2>
-<table>
-<colgroup>
-<col style="width: 33%" />
-<col style="width: 33%" />
-<col style="width: 33%" />
-</colgroup>
-<thead>
-<tr>
-<th>Product</th>
-<th>Recorded result</th>
-<th>Precisely exercised</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td>Station</td>
-<td>PASS</td>
-<td>Actual native staff session and normally created meeting; headless
-operator live start/stop, decoded generated audio/video, served hash,
-private Records readback, idempotent locked original and logout.</td>
-</tr>
-</tbody>
-</table>
-<p>The following baseline results come from the previously accepted
-signed candidate’s fresh normal-profile Sandbox exercise: real native
-IPC/HTTP/PostgreSQL and selected headless controls. All accounts, source
-bundles and media were synthetic. The guest install/uninstall and
-recovery passed, and the owned Sandbox stopped. No host installed
-application or standalone CivicCast was changed. Those baseline receipts
-are retained for unchanged workflows. The accompanying ACCEPTANCE.md
-records the separate installed verification and exact identity of this
-new Station delivery candidate.</p>
-<p>The <a href="../reference/workflow-matrix.json">workflow matrix</a>
-identifies raw receipt filenames. The <a
-href="../reference/sandbox-evidence-index.json">evidence index</a>
-retains their original hashes; raw receipts remain in the private beta
-handoff rather than being silently republished with the documentation
-site.</p>
-<p>The limits remain: actual city field acceptance and equipment/network
-commissioning; Station automatic provisioning/SCM commissioning; every
-UI/role combination; field recognition accuracy; and historical in-place
-upgrades are not certified. They are not five invented feature
-requirements. Fresh-install controlled beta handoff remains the accepted
-scope. This package makes no city-deployment, publication or
-general-availability claim.</p>
+<p>The original accepted Station manual and its workflow claims are
+preserved <a href="../history/station/pre-naming-2026-11/USER-MANUAL.md">byte
+for byte</a>. Those results identify earlier artifacts; they are not
+installed signoff for this naming candidate. The current package retains
+the same Beta Python service and pinned CivicCast donor. Source presence
+and a successful wheel import do not establish the required Windows
+Meetings → Station → Records handoff.</p>
+<p>The new candidate must verify actual saved meeting/agenda context,
+authorized Station capture and stop, completed media/hash readback,
+private Records handoff, idempotency, authorization/logout, persistence
+and the agreed recovery path. Its ACCEPTANCE.md must distinguish new
+proof from justified reused evidence. This source documentation does not
+certify a signed MSI, live YouTube upload, physical PEG broadcast, city
+deployment or long-duration commissioning.</p>
+<p>The separate provisioning/service boundary and existing
+external-service limits remain as described below. Staff remain
+responsible for official release and publication decisions. No
+additional provider or selected-model change is made.</p>
 <h2 id="terms-of-service-and-license">Terms of service and license</h2>
 <h3 id="scope-and-status">Scope and status</h3>
 <p>These terms describe the Townlight Beta 1 software and this
-documentation package. This is a public beta software distribution. It
-does not create a hosted-service subscription or a city deployment
-agreement. No uptime commitment, support response time, indemnity,
+documentation package. This is a locally prepared private beta, not a
+hosted-service subscription, a city deployment agreement or a public
+release. No uptime commitment, support response time, indemnity,
 data-processing agreement or paid service is created by these documents.
 A separate signed agreement, if any, governs services it actually
 provides.</p>
@@ -1100,15 +1083,16 @@ credential or record is required to exercise these examples in an
 isolated test environment.</p>
 <h3 id="local-operation-and-external-processors">Local operation and
 external processors</h3>
-<p>The accepted beta workflow is local and uses named staff accounts.
-Station has separate storage and credentials. Configure backup
-destinations and optional model/network providers deliberately. A
-configured external provider may receive submitted prompts, images or
-audio according to that configuration and provider’s terms; this
-documentation does not promise that every optional configuration is
-offline. An email outbox or local public view does not establish
-external delivery or an internet deployment. This static documentation
-site has no analytics, account collection or remote font dependency.</p>
+<p>The bounded beta workflow uses named staff accounts; current
+installed acceptance is pending. Station has separate storage and
+credentials. Configure backup destinations and optional model/network
+providers deliberately. A configured external provider may receive
+submitted prompts, images or audio according to that configuration and
+provider’s terms; this documentation does not promise that every
+optional configuration is offline. An email outbox or local public view
+does not establish external delivery or an internet deployment. This
+static documentation site has no analytics, account collection or remote
+font dependency.</p>
 <h3 id="staff-decisions-and-source-applicability">Staff decisions and
 source applicability</h3>
 <p>Staff verify the jurisdiction, source currency, permissions,
@@ -1322,11 +1306,12 @@ href="#take-a-live-override-and-return">Take a live override and
 return</a>.</li>
 </ul>
 <h2 id="source-and-document-control">Source and document control</h2>
-<p>This edition is authored from the immutable corresponding-source
-companion, the generated installed-domain schema and the retained
-workflow receipts. Component version numbers are retained. The private
-MSI has its own new hash and signing receipt. Historical release tags
-and their artifacts remain unchanged.</p>
+<p>This edition carries forward the accepted Station operating
+procedures and updates paired-runtime names from the current naming
+source candidate. Historical evidence remains in the original manual.
+Candidate source commits, MSI signature/hash and exact installed
+acceptance must be finalized separately; no current signing receipt or
+installed-domain proof is implied by rendering this manual.</p>
 <h3 id="workflow-subject-index">Workflow subject index</h3>
 <ul>
 <li><p><strong>Capture and stop</strong> — <a href="#workflow-4">Daily
@@ -1345,15 +1330,17 @@ href="#workflow-1">Daily workflow, step 1</a>.</p></li>
 href="#workflow-5">Daily workflow, step 5</a>.</p></li>
 <li><p><strong>Use playout deliberately</strong> — <a
 href="#workflow-7">Daily workflow, step 7</a>.</p></li>
-<li><p><a href="../reference/source-inventory.json">Source inventory and
-file hashes</a></p></li>
-<li><p><a href="../reference/component-metadata.json">All component
-metadata</a></p></li>
-<li><p><a href="../reference/desktop-domain-openapi.json">Installed
+<li><p><a href="../reference/source-inventory.json">Source
+inventory and file hashes</a></p></li>
+<li><p><a href="../reference/component-metadata.json">All
+component metadata</a></p></li>
+<li><p><a
+href="../reference/desktop-domain-openapi.json">Installed
 domain OpenAPI</a></p></li>
 <li><p><a href="../reference/workflow-matrix.json">Workflow
 matrix</a></p></li>
-<li><p><a href="../reference/AGPL-3.0.txt">Full AGPL text</a></p></li>
+<li><p><a href="../reference/AGPL-3.0.txt">Full AGPL
+text</a></p></li>
 </ul>
 <h2
 id="completed-recordings-on-youtube-and-live-civiccast-coverage">Completed
@@ -1392,7 +1379,7 @@ canonical recording remains private and byte-identical for the existing
 Records handoff. The YouTube visibility is separate from local
 playback/disclosure approval.</p>
 <h3 id="architecture-1">Architecture</h3>
-<p><img class="flow" src="../assets/station-delivery-architecture.svg" alt="Station live feed to separate CivicCast and completed recording upload to YouTube"></p>
+<p><img class="flow" src="docs/beta-1/assets/station-delivery-architecture.svg" alt="Station live feed to separate CivicCast and completed recording upload to YouTube"></p>
 <p>The sender has bounded, leaky buffers and follows the live edge after
 congestion. Its network sink shares no pipeline with the recorder. A
 late join or connection loss can leave a live coverage gap, while the
@@ -1597,5 +1584,5 @@ live feed</a></li>
 <li>YouTube: explicit completed recording upload; visibility; receipt
 and reconciliation.</li>
 <li>Schema4: durable upload intent; existing evidence retained.</li>
-</ul></article></div></main><footer><span>Townlight Beta 1 · Local private-beta documentation · AGPL-3.0-only</span><span><a href="../versions.html">Exact versions and candidate</a> · CivicCast remains separate</span></footer>
-<script>const search=document.getElementById('find-section');if(search)search.addEventListener('input',()=>{const q=search.value.toLowerCase();let n=0;document.querySelectorAll('.toc li').forEach(li=>{const match=li.textContent.toLowerCase().includes(q);li.hidden=!match;if(match)n++;});document.querySelector('.search-status').textContent=q?n+' matching entries':'';});</script></body></html>
+</ul>
+</main><footer>Townlight · AGPL-3.0-only · Candidate evidence applies only to its identified artifacts.</footer></body></html>

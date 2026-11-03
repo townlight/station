@@ -84,7 +84,7 @@ href="../terms.html">Terms and full license</a></li>
 </tr>
 <tr>
 <td>Product component</td>
-<td>civicclerk 1.0.4</td>
+<td>townlight_meetings 1.0.4</td>
 </tr>
 <tr>
 <td>Native desktop source version</td>
@@ -293,7 +293,7 @@ not use a standalone product’s demo server as a substitute for the
 installed workspace.</p>
 <p>Technical deployments use <code>TOWNLIGHT_PRODUCT_PROFILE</code>,
 <code>TOWNLIGHT_PROFILE_ROOT</code>, <code>DATABASE_URL</code>,
-<code>CIVICSUITE_RUNTIME_PORT</code>, <code>PORTAL_MODE</code> and the
+<code>TOWNLIGHT_RUNTIME_PORT</code>, <code>PORTAL_MODE</code> and the
 runtime-managed secret files. Treat database URLs and native session
 proofs as secrets. The installed native domain runtime explicitly
 refuses non-loopback binding. <code>PORTAL_MODE=private</code> is the
@@ -323,7 +323,7 @@ create a user, seed a session, reveal the proof in output or bypass a
 permission check. Do not use real city data in development examples. A
 read response does not prove approval or publication.</p>
 <div class="sourceCode" id="cb2"><pre
-class="sourceCode powershell"><code class="sourceCode powershell"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a><span class="va">$profilePath</span> <span class="op">=</span> <span class="fu">Join-Path</span> <span class="va">$env</span><span class="op">:</span><span class="va">LOCALAPPDATA</span> <span class="st">&#39;CivicSuite&#39;</span></span>
+class="sourceCode powershell"><code class="sourceCode powershell"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a><span class="va">$profilePath</span> <span class="op">=</span> <span class="fu">Join-Path</span> <span class="va">$env</span><span class="op">:</span><span class="va">LOCALAPPDATA</span> <span class="st">&#39;Townlight&#39;</span></span>
 <span id="cb2-2"><a href="#cb2-2" aria-hidden="true" tabindex="-1"></a><span class="va">$sessionPath</span> <span class="op">=</span> <span class="fu">Join-Path</span> <span class="va">$profilePath</span> <span class="st">&#39;config\local-session.json&#39;</span></span>
 <span id="cb2-3"><a href="#cb2-3" aria-hidden="true" tabindex="-1"></a><span class="va">$session</span> <span class="op">=</span> <span class="fu">Get-Content</span> <span class="op">-</span>LiteralPath <span class="va">$sessionPath</span> <span class="op">-</span>Raw <span class="op">|</span> <span class="fu">ConvertFrom-Json</span></span>
 <span id="cb2-4"><a href="#cb2-4" aria-hidden="true" tabindex="-1"></a><span class="va">$headers</span> <span class="op">=</span> @<span class="op">{</span> <span class="st">&#39;X-Townlight-Session&#39;</span> <span class="op">=</span> <span class="va">$session</span><span class="op">.</span><span class="fu">session_hash</span> <span class="op">}</span></span>
@@ -337,7 +337,7 @@ service. Its authentication setup is included so it can be run
 independently under the signed-in synthetic account. If a write times
 out, inspect current records before repeating it.</p>
 <div class="sourceCode" id="cb3"><pre
-class="sourceCode powershell"><code class="sourceCode powershell"><span id="cb3-1"><a href="#cb3-1" aria-hidden="true" tabindex="-1"></a><span class="va">$profilePath</span> <span class="op">=</span> <span class="fu">Join-Path</span> <span class="va">$env</span><span class="op">:</span><span class="va">LOCALAPPDATA</span> <span class="st">&#39;CivicSuite&#39;</span></span>
+class="sourceCode powershell"><code class="sourceCode powershell"><span id="cb3-1"><a href="#cb3-1" aria-hidden="true" tabindex="-1"></a><span class="va">$profilePath</span> <span class="op">=</span> <span class="fu">Join-Path</span> <span class="va">$env</span><span class="op">:</span><span class="va">LOCALAPPDATA</span> <span class="st">&#39;Townlight&#39;</span></span>
 <span id="cb3-2"><a href="#cb3-2" aria-hidden="true" tabindex="-1"></a><span class="va">$sessionPath</span> <span class="op">=</span> <span class="fu">Join-Path</span> <span class="va">$profilePath</span> <span class="st">&#39;config/local-session.json&#39;</span></span>
 <span id="cb3-3"><a href="#cb3-3" aria-hidden="true" tabindex="-1"></a><span class="va">$session</span> <span class="op">=</span> <span class="fu">Get-Content</span> <span class="op">-</span>LiteralPath <span class="va">$sessionPath</span> <span class="op">-</span>Raw <span class="op">|</span> <span class="fu">ConvertFrom-Json</span></span>
 <span id="cb3-4"><a href="#cb3-4" aria-hidden="true" tabindex="-1"></a><span class="va">$headers</span> <span class="op">=</span> @<span class="op">{</span> <span class="st">&#39;X-Townlight-Session&#39;</span> <span class="op">=</span> <span class="va">$session</span><span class="op">.</span><span class="fu">session_hash</span> <span class="op">}</span></span>
@@ -443,10 +443,10 @@ credentials and third-party binary/model payloads. Use the recorded
 runtime lock when reproducing packaging.</p>
 <p>Relevant source contracts:</p>
 <ul>
-<li><code>civicclerk/meeting_lifecycle.py</code></li>
-<li><code>civicclerk/packet_assembly.py</code></li>
-<li><code>civicclerk/minutes.py</code></li>
-<li><code>civicsuite_runtime/meetings_bridge.py</code></li>
+<li><code>townlight_meetings/meeting_lifecycle.py</code></li>
+<li><code>townlight_meetings/packet_assembly.py</code></li>
+<li><code>townlight_meetings/minutes.py</code></li>
+<li><code>townlight_runtime/meetings_bridge.py</code></li>
 </ul>
 <p>The desktop package defines <code>npm run build</code>,
 <code>npm test</code>, <code>npm run test:browser</code> and its Tauri

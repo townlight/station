@@ -53,7 +53,7 @@ class BoundaryTests(unittest.TestCase):
     def test_explicit_station_database_required(self):
         with tempfile.TemporaryDirectory() as temp:
             cfg=self.config(Path(temp))
-            for db in ('civiccast','civicsuite','civicrecords'):
+            for db in ('civiccast','townlight','townlight_records'):
                 other=Settings(**{**cfg.__dict__,'database_url':f'postgresql+psycopg2://localhost/{db}'})
                 with self.assertRaisesRegex(ValueError,'own PostgreSQL'):
                     other.validate()

@@ -1,4 +1,4 @@
-> [Townlight Beta 1 Station delivery update](https://github.com/townlight/townlight/releases/tag/townlight-beta-1-station-delivery) · [Current manual](https://townlight.github.io/manuals/station.html). New live CivicCast feed and completed-recording YouTube uploads are documented in [DELIVERY-INTEGRATIONS.md](DELIVERY-INTEGRATIONS.md). The exact source archive preserves original private preparation notes.
+> **Naming candidate:** this unchanged Beta 1 Python service remains 0.3.0. Use [the current candidate manual](USER-MANUAL.md); signed Windows installed acceptance is pending. The [prior Station delivery release](https://github.com/townlight/townlight/releases/tag/townlight-beta-1-station-delivery) retains its original artifacts and evidence.
 
 # Townlight Station service boundary
 
