@@ -1,0 +1,528 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Townlight Access Manual | Townlight candidate</title><style>
+:root{--ink:#182f3a;--muted:#526775;--accent:#006b64;--paper:#fff;--wash:#f1f6f5;--line:#cfdddf;--warm:#dceab2}
+*{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;background:var(--paper);color:var(--ink);font:17px/1.65 "Segoe UI",Arial,sans-serif}a{color:#006b64;text-underline-offset:3px}a:hover{text-decoration-thickness:2px}a:focus-visible,button:focus-visible,input:focus-visible{outline:3px solid #a25900;outline-offset:4px}.skip{position:absolute;left:-9999px}.skip:focus{left:1rem;top:1rem;background:white;padding:1rem;z-index:20}header{border-bottom:1px solid var(--line);padding:1.1rem 5vw;display:flex;align-items:center;gap:1.5rem;flex-wrap:wrap}header .brand{font-size:1.3rem;font-weight:750;letter-spacing:-.04em;text-decoration:none;color:var(--ink)}header nav{margin-left:auto;display:flex;gap:1.25rem;flex-wrap:wrap;font-size:.88rem}.edition{font:700 .72rem/1.5 "Segoe UI",sans-serif;letter-spacing:.12em;text-transform:uppercase;color:var(--accent)}.wrap{max-width:1240px;margin:auto;padding:0 4vw}.hero{padding:5rem 0 3.2rem;max-width:950px}.hero h1{font-size:clamp(2.5rem,5vw,4.7rem);line-height:1.08;letter-spacing:-.045em;margin:1rem 0 1.5rem;font-weight:650}.hero .lead{font-size:1.26rem;max-width:780px;color:var(--muted)}.actions{display:flex;gap:.8rem;flex-wrap:wrap;margin:1.8rem 0}.button{display:inline-block;padding:.7rem 1.15rem;border:1px solid var(--accent);border-radius:4px;text-decoration:none;font-weight:650}.button.primary{background:var(--accent);color:#fff}.facts{display:flex;gap:1.5rem;flex-wrap:wrap;font-size:.85rem;color:var(--muted)}.section{padding:3rem 0;border-top:1px solid var(--line)}h2{font-size:1.8rem;line-height:1.3;letter-spacing:-.025em;margin:2.5rem 0 1rem}h3{font-size:1.18rem;line-height:1.45;margin:1.8rem 0 .7rem}h4{font-size:1rem;margin:1.3rem 0 .6rem}p{margin:.85rem 0 1rem}ul,ol{padding-left:1.6rem}li{margin:.4rem 0}strong{font-weight:650}.grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:1.6rem}.product{border-top:3px solid var(--accent);padding:1.4rem 0}.product h3{font-size:1.65rem;margin:.4rem 0}.product p{color:var(--muted)}.number{font-size:.76rem;letter-spacing:.1em}.split{display:grid;grid-template-columns:1fr 1fr;gap:3rem}.flow{width:100%;height:auto;display:block;margin:1.8rem 0}.caption{font-size:.85rem;color:var(--muted)}.reading{max-width:860px}.doclayout{display:grid;grid-template-columns:245px minmax(0,1fr);gap:3rem;max-width:1320px;margin:auto;padding:2rem 4vw}.toc{font-size:.84rem;align-self:start;position:sticky;top:1rem;max-height:90vh;overflow:auto;padding-right:.8rem}.toc ul{list-style:none;padding:0}.toc li{margin:.5rem 0}.toc li li{padding-left:.8rem}.toc a{text-decoration:none}.docbody{min-width:0}.docbody h1{font-size:2.7rem;line-height:1.1;letter-spacing:-.04em}.docbody h2{border-top:1px solid var(--line);padding-top:1.8rem}.docbody img{max-width:100%;height:auto}.docmeta{color:var(--muted);font-size:.9rem}.docbody section{scroll-margin-top:1rem}table{width:100%;border-collapse:collapse;font-size:.87rem;line-height:1.5;margin:1.3rem 0;table-layout:auto}th{text-align:left;background:var(--wash);font-weight:650}th,td{padding:.65rem .7rem;border-bottom:1px solid var(--line);vertical-align:top;overflow-wrap:anywhere}thead{display:table-header-group}pre{background:#f2f5f6;padding:1rem;border:1px solid #dfe7e8;white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;font:13px/1.6 Consolas,monospace}code{font: .85em/1.6 Consolas,monospace;overflow-wrap:anywhere}pre code{font-size:inherit}blockquote{border-left:3px solid var(--accent);padding-left:1rem;margin-left:0;color:var(--muted)}.search{padding:.65rem;border:1px solid #789399;border-radius:4px;width:100%;font:inherit}.search-status{font-size:.8rem;color:var(--muted)}footer{border-top:1px solid var(--line);padding:2rem 5vw;margin-top:3rem;font-size:.85rem;color:var(--muted);display:flex;gap:2rem;justify-content:space-between;flex-wrap:wrap}.small{font-size:.9rem;color:var(--muted)}.api-entry{padding:1.2rem 0;border-top:1px solid var(--line)}.api-entry h3{overflow-wrap:anywhere}.method{font-size:.76rem;font-weight:750;color:var(--accent)}details{margin:1rem 0}summary{cursor:pointer;font-weight:650}.index-columns{columns:2;column-gap:2rem}.index-columns li{break-inside:avoid}
+@media(max-width:850px){.grid{grid-template-columns:1fr 1fr}.split{grid-template-columns:1fr}.doclayout{grid-template-columns:1fr;gap:1rem}.toc{position:static;max-height:none}.hero{padding-top:3rem}header nav{margin-left:0}.docbody h1{font-size:2.2rem}}
+@media(max-width:520px){.grid{grid-template-columns:1fr}.wrap{padding:0 6vw}header{padding:1rem 6vw}.hero h1{font-size:2.6rem}.index-columns{columns:1}table{font-size:.78rem}th,td{padding:.45rem}.doclayout{padding:1rem 6vw}.facts{gap:.5rem}}
+main,.toc a,.hero h1{overflow-wrap:anywhere}
+@page{size:Letter;margin:.7in .65in .75in}
+@media print{html{scroll-behavior:auto}body{font:10.5pt/1.45 Arial,sans-serif;color:#172f39}header,footer,.search-area,.screen-only{display:none}.doclayout{display:block;padding:0;max-width:none}.toc{position:static;max-height:none;overflow:visible;font-size:10pt;break-after:page}.toc>h2{border:0}.toc ul{columns:2;column-gap:.3in}.toc li{break-inside:avoid}.docbody h1{font-size:30pt}.docbody h2{font-size:19pt;break-after:avoid;padding-top:.15in;margin-top:.35in}.docbody h3{font-size:12pt;break-after:avoid}.docbody h4{break-after:avoid}p{orphans:3;widows:3}pre{font-size:8.2pt;line-height:1.4;padding:.1in;break-inside:auto}table{font-size:8.4pt;line-height:1.35}th,td{padding:.06in .07in}tr{break-inside:avoid}.flow{max-height:6in;object-fit:contain;break-inside:avoid}a{color:#172f39;text-decoration:underline}.cover{break-after:page;padding-top:1in}.cover .edition{font-size:11pt}.cover h1{font-size:32pt}.cover .lead{font-size:14pt}.api-entry{break-inside:auto}.api-entry h3{break-after:avoid}.index-columns{columns:2}}
+</style></head>
+<body><a class="skip" href="#main">Skip to content</a>
+<header><a class="brand" href="../index.html">Townlight</a>
+<nav aria-label="Main"><a href="../manuals/suite.html">Suite manual</a>
+<a href="../versions.html">Versions and candidate status</a>
+<a href="../terms.html">Terms and license</a></nav></header>
+<main id="main" class="reading wrap"><p class="edition">Naming, Access and Notice source candidate · 2 November 2026</p>
+<p>Prepared documentation. Build, signing, installed acceptance and publication remain pending.</p>
+
+<nav id="TOC" role="doc-toc">
+<ul>
+<li><a href="#townlight-access-user-manual"
+id="toc-townlight-access-user-manual">Townlight Access User Manual</a>
+<ul>
+<li><a href="#windows-staff-workflow-0.5.0-candidate"
+id="toc-windows-staff-workflow-0.5.0-candidate">Windows staff workflow —
+0.5.0 candidate</a></li>
+<li><a href="#standalone-support-service"
+id="toc-standalone-support-service">Standalone support service</a></li>
+<li><a href="#part-1-for-civic-staff"
+id="toc-part-1-for-civic-staff">Part 1 — For Civic Staff</a></li>
+<li><a href="#part-2-for-it-technical-staff"
+id="toc-part-2-for-it-technical-staff">Part 2 — For IT &amp; Technical
+Staff</a></li>
+</ul></li>
+</ul>
+</nav>
+<p><a id="townlight_access-user-manual"></a></p>
+<h1 id="townlight-access-user-manual">Townlight Access User Manual</h1>
+<h2 id="windows-staff-workflow-0.5.0-candidate">Windows staff workflow —
+0.5.0 candidate</h2>
+<p>This candidate is prepared; exact signed-installer acceptance is
+pending. It supports a fresh profile only. Keep the previous release
+with any existing unmarked profile. The compatibility profile directory
+remains <code>%LOCALAPPDATA%\CivicSuite</code>; the new program refuses
+to adopt existing unmarked city data.</p>
+<ol type="1">
+<li>Sign in with an account allowed to use Access and enable the Access
+capability. Open Accessibility and enter the actual source title, text,
+language and image-description information.</li>
+<li>Save the review. Reopen it to inspect the source, deterministic
+findings and any saved local-model advice, model identity and outcome.
+Advice is not a certified accessibility finding or approval.</li>
+<li>For plain-language or translation work, enter the actual source and
+request a draft. The Windows path uses the suite’s configured local
+model. Saved drafts retain source/output, language, model/outcome, staff
+actor/time and the requirement for qualified human review. An
+unavailable-model sample is labeled as a sample; it is not a translation
+of the input.</li>
+<li>Reopen saved drafts from Access, including after restarting the app.
+Select Export record on the desired review or draft. The desktop writes
+a Markdown record and verifies its content hash and companion manifest
+before reporting completion. The fenced JSON is the complete record,
+including source, output/advice and relevant provenance; ordinary HTML
+rendering is unnecessary to read it.</li>
+<li>To hand the record to Records, open the intended Records request,
+attach the actual exported Markdown file using Records’ native file
+picker, and read it back from that request. A successful Access export
+alone does not attach evidence to a request or authorize disclosure.
+Records permissions and review/release rules still apply.</li>
+</ol>
+<p>The complete review export includes reviewed source, findings, saved
+advice/model/outcome where available, actor/time, relevant audit history
+and advisory limits. Draft exports include the retained source/output
+pair and review status. Back up the complete profile using System Health
+and restore only a matching new-format backup. Preservation of these
+additions on the actual installed candidate remains part of
+acceptance.</p>
+<p>No automated result certifies ADA compliance, creates an
+accessible/tagged PDF, approves publication or replaces a qualified
+translator or ADA coordinator.</p>
+<h2 id="standalone-support-service">Standalone support service</h2>
+<p>The separately run FastAPI service provides deterministic checks and
+planning helpers. Its Spanish and Vietnamese responses are fixed
+samples, <strong>not translations of the supplied source</strong>. Its
+deterministic jargon substitutions are separate from the Windows model
+workflow. A shared write token proves possession of that token; it does
+not establish an individual staff identity. Standalone audit records use
+<code>shared-token-staff</code> for that reason.</p>
+<p>Standalone saved-review exports now return a complete Markdown
+artifact with source, findings and relevant audit provenance, plus its
+SHA-256. The staff page offers that actual artifact for download. Other
+form, tagged-PDF, ADA and publishing helpers remain checklists. The
+standalone service does not acquire Windows draft persistence or native
+individual-account identity merely because it shares this package.</p>
+<p><strong>Version 0.5.0 · prepared candidate; installed acceptance
+pending</strong> Townlight Access is the accessibility, plain-language,
+multilingual, and ADA Title II review-support module for Townlight.</p>
+<p>This manual has two parts. Read the one that fits your role:</p>
+<ul>
+<li><strong><a href="#part-1-for-civic-staff">Part 1 — For Civic
+Staff</a></strong> — clerks, communicators, ADA coordinators. Plain
+English, no setup.</li>
+<li><strong><a href="#part-2-for-it-technical-staff">Part 2 — For IT
+&amp; Technical Staff</a></strong> — architecture, runtime, data model,
+security, and operations.</li>
+</ul>
+<hr />
+<h2 id="part-1-for-civic-staff">Part 1 — For Civic Staff</h2>
+<p><a id="what-townlight_access-is-for"></a></p>
+<h3 id="what-townlight-access-is-for">What Townlight Access is for</h3>
+<p>Townlight Access helps your office put out public notices, forms, and
+documents that <strong>everyone can read</strong> — and keep a clean
+record proving you checked. It is a staff tool that gives advice and
+does the busywork; <strong>you and your ADA coordinator always make the
+final call.</strong></p>
+<h3 id="what-you-can-do-with-it">What you can do with it</h3>
+<table>
+<colgroup>
+<col style="width: 50%" />
+<col style="width: 50%" />
+</colgroup>
+<thead>
+<tr>
+<th>You want to…</th>
+<th>Townlight Access gives you…</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Know if a notice is hard to read</td>
+<td>A check that flags missing titles, images without descriptions, and
+dense wording — each with a specific fix</td>
+</tr>
+<tr>
+<td>Cut the jargon</td>
+<td>A plain-language rewrite (e.g. “remit payment prior to the deadline”
+→ “pay before the deadline”)</td>
+</tr>
+<tr>
+<td>Reach non-English readers</td>
+<td>Windows local-model drafts for qualified review; fixed standalone
+samples do not translate input</td>
+</tr>
+<tr>
+<td>Publish an accessible form or PDF</td>
+<td>A checklist of what an accessible form or tagged PDF needs</td>
+</tr>
+<tr>
+<td>Handle an ADA Title II review</td>
+<td>A step-by-step review-support checklist</td>
+</tr>
+<tr>
+<td>Answer a records request</td>
+<td>A saved, exportable record of every review, with provenance
+(individual staff identity in Windows; shared-token identity in the
+standalone service)</td>
+</tr>
+</tbody>
+</table>
+<h3 id="how-youll-use-it-day-to-day">How you’ll use it day to day</h3>
+<p>There are two places to work, and the difference matters:</p>
+<ul>
+<li>The <strong>public checker</strong> is for trying things out — it
+forgets everything when you leave.</li>
+<li>The <strong>staff workspace</strong> is for keeping a permanent,
+official record you can produce later.</li>
+</ul>
+<p>Your IT team will give you the link to each.</p>
+<ol type="1">
+<li>Open the <strong>public checker</strong>. Paste in a draft notice
+and run the check. You’ll get a list of plain-language fixes — nothing
+is saved, so it’s a safe place to experiment.</li>
+<li>When you’re ready to keep a review on the record, open the
+<strong>staff workspace</strong> and enter the staff password your IT
+team gave you (a one-time setup). Save the review — it goes into your
+Townlight records with a time-stamp of who saved it and when.</li>
+<li>From the staff workspace, <strong>export a records-ready
+package</strong> for any saved review — ready to hand to a
+public-records request.</li>
+</ol>
+<p><a id="what-townlight_access-will-not-do"></a></p>
+<h3 id="what-townlight-access-will-not-do">What Townlight Access will
+<em>not</em> do</h3>
+<p>Townlight Access is a tool for your staff, <strong>not a rubber
+stamp.</strong> It does <strong>not</strong>:</p>
+<ul>
+<li>give legal advice,</li>
+<li>certify ADA compliance,</li>
+<li>issue official translations, or</li>
+<li>publish anything on its own.</li>
+</ul>
+<p>A qualified human — your staff, an ADA coordinator, a translator,
+legal counsel — always reviews and approves before anything goes public.
+Translations it drafts are <strong>starting points for a human
+translator</strong>, never the final word.</p>
+<h3 id="where-it-stands-today">Where it stands today</h3>
+<p>This is <strong>v0.5.0, an early release</strong> we’re being upfront
+about. It’s solid enough to evaluate and pilot, but it is <strong>not a
+finished 1.0 and not a compliance guarantee.</strong> (An earlier
+<code>v1.0.0</code> was published by mistake; we pulled it back to an
+honest sub-1.0 label rather than overstate where the product is.)</p>
+<hr />
+<h2 id="part-2-for-it-technical-staff">Part 2 — For IT &amp; Technical
+Staff</h2>
+<h3 id="overview">Overview</h3>
+<p>Townlight Access is a deterministic <strong>FastAPI</strong> service,
+written in Python and pinned to the published <strong>Townlight Core
+1.3.0.dev2</strong> release wheel. It performs rule-based accessibility
+checks — <strong>no LLM/model calls, no network calls</strong> — so
+output is reproducible and the service is cheap to run. It ships as one
+module inside <strong>Townlight Windows Local</strong>, a Tauri/WebView2
+desktop application, and is also runnable standalone for
+development.</p>
+<h3 id="deployment-architecture">Deployment architecture</h3>
+<p>In Townlight Windows Local, a Tauri <strong>supervisor</strong>
+starts a bundled Python host (running Townlight Access alongside peer
+modules) and a bundled <strong>PostgreSQL</strong> instance on
+<code>127.0.0.1:15432</code>. The supervisor injects a
+<code>DATABASE_URL</code> into each module service; Townlight Access
+stores its data in a dedicated <code>townlight_access</code> schema in
+that shared cluster. The supervisor’s backup copies the entire data
+directory (including the Postgres cluster), so Townlight Access data is
+captured with it.</p>
+<pre class="mermaid"><code>flowchart TB
+  Resident[&quot;Resident&lt;br/&gt;(browser)&quot;] --&gt;|&quot;public, read-only&quot;| Pub[&quot;/townlight_access&quot;]
+  Staff[&quot;City staff&lt;br/&gt;(browser)&quot;] --&gt;|&quot;WebView2 UI&quot;| StaffUI[&quot;/townlight_access/staff&quot;]
+
+  subgraph Sup[&quot;Tauri supervisor — local machine only&quot;]
+    CA[&quot;Townlight Access&lt;br/&gt;(FastAPI)&quot;]
+    Peers[&quot;Peer modules&lt;br/&gt;Townlight Meetings · Townlight Code · Townlight Notice · …&quot;]
+    PG[(&quot;Bundled PostgreSQL&lt;br/&gt;127.0.0.1:15432&quot;)]
+  end
+
+  Pub --&gt; CA
+  StaffUI --&gt; CA
+  CA --&gt;|&quot;DATABASE_URL → townlight_access schema&quot;| PG
+  Peers --&gt; PG
+  CA --&gt;|&quot;depends on&quot;| Core[&quot;Townlight Core 1.3.0.dev2&quot;]
+  CA -. &quot;records-export hand-off&quot; .-&gt; Records[&quot;Townlight Records&quot;]
+  Sup -. &quot;wholesale backup of Data/ (incl. Data/postgres)&quot; .-&gt; Backup[(&quot;Backup folder&quot;)]</code></pre>
+<h3 id="request-trust-model">Request &amp; trust model</h3>
+<p>There are two surfaces with deliberately different trust levels:</p>
+<ul>
+<li><strong>Public</strong> (<code>/townlight_access</code> →
+<code>POST /api/v1/townlight_access/analyze</code>): stateless. Anyone
+can analyze content; <strong>nothing is persisted and no token is
+required.</strong></li>
+<li><strong>Staff</strong> (<code>/townlight_access/staff</code> →
+<code>POST .../review</code>,
+<code>POST .../reviews/{id}/records-export</code>): persistent. Every
+write requires the <strong>trusted-write token</strong>.</li>
+</ul>
+<pre class="mermaid"><code>sequenceDiagram
+  participant R as Resident (public)
+  participant S as City staff
+  participant CA as Townlight Access
+  participant DB as PostgreSQL (townlight_access schema)
+
+  R-&gt;&gt;CA: POST /analyze (no token)
+  CA--&gt;&gt;R: findings + fixes (nothing saved)
+
+  S-&gt;&gt;CA: POST /review + X-Townlight-Access-Write-Token
+  Note over CA: constant-time token check&lt;br/&gt;403 if invalid · 503 if unconfigured
+  CA-&gt;&gt;DB: insert review + audit row (one transaction)
+  CA--&gt;&gt;S: saved review_id + findings
+
+  S-&gt;&gt;CA: POST /reviews/{id}/records-export + token
+  CA-&gt;&gt;DB: write audit_events row
+  CA--&gt;&gt;S: records-ready export</code></pre>
+<h3 id="persistence-configuration">Persistence &amp; configuration</h3>
+<p>Townlight Access resolves its review store in this order:</p>
+<ol type="1">
+<li><code>TOWNLIGHT_ACCESS_REVIEW_DB_URL</code> — explicit override (a
+dev SQLite path or a pre-built Postgres URL).</li>
+<li><code>DATABASE_URL</code> — the supervisor-injected async URL
+(<code>postgresql+asyncpg://…:15432/…</code>), converted to a
+synchronous psycopg2 URL. <strong>This is the default under the desktop
+runtime.</strong></li>
+<li><strong>SQLite dev fallback</strong> —
+<code>data/townlight_access-reviews.db</code> under
+<code>TOWNLIGHT_ACCESS_DATA_DIR</code> (default: <code>./data</code>),
+used only when neither variable is set.</li>
+</ol>
+<table>
+<colgroup>
+<col style="width: 50%" />
+<col style="width: 50%" />
+</colgroup>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>DATABASE_URL</code></td>
+<td>Shared Townlight Core PostgreSQL (set by the supervisor) — the
+production default</td>
+</tr>
+<tr>
+<td><code>TOWNLIGHT_ACCESS_REVIEW_DB_URL</code></td>
+<td>Explicit SQLAlchemy URL override</td>
+</tr>
+<tr>
+<td><code>TOWNLIGHT_ACCESS_DATA_DIR</code></td>
+<td>Directory for the SQLite dev fallback</td>
+</tr>
+<tr>
+<td><code>TOWNLIGHT_ACCESS_TRUSTED_WRITE_TOKEN</code></td>
+<td><strong>Required</strong> server secret for persistent writes</td>
+</tr>
+</tbody>
+</table>
+<p><code>townlight_access-db-status</code> (console script) preflights a
+database with an explicit URL.</p>
+<h3 id="data-model">Data model</h3>
+<p>Three tables live in the <code>townlight_access</code> schema
+(translated to the default schema on SQLite). Schema setup is
+non-destructive (<code>CREATE SCHEMA IF NOT EXISTS</code> +
+<code>metadata.create_all</code>); the applied migration id is
+<code>townlight_access-windows-local-state-v1</code>.</p>
+<pre class="mermaid"><code>erDiagram
+  accessibility_review_records {
+    string   review_id PK
+    string   title
+    text     body
+    bool     has_alt_text
+    string   language
+    string   status
+    json     findings
+    text     disclaimer
+    datetime created_at
+  }
+  audit_events {
+    string   event_id PK
+    string   action
+    string   subject_id &quot;soft ref → review_id&quot;
+    string   actor
+    datetime created_at
+  }
+  schema_migrations {
+    string   schema_version PK
+    datetime applied_at
+  }</code></pre>
+<h3 id="http-api">HTTP API</h3>
+<table>
+<colgroup>
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+</colgroup>
+<thead>
+<tr>
+<th>Method &amp; path</th>
+<th>Auth</th>
+<th>Persists?</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>GET /</code></td>
+<td>—</td>
+<td>no</td>
+<td>Module status and boundaries</td>
+</tr>
+<tr>
+<td><code>GET /health</code></td>
+<td>—</td>
+<td>no</td>
+<td>Package + Townlight Core version</td>
+</tr>
+<tr>
+<td><code>GET /ready</code>,
+<code>GET /api/v1/townlight_access/readiness</code></td>
+<td>—</td>
+<td>no</td>
+<td>Persistence readiness gate</td>
+</tr>
+<tr>
+<td><code>GET /townlight_access</code></td>
+<td>—</td>
+<td>no</td>
+<td>Public accessibility checker (UI)</td>
+</tr>
+<tr>
+<td><code>GET /townlight_access/staff</code></td>
+<td>—</td>
+<td>no</td>
+<td>Staff workspace (UI; never embeds the token)</td>
+</tr>
+<tr>
+<td><code>POST /api/v1/townlight_access/analyze</code></td>
+<td>—</td>
+<td>no</td>
+<td>Stateless accessibility analysis</td>
+</tr>
+<tr>
+<td><code>POST /api/v1/townlight_access/review</code></td>
+<td><strong>token</strong></td>
+<td><strong>yes</strong></td>
+<td>Save a review record (+ audit)</td>
+</tr>
+<tr>
+<td><code>GET /api/v1/townlight_access/reviews</code></td>
+<td>—</td>
+<td>no</td>
+<td>List saved reviews</td>
+</tr>
+<tr>
+<td><code>GET /api/v1/townlight_access/reviews/{id}</code></td>
+<td>—</td>
+<td>no</td>
+<td>Retrieve a saved review</td>
+</tr>
+<tr>
+<td><code>POST /api/v1/townlight_access/reviews/{id}/records-export</code></td>
+<td><strong>token</strong></td>
+<td><strong>yes</strong> (audit)</td>
+<td>Records-ready export (+ audit)</td>
+</tr>
+<tr>
+<td><code>GET /api/v1/townlight_access/integration-contracts</code></td>
+<td>—</td>
+<td>no</td>
+<td>Published integration contracts</td>
+</tr>
+<tr>
+<td><code>POST /api/v1/townlight_access/plain-language</code></td>
+<td>—</td>
+<td>no</td>
+<td>Deterministic plain-language rewrite</td>
+</tr>
+<tr>
+<td><code>POST /api/v1/townlight_access/language-variant</code></td>
+<td>—</td>
+<td>no</td>
+<td>Multilingual draft variant (human-review flagged)</td>
+</tr>
+<tr>
+<td><code>POST /api/v1/townlight_access/forms</code></td>
+<td>—</td>
+<td>no</td>
+<td>Accessible form publication checks</td>
+</tr>
+<tr>
+<td><code>POST /api/v1/townlight_access/publishing-workflow</code></td>
+<td>—</td>
+<td>no</td>
+<td>Staff publication workflow steps/blockers</td>
+</tr>
+<tr>
+<td><code>POST /api/v1/townlight_access/ada-title-ii</code></td>
+<td>—</td>
+<td>no</td>
+<td>ADA Title II review-support checklist</td>
+</tr>
+<tr>
+<td><code>POST /api/v1/townlight_access/tagged-pdf</code></td>
+<td>—</td>
+<td>no</td>
+<td>Tagged-PDF heading expectations</td>
+</tr>
+<tr>
+<td><code>POST /api/v1/townlight_access/export</code></td>
+<td>—</td>
+<td>no</td>
+<td>Records-ready export checklist (stateless)</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Token-guarded writes</strong> require the
+<code>X-Townlight-Access-Write-Token</code> header matching
+<code>TOWNLIGHT_ACCESS_TRUSTED_WRITE_TOKEN</code> (compared in constant
+time). Missing/invalid → <code>403</code>; guard not configured →
+<code>503</code> (fails closed). The server token is never embedded in
+served HTML — the staff page provides a field where an operator pastes
+it; it is kept only in the browser session.</p>
+<h3 id="security">Security</h3>
+<ul>
+<li><strong>Authentication boundary:</strong> persistence-write routes
+require the trusted-write token; read and stateless-analysis routes are
+open. The desktop supervisor binds the service to the local
+machine.</li>
+<li><strong>Audit trail:</strong> every persistent write/export writes
+an <code>audit_events</code> row (action, subject, actor, timestamp).
+<code>review.create</code> is committed atomically with the review
+record.</li>
+<li><strong>Determinism:</strong> no model/LLM calls and no outbound
+network calls; checks are pure functions.</li>
+<li><strong>Backups:</strong> review and audit data live in the shared
+Postgres cluster, captured by the supervisor’s wholesale
+<code>Data/</code> backup. Durability is covered by the test suite (a
+Postgres reconnect round-trip for the default store; a SQLite file
+backup/restore round-trip for the dev fallback).</li>
+</ul>
+<h3 id="operations">Operations</h3>
+<p>Readiness: poll <code>GET /ready</code> (or
+<code>/api/v1/townlight_access/readiness</code>) — <code>ready</code>
+when the schema can be created and verified.</p>
+<p>Local verification (mirrors CI; the release gate requires a real
+PostgreSQL):</p>
+<div class="sourceCode" id="cb4"><pre
+class="sourceCode bash"><code class="sourceCode bash"><span id="cb4-1"><a href="#cb4-1" aria-hidden="true" tabindex="-1"></a><span class="ex">python</span> <span class="at">-m</span> pip install https://github.com/townlight/core/releases/download/v1.2.0/townlight_core-1.2.0-py3-none-any.whl</span>
+<span id="cb4-2"><a href="#cb4-2" aria-hidden="true" tabindex="-1"></a><span class="ex">python</span> <span class="at">-m</span> pip install <span class="at">-e</span> <span class="st">&quot;.[dev]&quot;</span></span>
+<span id="cb4-3"><a href="#cb4-3" aria-hidden="true" tabindex="-1"></a><span class="co"># Release gate (requires Postgres):</span></span>
+<span id="cb4-4"><a href="#cb4-4" aria-hidden="true" tabindex="-1"></a><span class="bu">export</span> <span class="va">TOWNLIGHT_ACCESS_POSTGRES_TEST_URL</span><span class="op">=</span><span class="st">&quot;postgresql+psycopg2://USER:PW@HOST:PORT/DB&quot;</span></span>
+<span id="cb4-5"><a href="#cb4-5" aria-hidden="true" tabindex="-1"></a><span class="fu">bash</span> scripts/verify-release.sh</span></code></pre></div>
+<h3 id="integration">Integration</h3>
+<p>Townlight Access <strong>depends on Townlight Core</strong>;
+Townlight Core does not depend on Townlight Access. It publishes
+integration contracts at
+<code>/api/v1/townlight_access/integration-contracts</code>, hands
+records exports to <strong>Townlight Records</strong>, and provides
+accessibility support to downstream publishers (zone, plan, permit,
+inspect, grants, procure).</p>
+<h3 id="release-status">Release status</h3>
+<p><code>v0.5.0</code> is an early release. Probe gaps #1–#4 (clean
+install, staff/public authz, audit logging, backup/restore durability)
+are closed with evidence (see <code>PROBE-PROGRESS.md</code>). City-core
+membership (desktop registry record + 6-module profile) and a clean-VM
+accessibility acceptance pass are later phases. The earlier
+<code>v1.0.0</code> tag was published in error and is retained only as
+historical evidence.</p>
+</main><footer>Townlight · AGPL-3.0-only · Candidate evidence applies only to its identified artifacts.</footer></body></html>

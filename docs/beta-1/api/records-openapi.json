@@ -2,8 +2,8 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Townlight Records",
-    "description": "Townlight Beta 1 documentation view of the installed desktop domain schema. Component API version is unchanged. Exported without lifespan or database access; schema generation is not endpoint acceptance.",
-    "version": "1.8.0.dev1"
+    "description": "Prepared source schema for the actual native composition; installed acceptance remains pending. Exported without lifespan, migrations or database/network access.",
+    "version": "1.8.0.dev2"
   },
   "paths": {
     "/auth/jwt/login": {
@@ -2201,10 +2201,10 @@
             "required": true,
             "schema": {
               "type": "string",
-              "description": "Status to reset \u2014 required",
+              "description": "Status to reset — required",
               "title": "Status"
             },
-            "description": "Status to reset \u2014 required"
+            "description": "Status to reset — required"
           }
         ],
         "responses": {
@@ -2258,10 +2258,10 @@
             "required": true,
             "schema": {
               "type": "string",
-              "description": "Status to dismiss \u2014 required",
+              "description": "Status to dismiss — required",
               "title": "Status"
             },
-            "description": "Status to dismiss \u2014 required"
+            "description": "Status to dismiss — required"
           }
         ],
         "responses": {
@@ -3620,7 +3620,7 @@
           "requests"
         ],
         "summary": "Estimate Fees",
-        "description": "Estimate fees based on staff-entered page count and fee schedule.\n\nPage count is a manual staff estimate \u2014 not inferred from ingested docs.",
+        "description": "Estimate fees based on staff-entered page count and fee schedule.\n\nPage count is a manual staff estimate — not inferred from ingested docs.",
         "operationId": "estimate_fees_requests__request_id__estimate_fees_post",
         "security": [
           {
@@ -7585,8 +7585,8 @@
     },
     "/health": {
       "get": {
-        "summary": "Runtime Health",
-        "operationId": "runtime_health_health_get",
+        "summary": "Health",
+        "operationId": "health_health_get",
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -8238,42 +8238,48 @@
           }
         }
       }
-    },
-    "/modules": {
-      "get": {
-        "summary": "Runtime Health",
-        "operationId": "runtime_health_modules_get",
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          }
-        }
-      }
-    },
-    "/ready": {
-      "get": {
-        "summary": "Domain Ready",
-        "operationId": "domain_ready_ready_get",
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          }
-        }
-      }
     }
   },
   "components": {
     "schemas": {
+      "ActionItemInput": {
+        "properties": {
+          "description": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Description"
+          },
+          "assigned_to": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Assigned To"
+          },
+          "source_motion_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Motion Id"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "description"
+        ],
+        "title": "ActionItemInput"
+      },
       "AdaPlan": {
         "properties": {
           "action": {
@@ -8362,6 +8368,247 @@
         ],
         "title": "AdminUserCreateResponse"
       },
+      "AgendaAssignment": {
+        "properties": {
+          "meeting_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Meeting Id"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "meeting_id"
+        ],
+        "title": "AgendaAssignment"
+      },
+      "AgendaInput": {
+        "properties": {
+          "title": {
+            "type": "string",
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Title"
+          },
+          "department_name": {
+            "type": "string",
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Department Name"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "title",
+          "department_name"
+        ],
+        "title": "AgendaInput"
+      },
+      "AgendaReviewInput": {
+        "properties": {
+          "to_status": {
+            "type": "string",
+            "enum": [
+              "DRAFTED",
+              "SUBMITTED",
+              "DEPT_APPROVED",
+              "LEGAL_REVIEWED",
+              "CLERK_ACCEPTED",
+              "ON_AGENDA",
+              "IN_PACKET",
+              "POSTED",
+              "HEARD",
+              "DISPOSED",
+              "ARCHIVED"
+            ],
+            "title": "To Status"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "to_status"
+        ],
+        "title": "AgendaReviewInput"
+      },
+      "AmendmentInput": {
+        "properties": {
+          "expected_revision": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 36,
+                "minLength": 36
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Revision"
+          },
+          "title": {
+            "type": "string",
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Title"
+          },
+          "policy": {
+            "$ref": "#/components/schemas/PolicySelection"
+          },
+          "proposal": {
+            "type": "string",
+            "maxLength": 20000,
+            "minLength": 1,
+            "title": "Proposal"
+          },
+          "responsible_staff": {
+            "type": "string",
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Responsible Staff"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "draft",
+              "review",
+              "adopted",
+              "withdrawn"
+            ],
+            "title": "Status",
+            "default": "draft"
+          },
+          "review_note": {
+            "type": "string",
+            "maxLength": 5000,
+            "title": "Review Note",
+            "default": ""
+          },
+          "adoption_revision": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 36,
+                "minLength": 36
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Adoption Revision"
+          },
+          "note": {
+            "type": "string",
+            "maxLength": 5000,
+            "minLength": 1,
+            "title": "Note"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "title",
+          "policy",
+          "proposal",
+          "responsible_staff",
+          "note"
+        ],
+        "title": "AmendmentInput"
+      },
+      "AnalysisObservation": {
+        "properties": {
+          "source": {
+            "type": "string",
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Source"
+          },
+          "filename": {
+            "type": "string",
+            "maxLength": 160,
+            "title": "Filename",
+            "default": ""
+          },
+          "media_type": {
+            "type": "string",
+            "maxLength": 80,
+            "title": "Media Type",
+            "default": ""
+          },
+          "text": {
+            "type": "string",
+            "maxLength": 4000,
+            "minLength": 1,
+            "title": "Text"
+          },
+          "adapter": {
+            "type": "string",
+            "maxLength": 120,
+            "title": "Adapter",
+            "default": ""
+          },
+          "citation_source_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "maxItems": 30,
+            "title": "Citation Source Ids"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "source",
+          "text"
+        ],
+        "title": "AnalysisObservation",
+        "description": "One draft observation, named with the adapter that actually produced it."
+      },
+      "AnalysisRecord": {
+        "properties": {
+          "observations": {
+            "items": {
+              "$ref": "#/components/schemas/AnalysisObservation"
+            },
+            "type": "array",
+            "maxItems": 30,
+            "title": "Observations"
+          },
+          "cited_sections": {
+            "items": {
+              "$ref": "#/components/schemas/CitedSection"
+            },
+            "type": "array",
+            "maxItems": 30,
+            "title": "Cited Sections"
+          },
+          "unavailable": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "maxItems": 30,
+            "title": "Unavailable"
+          },
+          "runtime": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Runtime"
+          },
+          "review_required": {
+            "type": "boolean",
+            "title": "Review Required",
+            "default": true
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "AnalysisRecord",
+        "description": "The adapter output that accompanies a saved inspection draft."
+      },
       "ApprovalCommand": {
         "properties": {
           "action": {
@@ -8391,6 +8638,53 @@
         "additionalProperties": false,
         "type": "object",
         "title": "ApprovalPayload"
+      },
+      "ArchiveInput": {
+        "properties": {
+          "visibility": {
+            "type": "string",
+            "enum": [
+              "public",
+              "closed_session"
+            ],
+            "title": "Visibility"
+          },
+          "packet_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Packet Id"
+          },
+          "minutes_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Minutes Id"
+          },
+          "plain_language_summary": {
+            "type": "string",
+            "title": "Plain Language Summary",
+            "default": ""
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "visibility"
+        ],
+        "title": "ArchiveInput"
       },
       "ArtifactPlan": {
         "properties": {
@@ -8811,6 +9105,86 @@
         ],
         "title": "CalculateDeadlinePayload"
       },
+      "ChapterCreate": {
+        "properties": {
+          "chapter_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Chapter Id"
+          },
+          "title_id": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Title Id"
+          },
+          "chapter_number": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Chapter Number"
+          },
+          "chapter_name": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Chapter Name"
+          },
+          "sort_order": {
+            "type": "integer",
+            "title": "Sort Order",
+            "default": 0
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "title_id",
+          "chapter_number",
+          "chapter_name"
+        ],
+        "title": "ChapterCreate",
+        "description": "Request body for creating a code chapter."
+      },
+      "CitedSection": {
+        "properties": {
+          "source_id": {
+            "type": "string",
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Source Id"
+          },
+          "citation": {
+            "type": "string",
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Citation"
+          },
+          "title": {
+            "type": "string",
+            "maxLength": 500,
+            "title": "Title",
+            "default": ""
+          },
+          "version": {
+            "type": "string",
+            "maxLength": 80,
+            "title": "Version",
+            "default": ""
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "source_id",
+          "citation"
+        ],
+        "title": "CitedSection",
+        "description": "One resolved public Code section; never a caller-supplied quotation."
+      },
       "CityProfileCreate": {
         "properties": {
           "city_name": {
@@ -9174,6 +9548,139 @@
         ],
         "title": "ClarificationPayload"
       },
+      "Closeout": {
+        "properties": {
+          "decision_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{1,64}$",
+            "title": "Decision Id"
+          },
+          "version_id": {
+            "type": "string",
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Version Id"
+          },
+          "source_id": {
+            "type": "string",
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Source Id"
+          },
+          "version_label": {
+            "type": "string",
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Version Label"
+          },
+          "body": {
+            "type": "string",
+            "maxLength": 1000000,
+            "minLength": 1,
+            "title": "Body"
+          },
+          "effective_start": {
+            "type": "string",
+            "format": "date",
+            "title": "Effective Start"
+          },
+          "effective_end": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Effective End"
+          },
+          "is_current": {
+            "type": "boolean",
+            "title": "Is Current"
+          },
+          "reconciliation_note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reconciliation Note"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "decision_id",
+          "version_id",
+          "source_id",
+          "version_label",
+          "body",
+          "effective_start",
+          "is_current"
+        ],
+        "title": "Closeout"
+      },
+      "CodeContext": {
+        "properties": {
+          "section_number": {
+            "type": "string",
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Section Number"
+          },
+          "as_of": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "As Of"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "section_number"
+        ],
+        "title": "CodeContext"
+      },
+      "CodeLink": {
+        "properties": {
+          "provider": {
+            "type": "string",
+            "const": "code",
+            "title": "Provider",
+            "default": "code"
+          },
+          "source_id": {
+            "type": "string",
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Source Id"
+          },
+          "expected_sha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$",
+            "title": "Expected Sha256"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "source_id",
+          "expected_sha256"
+        ],
+        "title": "CodeLink"
+      },
       "CodeSearch": {
         "properties": {
           "query": {
@@ -9250,6 +9757,31 @@
           "export_path"
         ],
         "title": "CompleteArtifact"
+      },
+      "ConnectionSearch": {
+        "properties": {
+          "provider": {
+            "type": "string",
+            "enum": [
+              "meetings",
+              "zoning"
+            ],
+            "title": "Provider"
+          },
+          "query": {
+            "type": "string",
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Query"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "provider",
+          "query"
+        ],
+        "title": "ConnectionSearch"
       },
       "CoverageGapResponse": {
         "properties": {
@@ -9650,7 +10182,7 @@
           "last_ingestion_at"
         ],
         "title": "DataSourceRead",
-        "description": "Redacted datasource shape \u2014 safe for non-admin roles. connection_config omitted."
+        "description": "Redacted datasource shape — safe for non-admin roles. connection_config omitted."
       },
       "DataSourceUpdate": {
         "properties": {
@@ -9752,6 +10284,81 @@
           "deadlineBasis"
         ],
         "title": "DeadlinePayload"
+      },
+      "Decision": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{1,64}$",
+            "title": "Id"
+          },
+          "outcome": {
+            "type": "string",
+            "enum": [
+              "adopted",
+              "not_adopted",
+              "deferred",
+              "withdrawn"
+            ],
+            "title": "Outcome"
+          },
+          "decided_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Decided At"
+          },
+          "decision_text": {
+            "type": "string",
+            "maxLength": 1000000,
+            "minLength": 1,
+            "title": "Decision Text"
+          },
+          "supporting_references": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Supporting References"
+          },
+          "supersedes_decision_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9_-]{1,64}$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Supersedes Decision Id"
+          },
+          "reconciliation_note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reconciliation Note"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "id",
+          "outcome",
+          "decision_text"
+        ],
+        "title": "Decision"
       },
       "DepartmentCreate": {
         "properties": {
@@ -10170,6 +10777,31 @@
         ],
         "title": "DraftCommand"
       },
+      "DraftInput": {
+        "properties": {
+          "source_materials": {
+            "items": {
+              "$ref": "#/components/schemas/SourceInput"
+            },
+            "type": "array",
+            "title": "Source Materials"
+          },
+          "sentences": {
+            "items": {
+              "$ref": "#/components/schemas/SentenceInput"
+            },
+            "type": "array",
+            "minItems": 1,
+            "title": "Sentences"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "sentences"
+        ],
+        "title": "DraftInput"
+      },
       "DraftPayload": {
         "properties": {
           "responseDraft": {
@@ -10212,6 +10844,119 @@
           "detail"
         ],
         "title": "ErrorModel"
+      },
+      "Evidence": {
+        "properties": {
+          "filename": {
+            "type": "string",
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,150}$",
+            "title": "Filename"
+          },
+          "description": {
+            "type": "string",
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Description"
+          },
+          "media_type": {
+            "type": "string",
+            "enum": [
+              "text/plain",
+              "image/jpeg",
+              "image/png",
+              "image/webp",
+              "application/pdf",
+              "audio/webm",
+              "audio/ogg",
+              "audio/wav",
+              "audio/mpeg",
+              "audio/mp4"
+            ],
+            "title": "Media Type"
+          },
+          "content_base64": {
+            "type": "string",
+            "maxLength": 14000000,
+            "minLength": 1,
+            "title": "Content Base64"
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$",
+            "title": "Sha256"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "filename",
+          "description",
+          "media_type",
+          "content_base64",
+          "sha256"
+        ],
+        "title": "Evidence"
+      },
+      "EvidenceItem": {
+        "properties": {
+          "filename": {
+            "type": "string",
+            "maxLength": 151,
+            "minLength": 1,
+            "title": "Filename"
+          },
+          "media_type": {
+            "type": "string",
+            "maxLength": 80,
+            "minLength": 1,
+            "title": "Media Type"
+          },
+          "description": {
+            "type": "string",
+            "maxLength": 2000,
+            "title": "Description",
+            "default": ""
+          },
+          "content_base64": {
+            "type": "string",
+            "maxLength": 14000000,
+            "minLength": 1,
+            "title": "Content Base64"
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$",
+            "title": "Sha256"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "filename",
+          "media_type",
+          "content_base64",
+          "sha256"
+        ],
+        "title": "EvidenceItem"
+      },
+      "EvidenceItems": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/EvidenceItem"
+            },
+            "type": "array",
+            "maxItems": 10,
+            "minItems": 1,
+            "title": "Items"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "title": "EvidenceItems"
       },
       "ExemptionAccuracyReport": {
         "properties": {
@@ -11408,6 +12153,92 @@
         "type": "object",
         "title": "HTTPValidationError"
       },
+      "Handoff": {
+        "properties": {
+          "request_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Request Id"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "request_id"
+        ],
+        "title": "Handoff"
+      },
+      "ImportBundleCreate": {
+        "properties": {
+          "job_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Job Id"
+          },
+          "connector_type": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Connector Type"
+          },
+          "source": {
+            "$ref": "#/components/schemas/SourceCreate"
+          },
+          "sources": {
+            "items": {
+              "$ref": "#/components/schemas/SourceCreate"
+            },
+            "type": "array",
+            "title": "Sources"
+          },
+          "titles": {
+            "items": {
+              "$ref": "#/components/schemas/TitleCreate"
+            },
+            "type": "array",
+            "title": "Titles"
+          },
+          "chapters": {
+            "items": {
+              "$ref": "#/components/schemas/ChapterCreate"
+            },
+            "type": "array",
+            "title": "Chapters"
+          },
+          "sections": {
+            "items": {
+              "$ref": "#/components/schemas/SectionCreate"
+            },
+            "type": "array",
+            "title": "Sections"
+          },
+          "versions": {
+            "items": {
+              "$ref": "#/components/schemas/SectionVersionCreate"
+            },
+            "type": "array",
+            "title": "Versions"
+          },
+          "provenance": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Provenance"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "connector_type",
+          "source"
+        ],
+        "title": "ImportBundleCreate",
+        "description": "Request body for local fixture/file-drop import jobs."
+      },
       "InclusionStatus": {
         "type": "string",
         "enum": [
@@ -11462,6 +12293,381 @@
           "failed"
         ],
         "title": "IngestionStatus"
+      },
+      "InitiativeInput": {
+        "properties": {
+          "expected_revision": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 36,
+                "minLength": 36
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Revision"
+          },
+          "title": {
+            "type": "string",
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Title"
+          },
+          "policy": {
+            "$ref": "#/components/schemas/PolicySelection"
+          },
+          "responsible_staff": {
+            "type": "string",
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Responsible Staff"
+          },
+          "target": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "string"
+              }
+            ],
+            "title": "Target"
+          },
+          "unit": {
+            "type": "string",
+            "maxLength": 80,
+            "minLength": 1,
+            "title": "Unit"
+          },
+          "due_on": {
+            "type": "string",
+            "format": "date",
+            "title": "Due On"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "planned",
+              "active",
+              "completed",
+              "cancelled"
+            ],
+            "title": "Status",
+            "default": "planned"
+          },
+          "milestones": {
+            "items": {
+              "$ref": "#/components/schemas/Milestone"
+            },
+            "type": "array",
+            "maxItems": 100,
+            "title": "Milestones"
+          },
+          "measurements": {
+            "items": {
+              "$ref": "#/components/schemas/Measurement"
+            },
+            "type": "array",
+            "maxItems": 1000,
+            "title": "Measurements"
+          },
+          "note": {
+            "type": "string",
+            "maxLength": 5000,
+            "minLength": 1,
+            "title": "Note"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "title",
+          "policy",
+          "responsible_staff",
+          "target",
+          "unit",
+          "due_on",
+          "note"
+        ],
+        "title": "InitiativeInput"
+      },
+      "InspectionInput": {
+        "properties": {
+          "expected_revision": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Revision"
+          },
+          "title": {
+            "type": "string",
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Title"
+          },
+          "property_reference": {
+            "type": "string",
+            "maxLength": 1000,
+            "minLength": 1,
+            "title": "Property Reference"
+          },
+          "inspection_reference": {
+            "type": "string",
+            "maxLength": 160,
+            "minLength": 1,
+            "title": "Inspection Reference"
+          },
+          "dataset_kind": {
+            "type": "string",
+            "enum": [
+              "municipal",
+              "fictional"
+            ],
+            "title": "Dataset Kind"
+          },
+          "inspector_notes": {
+            "type": "string",
+            "maxLength": 10000,
+            "minLength": 1,
+            "title": "Inspector Notes"
+          },
+          "photo_observations": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "maxItems": 30,
+            "title": "Photo Observations"
+          },
+          "voice_notes": {
+            "type": "string",
+            "maxLength": 10000,
+            "title": "Voice Notes",
+            "default": ""
+          },
+          "evidence": {
+            "items": {
+              "$ref": "#/components/schemas/Evidence"
+            },
+            "type": "array",
+            "maxItems": 10,
+            "title": "Evidence"
+          },
+          "linked_sources": {
+            "items": {
+              "$ref": "#/components/schemas/townlight_inspections__workflow_models__SourceLink"
+            },
+            "type": "array",
+            "maxItems": 30,
+            "title": "Linked Sources"
+          },
+          "assigned_to": {
+            "type": "string",
+            "maxLength": 255,
+            "title": "Assigned To",
+            "default": ""
+          },
+          "staff_notes": {
+            "type": "string",
+            "maxLength": 10000,
+            "title": "Staff Notes",
+            "default": ""
+          },
+          "notice_draft": {
+            "type": "string",
+            "maxLength": 10000,
+            "title": "Notice Draft",
+            "default": ""
+          },
+          "review_state": {
+            "type": "string",
+            "enum": [
+              "draft",
+              "follow_up",
+              "reviewed"
+            ],
+            "title": "Review State",
+            "default": "draft"
+          },
+          "review_notes": {
+            "type": "string",
+            "maxLength": 4000,
+            "title": "Review Notes",
+            "default": ""
+          },
+          "public_summary": {
+            "type": "string",
+            "maxLength": 10000,
+            "title": "Public Summary",
+            "default": ""
+          },
+          "analysis": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AnalysisRecord"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "title",
+          "property_reference",
+          "inspection_reference",
+          "dataset_kind",
+          "inspector_notes"
+        ],
+        "title": "InspectionInput"
+      },
+      "IntakeInput": {
+        "properties": {
+          "expected_revision": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Revision"
+          },
+          "project_name": {
+            "type": "string",
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Project Name"
+          },
+          "project_description": {
+            "type": "string",
+            "maxLength": 10000,
+            "minLength": 1,
+            "title": "Project Description"
+          },
+          "location": {
+            "type": "string",
+            "maxLength": 1000,
+            "minLength": 1,
+            "title": "Location"
+          },
+          "applicant_contact": {
+            "type": "string",
+            "maxLength": 2000,
+            "title": "Applicant Contact",
+            "default": ""
+          },
+          "requirement_revision": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Requirement Revision"
+          },
+          "materials": {
+            "items": {
+              "$ref": "#/components/schemas/MaterialReview"
+            },
+            "type": "array",
+            "maxItems": 100,
+            "minItems": 1,
+            "title": "Materials"
+          },
+          "linked_sources": {
+            "items": {
+              "$ref": "#/components/schemas/townlight_permitting__workflow_models__SourceLink"
+            },
+            "type": "array",
+            "maxItems": 30,
+            "title": "Linked Sources"
+          },
+          "staff_notes": {
+            "type": "string",
+            "maxLength": 10000,
+            "title": "Staff Notes",
+            "default": ""
+          },
+          "assigned_to": {
+            "type": "string",
+            "maxLength": 255,
+            "title": "Assigned To",
+            "default": ""
+          },
+          "review_state": {
+            "type": "string",
+            "enum": [
+              "draft",
+              "follow_up",
+              "reviewed"
+            ],
+            "title": "Review State",
+            "default": "draft"
+          },
+          "review_notes": {
+            "type": "string",
+            "maxLength": 4000,
+            "title": "Review Notes",
+            "default": ""
+          },
+          "public_summary": {
+            "type": "string",
+            "maxLength": 10000,
+            "title": "Public Summary",
+            "default": ""
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "project_name",
+          "project_description",
+          "location",
+          "requirement_revision",
+          "materials"
+        ],
+        "title": "IntakeInput"
+      },
+      "InterpretationNoteCreate": {
+        "properties": {
+          "note_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note Id"
+          },
+          "note_text": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Note Text"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status",
+            "default": "draft"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "note_text"
+        ],
+        "title": "InterpretationNoteCreate",
+        "description": "Request body for staff-only interpretation notes."
       },
       "InterviewRequest": {
         "properties": {
@@ -11596,6 +12802,300 @@
           "size_bytes"
         ],
         "title": "ManagedFileReceipt"
+      },
+      "ManagedSource": {
+        "properties": {
+          "original_path": {
+            "type": "string",
+            "title": "Original Path"
+          },
+          "stored_path": {
+            "type": "string",
+            "title": "Stored Path"
+          },
+          "file_name": {
+            "type": "string",
+            "title": "File Name"
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Sha256"
+          },
+          "size_bytes": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Size Bytes"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "original_path",
+          "stored_path",
+          "file_name",
+          "sha256",
+          "size_bytes"
+        ],
+        "title": "ManagedSource"
+      },
+      "Material": {
+        "properties": {
+          "material_id": {
+            "type": "string",
+            "pattern": "^[a-zA-Z0-9_-]{1,80}$",
+            "title": "Material Id"
+          },
+          "description": {
+            "type": "string",
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Description"
+          },
+          "citation": {
+            "type": "string",
+            "maxLength": 1000,
+            "minLength": 1,
+            "title": "Citation"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "material_id",
+          "description",
+          "citation"
+        ],
+        "title": "Material"
+      },
+      "MaterialReview": {
+        "properties": {
+          "material_id": {
+            "type": "string",
+            "maxLength": 80,
+            "minLength": 1,
+            "title": "Material Id"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "not_reviewed",
+              "provided",
+              "missing",
+              "unclear"
+            ],
+            "title": "Status",
+            "default": "not_reviewed"
+          },
+          "note": {
+            "type": "string",
+            "maxLength": 2000,
+            "title": "Note",
+            "default": ""
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "material_id"
+        ],
+        "title": "MaterialReview"
+      },
+      "Measurement": {
+        "properties": {
+          "recorded_on": {
+            "type": "string",
+            "format": "date",
+            "title": "Recorded On"
+          },
+          "value": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "string"
+              }
+            ],
+            "title": "Value"
+          },
+          "evidence": {
+            "type": "string",
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Evidence"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "recorded_on",
+          "value",
+          "evidence"
+        ],
+        "title": "Measurement"
+      },
+      "MediaAnalysis": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/EvidenceItem"
+            },
+            "type": "array",
+            "maxItems": 10,
+            "minItems": 1,
+            "title": "Items"
+          },
+          "code_links": {
+            "items": {
+              "$ref": "#/components/schemas/CodeLink"
+            },
+            "type": "array",
+            "maxItems": 30,
+            "title": "Code Links"
+          },
+          "inspector_supplied_text": {
+            "type": "string",
+            "maxLength": 10000,
+            "title": "Inspector Supplied Text",
+            "default": ""
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "title": "MediaAnalysis"
+      },
+      "MeetingInput": {
+        "properties": {
+          "title": {
+            "type": "string",
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Title"
+          },
+          "scheduled_start": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Scheduled Start"
+          },
+          "location": {
+            "type": "string",
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Location"
+          },
+          "meeting_type": {
+            "type": "string",
+            "enum": [
+              "regular",
+              "special",
+              "emergency",
+              "closed_session",
+              "executive"
+            ],
+            "title": "Meeting Type",
+            "default": "regular"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "title",
+          "scheduled_start",
+          "location"
+        ],
+        "title": "MeetingInput"
+      },
+      "MeetingLink": {
+        "properties": {
+          "source_id": {
+            "type": "string",
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Source Id"
+          },
+          "expected_sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Expected Sha256"
+          },
+          "relation": {
+            "type": "string",
+            "enum": [
+              "hearing",
+              "context",
+              "precedent"
+            ],
+            "title": "Relation"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "source_id",
+          "expected_sha256",
+          "relation"
+        ],
+        "title": "MeetingLink"
+      },
+      "MeetingSearch": {
+        "properties": {
+          "query": {
+            "type": "string",
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Query"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "query"
+        ],
+        "title": "MeetingSearch"
+      },
+      "MeetingStageInput": {
+        "properties": {
+          "to_status": {
+            "type": "string",
+            "enum": [
+              "SCHEDULED",
+              "NOTICED",
+              "PACKET_POSTED",
+              "IN_PROGRESS",
+              "RECESSED",
+              "ADJOURNED",
+              "TRANSCRIPT_READY",
+              "MINUTES_DRAFTED",
+              "MINUTES_POSTED",
+              "MINUTES_ADOPTED",
+              "MINUTES_SIGNED",
+              "ARCHIVED",
+              "CANCELLED"
+            ],
+            "title": "To Status"
+          },
+          "statutory_basis": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Statutory Basis"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "to_status"
+        ],
+        "title": "MeetingStageInput"
       },
       "MeetingsSearch": {
         "properties": {
@@ -11779,6 +13279,70 @@
           "created_at_unix_seconds"
         ],
         "title": "MessageView"
+      },
+      "Milestone": {
+        "properties": {
+          "title": {
+            "type": "string",
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Title"
+          },
+          "due_on": {
+            "type": "string",
+            "format": "date",
+            "title": "Due On"
+          },
+          "completed_on": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Completed On"
+          },
+          "evidence": {
+            "type": "string",
+            "maxLength": 2000,
+            "title": "Evidence",
+            "default": ""
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "title",
+          "due_on"
+        ],
+        "title": "Milestone"
+      },
+      "MinutesDecision": {
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "post",
+              "adopt",
+              "sign"
+            ],
+            "title": "Action"
+          },
+          "note": {
+            "type": "string",
+            "title": "Note",
+            "default": ""
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "action"
+        ],
+        "title": "MinutesDecision"
       },
       "ModelRegistryCreate": {
         "properties": {
@@ -12071,6 +13635,54 @@
         "title": "ModelRegistryUpdate",
         "description": "Schema for partially updating a model_registry record (PATCH body).\n\nEvery field is optional so callers can send only the fields they want to\nchange."
       },
+      "MotionCorrection": {
+        "properties": {
+          "text": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Text"
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Reason"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "text",
+          "reason"
+        ],
+        "title": "MotionCorrection"
+      },
+      "MotionInput": {
+        "properties": {
+          "text": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Text"
+          },
+          "seconded_by": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Seconded By"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "text"
+        ],
+        "title": "MotionInput"
+      },
       "NativePayload": {
         "properties": {},
         "additionalProperties": false,
@@ -12343,6 +13955,157 @@
           "deadline_reviewed_at"
         ],
         "title": "NativeRequestRead"
+      },
+      "NoticeDocumentInput": {
+        "properties": {
+          "text": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Text"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "text"
+        ],
+        "title": "NoticeDocumentInput"
+      },
+      "NoticeDraft": {
+        "properties": {
+          "title": {
+            "type": "string",
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Title"
+          },
+          "body": {
+            "type": "string",
+            "maxLength": 100000,
+            "minLength": 1,
+            "title": "Body"
+          },
+          "notice_type": {
+            "type": "string",
+            "maxLength": 160,
+            "minLength": 1,
+            "title": "Notice Type"
+          },
+          "statutory_basis": {
+            "type": "string",
+            "maxLength": 5000,
+            "minLength": 1,
+            "title": "Statutory Basis"
+          },
+          "event_date": {
+            "type": "string",
+            "format": "date",
+            "title": "Event Date"
+          },
+          "lead_days": {
+            "type": "integer",
+            "maximum": 365.0,
+            "minimum": 0.0,
+            "title": "Lead Days"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "title",
+          "body",
+          "notice_type",
+          "statutory_basis",
+          "event_date",
+          "lead_days"
+        ],
+        "title": "NoticeDraft"
+      },
+      "NoticeInput": {
+        "properties": {
+          "notice_type": {
+            "type": "string",
+            "enum": [
+              "regular",
+              "special",
+              "emergency",
+              "closed_session",
+              "executive"
+            ],
+            "title": "Notice Type"
+          },
+          "posted_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Posted At"
+          },
+          "minimum_notice_hours": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Minimum Notice Hours"
+          },
+          "statutory_basis": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Statutory Basis"
+          },
+          "approved_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approved By"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "notice_type",
+          "posted_at",
+          "minimum_notice_hours"
+        ],
+        "title": "NoticeInput"
+      },
+      "NoticeProofInput": {
+        "properties": {
+          "location": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Location"
+          },
+          "note": {
+            "type": "string",
+            "title": "Note",
+            "default": ""
+          },
+          "document_delivery_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Document Delivery Id"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "location"
+        ],
+        "title": "NoticeProofInput"
       },
       "NotificationLogRead": {
         "properties": {
@@ -12751,6 +14514,234 @@
         ],
         "title": "OperationalMetrics"
       },
+      "Outline": {
+        "properties": {
+          "title": {
+            "type": "string",
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Title"
+          },
+          "question_ids": {
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "type": "array",
+            "maxItems": 50,
+            "minItems": 1,
+            "title": "Question Ids"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "title",
+          "question_ids"
+        ],
+        "title": "Outline"
+      },
+      "Packet": {
+        "properties": {
+          "expected_revision": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Expected Revision"
+          },
+          "visibility": {
+            "type": "string",
+            "enum": [
+              "staff_only",
+              "records_copy"
+            ],
+            "title": "Visibility"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "expected_revision",
+          "visibility"
+        ],
+        "title": "Packet"
+      },
+      "PacketInput": {
+        "properties": {
+          "agenda_item_ids": {
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "type": "array",
+            "title": "Agenda Item Ids"
+          },
+          "source_files": {
+            "items": {
+              "$ref": "#/components/schemas/ManagedSource"
+            },
+            "type": "array",
+            "title": "Source Files"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "agenda_item_ids"
+        ],
+        "title": "PacketInput"
+      },
+      "Pathway": {
+        "properties": {
+          "project_type": {
+            "type": "string",
+            "maxLength": 120,
+            "minLength": 1,
+            "title": "Project Type"
+          },
+          "proposal": {
+            "type": "string",
+            "maxLength": 4000,
+            "title": "Proposal",
+            "default": ""
+          },
+          "location_context": {
+            "type": "string",
+            "maxLength": 1000,
+            "title": "Location Context",
+            "default": ""
+          },
+          "requirement_revision": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Requirement Revision"
+          },
+          "fee_link": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/townlight_permitting__workflow_models__SourceLink"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "project_type"
+        ],
+        "title": "Pathway"
+      },
+      "PathwayStep": {
+        "properties": {
+          "step": {
+            "type": "string",
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Step"
+          },
+          "citation": {
+            "type": "string",
+            "maxLength": 1000,
+            "minLength": 1,
+            "title": "Citation"
+          },
+          "typical_time": {
+            "type": "string",
+            "maxLength": 1000,
+            "title": "Typical Time",
+            "default": ""
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "step",
+          "citation"
+        ],
+        "title": "PathwayStep"
+      },
+      "PlainLanguageSummaryCreate": {
+        "properties": {
+          "summary_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Summary Id"
+          },
+          "section_version_id": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Section Version Id"
+          },
+          "summary_text": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Summary Text"
+          },
+          "language_code": {
+            "type": "string",
+            "title": "Language Code",
+            "default": "en"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status",
+            "default": "draft"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "section_version_id",
+          "summary_text"
+        ],
+        "title": "PlainLanguageSummaryCreate",
+        "description": "Request body for staff-drafted plain-language summaries."
+      },
+      "PolicySelection": {
+        "properties": {
+          "plan_id": {
+            "type": "string",
+            "maxLength": 160,
+            "minLength": 1,
+            "title": "Plan Id"
+          },
+          "revision_id": {
+            "type": "string",
+            "maxLength": 36,
+            "minLength": 36,
+            "title": "Revision Id"
+          },
+          "policy_id": {
+            "type": "string",
+            "maxLength": 160,
+            "minLength": 1,
+            "title": "Policy Id"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "plan_id",
+          "revision_id",
+          "policy_id"
+        ],
+        "title": "PolicySelection"
+      },
       "PortalModeResponse": {
         "properties": {
           "mode": {
@@ -12768,7 +14759,7 @@
           "mode"
         ],
         "title": "PortalModeResponse",
-        "description": "T5D \u2014 schema for ``GET /config/portal-mode``.\n\nExposed to the frontend on boot so it can branch routing without a\nuser-identity lookup. The payload is intentionally the single field\nbelow \u2014 no staff config, no user state, no schema version."
+        "description": "T5D — schema for ``GET /config/portal-mode``.\n\nExposed to the frontend on boot so it can branch routing without a\nuser-identity lookup. The payload is intentionally the single field\nbelow — no staff config, no user state, no schema version."
       },
       "PrepareArtifact": {
         "properties": {
@@ -12787,6 +14778,152 @@
           "kind"
         ],
         "title": "PrepareArtifact"
+      },
+      "Proof": {
+        "properties": {
+          "sequence": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Sequence"
+          },
+          "filename": {
+            "type": "string",
+            "maxLength": 150,
+            "minLength": 1,
+            "title": "Filename"
+          },
+          "content_base64": {
+            "type": "string",
+            "maxLength": 7000000,
+            "minLength": 1,
+            "title": "Content Base64"
+          },
+          "location": {
+            "type": "string",
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Location"
+          },
+          "published_at": {
+            "type": "string",
+            "maxLength": 80,
+            "minLength": 1,
+            "title": "Published At"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "sequence",
+          "filename",
+          "content_base64",
+          "location",
+          "published_at"
+        ],
+        "title": "Proof"
+      },
+      "Proposal": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{1,64}$",
+            "title": "Id"
+          },
+          "version_id": {
+            "type": "string",
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Version Id"
+          },
+          "meeting_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Meeting Id"
+          },
+          "title": {
+            "type": "string",
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Title"
+          },
+          "ordinance_number": {
+            "type": "string",
+            "maxLength": 120,
+            "minLength": 1,
+            "title": "Ordinance Number"
+          },
+          "proposed_text": {
+            "type": "string",
+            "maxLength": 1000000,
+            "minLength": 1,
+            "title": "Proposed Text"
+          },
+          "supersedes_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9_-]{1,64}$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Supersedes Id"
+          },
+          "reconciliation_note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reconciliation Note"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "id",
+          "version_id",
+          "meeting_id",
+          "title",
+          "ordinance_number",
+          "proposed_text"
+        ],
+        "title": "Proposal"
+      },
+      "PublicExplore": {
+        "properties": {
+          "goal": {
+            "type": "string",
+            "maxLength": 500,
+            "title": "Goal",
+            "default": ""
+          },
+          "topic": {
+            "type": "string",
+            "maxLength": 160,
+            "title": "Topic",
+            "default": ""
+          },
+          "neighborhood": {
+            "type": "string",
+            "maxLength": 255,
+            "title": "Neighborhood",
+            "default": ""
+          },
+          "plan_type": {
+            "type": "string",
+            "maxLength": 120,
+            "title": "Plan Type",
+            "default": ""
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "PublicExplore"
       },
       "PublicIntake": {
         "properties": {
@@ -12997,6 +15134,100 @@
           "action"
         ],
         "title": "PublishingPlan"
+      },
+      "Question": {
+        "properties": {
+          "jurisdiction": {
+            "type": "string",
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Jurisdiction"
+          },
+          "query": {
+            "type": "string",
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Query"
+          },
+          "question": {
+            "type": "string",
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Question"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "use",
+              "dimension"
+            ],
+            "title": "Kind"
+          },
+          "key": {
+            "type": "string",
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Key"
+          },
+          "audience": {
+            "type": "string",
+            "enum": [
+              "resident",
+              "staff"
+            ],
+            "title": "Audience",
+            "default": "resident"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "jurisdiction",
+          "query",
+          "question",
+          "kind",
+          "key"
+        ],
+        "title": "Question"
+      },
+      "QuestionAnswerRequest": {
+        "properties": {
+          "question": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Question"
+          },
+          "section_number": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Section Number"
+          },
+          "as_of": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "As Of"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "question"
+        ],
+        "title": "QuestionAnswerRequest",
+        "description": "Request body for citation-grounded code Q&A."
       },
       "RecordsDocumentView": {
         "properties": {
@@ -13486,6 +15717,22 @@
           "created_at_unix_seconds"
         ],
         "title": "ReleasePackageView"
+      },
+      "RepeatLookup": {
+        "properties": {
+          "property_reference": {
+            "type": "string",
+            "maxLength": 1000,
+            "minLength": 1,
+            "title": "Property Reference"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "property_reference"
+        ],
+        "title": "RepeatLookup"
       },
       "RequestCreate": {
         "properties": {
@@ -14011,6 +16258,130 @@
         "type": "object",
         "title": "RequestUpdate"
       },
+      "RequirementBundle": {
+        "properties": {
+          "requirement_id": {
+            "type": "string",
+            "pattern": "^[a-zA-Z0-9_-]{1,100}$",
+            "title": "Requirement Id"
+          },
+          "title": {
+            "type": "string",
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Title"
+          },
+          "jurisdiction": {
+            "type": "string",
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Jurisdiction"
+          },
+          "project_type": {
+            "type": "string",
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Project Type"
+          },
+          "source_reference": {
+            "type": "string",
+            "maxLength": 1000,
+            "minLength": 1,
+            "title": "Source Reference"
+          },
+          "source_date": {
+            "type": "string",
+            "format": "date",
+            "title": "Source Date"
+          },
+          "effective_on": {
+            "type": "string",
+            "format": "date",
+            "title": "Effective On"
+          },
+          "dataset_kind": {
+            "type": "string",
+            "enum": [
+              "municipal",
+              "fictional"
+            ],
+            "title": "Dataset Kind"
+          },
+          "filename": {
+            "type": "string",
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,150}$",
+            "title": "Filename"
+          },
+          "content_base64": {
+            "type": "string",
+            "maxLength": 14000000,
+            "minLength": 1,
+            "title": "Content Base64"
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$",
+            "title": "Sha256"
+          },
+          "materials": {
+            "items": {
+              "$ref": "#/components/schemas/Material"
+            },
+            "type": "array",
+            "maxItems": 100,
+            "minItems": 1,
+            "title": "Materials"
+          },
+          "pathway": {
+            "items": {
+              "$ref": "#/components/schemas/PathwayStep"
+            },
+            "type": "array",
+            "maxItems": 100,
+            "title": "Pathway"
+          },
+          "fee_link": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/townlight_permitting__workflow_models__SourceLink"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "staff_note": {
+            "type": "string",
+            "maxLength": 4000,
+            "title": "Staff Note",
+            "default": ""
+          },
+          "change_note": {
+            "type": "string",
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Change Note"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "requirement_id",
+          "title",
+          "jurisdiction",
+          "project_type",
+          "source_reference",
+          "source_date",
+          "effective_on",
+          "dataset_kind",
+          "filename",
+          "content_base64",
+          "sha256",
+          "materials",
+          "change_note"
+        ],
+        "title": "RequirementBundle"
+      },
       "ResponseLetterCreate": {
         "properties": {
           "template_id": {
@@ -14187,6 +16558,25 @@
         "type": "object",
         "title": "ReviewInput"
       },
+      "Revision": {
+        "properties": {
+          "sequence": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Sequence"
+          },
+          "document": {
+            "$ref": "#/components/schemas/NoticeDraft"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "sequence",
+          "document"
+        ],
+        "title": "Revision"
+      },
       "RewriteInput": {
         "properties": {
           "action": {
@@ -14281,6 +16671,71 @@
           "outcome"
         ],
         "title": "RewriteResult"
+      },
+      "Rule": {
+        "properties": {
+          "jurisdiction": {
+            "type": "string",
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Jurisdiction"
+          },
+          "zone_code": {
+            "type": "string",
+            "maxLength": 80,
+            "minLength": 1,
+            "title": "Zone Code"
+          },
+          "key": {
+            "type": "string",
+            "maxLength": 120,
+            "minLength": 1,
+            "title": "Key"
+          },
+          "section_number": {
+            "type": "string",
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Section Number"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "use",
+              "dimension"
+            ],
+            "title": "Kind"
+          },
+          "value": {
+            "type": "string",
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Value"
+          },
+          "overlay_code": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 255
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Overlay Code"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "jurisdiction",
+          "zone_code",
+          "key",
+          "section_number",
+          "kind",
+          "value"
+        ],
+        "title": "Rule"
       },
       "RuleTestMatch": {
         "properties": {
@@ -14868,6 +17323,206 @@
         ],
         "title": "SearchSessionRead"
       },
+      "SectionCreate": {
+        "properties": {
+          "section_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Section Id"
+          },
+          "chapter_id": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Chapter Id"
+          },
+          "section_number": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Section Number"
+          },
+          "section_heading": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Section Heading"
+          },
+          "parent_section_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parent Section Id"
+          },
+          "sort_order": {
+            "type": "integer",
+            "title": "Sort Order",
+            "default": 0
+          },
+          "administrative_regulation_refs": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Administrative Regulation Refs"
+          },
+          "resolution_refs": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Resolution Refs"
+          },
+          "policy_refs": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Policy Refs"
+          },
+          "approved_summary_refs": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Approved Summary Refs"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "chapter_id",
+          "section_number",
+          "section_heading"
+        ],
+        "title": "SectionCreate",
+        "description": "Request body for creating a code section or subsection."
+      },
+      "SectionVersionCreate": {
+        "properties": {
+          "version_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Version Id"
+          },
+          "section_id": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Section Id"
+          },
+          "source_id": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Source Id"
+          },
+          "version_label": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Version Label"
+          },
+          "body": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Body"
+          },
+          "effective_start": {
+            "type": "string",
+            "format": "date",
+            "title": "Effective Start"
+          },
+          "effective_end": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Effective End"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status",
+            "default": "draft"
+          },
+          "is_current": {
+            "type": "boolean",
+            "title": "Is Current",
+            "default": false
+          },
+          "adoption_event_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Adoption Event Id"
+          },
+          "amendment_event_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Amendment Event Id"
+          },
+          "amendment_summary": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Amendment Summary"
+          },
+          "prior_version_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Prior Version Id"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "section_id",
+          "source_id",
+          "version_label",
+          "body",
+          "effective_start"
+        ],
+        "title": "SectionVersionCreate",
+        "description": "Request body for adding an immutable section version."
+      },
       "Selection": {
         "properties": {
           "recording_id": {
@@ -14888,6 +17543,28 @@
           "expected_sha256"
         ],
         "title": "Selection"
+      },
+      "SentenceInput": {
+        "properties": {
+          "text": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Text"
+          },
+          "citations": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Citations"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "text"
+        ],
+        "title": "SentenceInput"
       },
       "ServiceAccountCreate": {
         "properties": {
@@ -14950,7 +17627,7 @@
           "api_key"
         ],
         "title": "ServiceAccountCreated",
-        "description": "Returned only on creation \u2014 includes the plaintext API key (shown once)."
+        "description": "Returned only on creation — includes the plaintext API key (shown once)."
       },
       "ServiceAccountRead": {
         "properties": {
@@ -15019,6 +17696,228 @@
         "type": "object",
         "title": "ServiceAccountUpdate"
       },
+      "Snapshot": {
+        "properties": {
+          "expected_revision": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Expected Revision"
+          },
+          "visibility": {
+            "type": "string",
+            "enum": [
+              "staff_only",
+              "public"
+            ],
+            "title": "Visibility"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "expected_revision",
+          "visibility"
+        ],
+        "title": "Snapshot"
+      },
+      "SourceCreate": {
+        "properties": {
+          "source_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Id"
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Name"
+          },
+          "publisher": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Publisher"
+          },
+          "source_type": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Source Type"
+          },
+          "source_category": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Source Category"
+          },
+          "source_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Url"
+          },
+          "file_reference": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "File Reference"
+          },
+          "retrieved_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Retrieved At"
+          },
+          "retrieval_method": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Retrieval Method"
+          },
+          "checksum": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Checksum"
+          },
+          "source_owner": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Owner"
+          },
+          "is_official": {
+            "type": "boolean",
+            "title": "Is Official",
+            "default": true
+          },
+          "official_status_note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Official Status Note"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status",
+            "default": "draft"
+          },
+          "staff_notes": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Staff Notes"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "name",
+          "publisher",
+          "source_type",
+          "source_category"
+        ],
+        "title": "SourceCreate",
+        "description": "Request body for registering an official or explicitly labeled source."
+      },
+      "SourceInput": {
+        "properties": {
+          "source_id": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Source Id"
+          },
+          "label": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Label"
+          },
+          "text": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Text"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "source_id",
+          "label",
+          "text"
+        ],
+        "title": "SourceInput"
+      },
+      "SourceSnapshot": {
+        "properties": {
+          "visibility": {
+            "type": "string",
+            "enum": [
+              "public",
+              "staff_only"
+            ],
+            "title": "Visibility"
+          },
+          "meeting_event_ids": {
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "type": "array",
+            "maxItems": 50,
+            "title": "Meeting Event Ids"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "visibility"
+        ],
+        "title": "SourceSnapshot"
+      },
       "SourceType": {
         "type": "string",
         "enum": [
@@ -15060,6 +17959,49 @@
         ],
         "title": "StaffRecordsIntake",
         "description": "Existing native create-records-request input; no caller-supplied actor."
+      },
+      "StandardsExplanation": {
+        "properties": {
+          "question": {
+            "type": "string",
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Question"
+          },
+          "process_section": {
+            "type": "string",
+            "maxLength": 255,
+            "title": "Process Section",
+            "default": ""
+          },
+          "zone_code": {
+            "type": "string",
+            "maxLength": 40,
+            "title": "Zone Code",
+            "default": ""
+          },
+          "rule_types": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "maxItems": 10,
+            "title": "Rule Types"
+          },
+          "observed": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object",
+            "title": "Observed"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "question"
+        ],
+        "title": "StandardsExplanation"
       },
       "SyncFailureRead": {
         "properties": {
@@ -15624,6 +18566,77 @@
         ],
         "title": "TimelineView"
       },
+      "TitleCreate": {
+        "properties": {
+          "title_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title Id"
+          },
+          "title_number": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Title Number"
+          },
+          "title_name": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Title Name"
+          },
+          "sort_order": {
+            "type": "integer",
+            "title": "Sort Order",
+            "default": 0
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "title_number",
+          "title_name"
+        ],
+        "title": "TitleCreate",
+        "description": "Request body for creating a code title."
+      },
+      "TranscriptInput": {
+        "properties": {
+          "source_label": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Source Label"
+          },
+          "transcript_text": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Transcript Text"
+          },
+          "correction_of_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Correction Of Id"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "source_label",
+          "transcript_text"
+        ],
+        "title": "TranscriptInput"
+      },
       "UserRead": {
         "properties": {
           "id": {
@@ -15880,6 +18893,325 @@
           "type"
         ],
         "title": "ValidationError"
+      },
+      "Version": {
+        "properties": {
+          "sequence": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Sequence"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "sequence"
+        ],
+        "title": "Version"
+      },
+      "VoteCorrection": {
+        "properties": {
+          "vote": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Vote"
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Reason"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "vote",
+          "reason"
+        ],
+        "title": "VoteCorrection"
+      },
+      "VoteInput": {
+        "properties": {
+          "voter_name": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Voter Name"
+          },
+          "vote": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Vote"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "voter_name",
+          "vote"
+        ],
+        "title": "VoteInput"
+      },
+      "_ParcelLookupIn": {
+        "properties": {
+          "jurisdiction": {
+            "type": "string",
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Jurisdiction"
+          },
+          "query": {
+            "type": "string",
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Query"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "jurisdiction",
+          "query"
+        ],
+        "title": "_ParcelLookupIn"
+      },
+      "townlight_inspections__workflow_models__SourceLink": {
+        "properties": {
+          "provider": {
+            "type": "string",
+            "const": "code",
+            "title": "Provider",
+            "default": "code"
+          },
+          "source_id": {
+            "type": "string",
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Source Id"
+          },
+          "expected_sha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$",
+            "title": "Expected Sha256"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "source_id",
+          "expected_sha256"
+        ],
+        "title": "SourceLink"
+      },
+      "townlight_permitting__workflow_models__SourceLink": {
+        "properties": {
+          "provider": {
+            "type": "string",
+            "enum": [
+              "code",
+              "zoning"
+            ],
+            "title": "Provider"
+          },
+          "source_id": {
+            "type": "string",
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Source Id"
+          },
+          "expected_sha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$",
+            "title": "Expected Sha256"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "provider",
+          "source_id",
+          "expected_sha256"
+        ],
+        "title": "SourceLink"
+      },
+      "townlight_runtime__inspections_bridge__Search": {
+        "properties": {
+          "provider": {
+            "type": "string",
+            "const": "code",
+            "title": "Provider"
+          },
+          "query": {
+            "type": "string",
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Query"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "provider",
+          "query"
+        ],
+        "title": "Search"
+      },
+      "townlight_runtime__notice_bridge__Review": {
+        "properties": {
+          "sequence": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Sequence"
+          },
+          "note": {
+            "type": "string",
+            "maxLength": 5000,
+            "minLength": 1,
+            "title": "Note"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "sequence",
+          "note"
+        ],
+        "title": "Review"
+      },
+      "townlight_runtime__permitting_bridge__Import": {
+        "properties": {
+          "bundle": {
+            "$ref": "#/components/schemas/RequirementBundle"
+          },
+          "expected_revision": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Revision"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "bundle"
+        ],
+        "title": "Import"
+      },
+      "townlight_runtime__permitting_bridge__Search": {
+        "properties": {
+          "provider": {
+            "type": "string",
+            "enum": [
+              "code",
+              "zoning"
+            ],
+            "title": "Provider"
+          },
+          "query": {
+            "type": "string",
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Query"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "provider",
+          "query"
+        ],
+        "title": "Search"
+      },
+      "townlight_runtime__planning_bridge__Import": {
+        "properties": {
+          "bundle": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Bundle"
+          },
+          "expected_previous_revision": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 36,
+                "minLength": 36
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Previous Revision"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "bundle"
+        ],
+        "title": "Import"
+      },
+      "townlight_runtime__planning_bridge__Search": {
+        "properties": {
+          "query": {
+            "type": "string",
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Query"
+          },
+          "plan_type": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 40
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Plan Type"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "query"
+        ],
+        "title": "Search"
+      },
+      "townlight_runtime__zoning_bridge__Review": {
+        "properties": {
+          "answer": {
+            "type": "string",
+            "maxLength": 10000,
+            "title": "Answer",
+            "default": ""
+          },
+          "notes": {
+            "type": "string",
+            "maxLength": 10000,
+            "title": "Notes",
+            "default": ""
+          },
+          "queue_status": {
+            "type": "string",
+            "enum": [
+              "open",
+              "in_review",
+              "resolved",
+              "closed"
+            ],
+            "title": "Queue Status",
+            "default": "resolved"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "Review"
       }
     },
     "securitySchemes": {
@@ -15894,5 +19226,9 @@
       }
     }
   },
-  "x-townlight-boundary": "Effective outer runtime plus selected mounted inner-domain paths; outer /health wins"
+  "x-townlight-component": {
+    "view": "records",
+    "identity": "Townlight Records 1.8.0.dev2",
+    "evidence": "source-schema-only"
+  }
 }

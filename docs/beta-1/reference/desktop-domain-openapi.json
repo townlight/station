@@ -11267,10 +11267,10 @@
         }
       }
     },
-    "/civiccode": {
+    "/townlight_code": {
       "get": {
         "summary": "Home",
-        "operationId": "home_civiccode_get",
+        "operationId": "home_townlight_code_get",
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -11285,10 +11285,10 @@
         }
       }
     },
-    "/civiccode/search": {
+    "/townlight_code/search": {
       "get": {
         "summary": "Search",
-        "operationId": "search_civiccode_search_get",
+        "operationId": "search_townlight_code_search_get",
         "parameters": [
           {
             "name": "q",
@@ -11325,10 +11325,10 @@
         }
       }
     },
-    "/civiccode/answer": {
+    "/townlight_code/answer": {
       "get": {
         "summary": "Answer",
-        "operationId": "answer_civiccode_answer_get",
+        "operationId": "answer_townlight_code_answer_get",
         "parameters": [
           {
             "name": "q",
@@ -11398,10 +11398,10 @@
         }
       }
     },
-    "/civiccode/sections/{section_ref}": {
+    "/townlight_code/sections/{section_ref}": {
       "get": {
         "summary": "Detail",
-        "operationId": "detail_civiccode_sections__section_ref__get",
+        "operationId": "detail_townlight_code_sections__section_ref__get",
         "parameters": [
           {
             "name": "section_ref",
@@ -11454,10 +11454,10 @@
         }
       }
     },
-    "/civiccode/sections/{section_ref}/export": {
+    "/townlight_code/sections/{section_ref}/export": {
       "get": {
         "summary": "Export",
-        "operationId": "export_civiccode_sections__section_ref__export_get",
+        "operationId": "export_townlight_code_sections__section_ref__export_get",
         "parameters": [
           {
             "name": "section_ref",
@@ -12274,10 +12274,10 @@
         }
       }
     },
-    "/civiczone/questions": {
+    "/townlight_zoning/questions": {
       "post": {
         "summary": "Public Question",
-        "operationId": "public_question_civiczone_questions_post",
+        "operationId": "public_question_townlight_zoning_questions_post",
         "requestBody": {
           "content": {
             "application/json": {
@@ -12310,10 +12310,10 @@
         }
       }
     },
-    "/civiczone/parcels/lookup": {
+    "/townlight_zoning/parcels/lookup": {
       "post": {
         "summary": "Public Parcel Lookup",
-        "operationId": "public_parcel_lookup_civiczone_parcels_lookup_post",
+        "operationId": "public_parcel_lookup_townlight_zoning_parcels_lookup_post",
         "requestBody": {
           "content": {
             "application/json": {
@@ -12376,7 +12376,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/civicsuite_runtime__planning_bridge__Import"
+                "$ref": "#/components/schemas/townlight_runtime__planning_bridge__Import"
               }
             }
           }
@@ -12433,7 +12433,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/civicsuite_runtime__planning_bridge__Import"
+                "$ref": "#/components/schemas/townlight_runtime__planning_bridge__Import"
               }
             }
           }
@@ -12752,7 +12752,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/civicsuite_runtime__planning_bridge__Search"
+                "$ref": "#/components/schemas/townlight_runtime__planning_bridge__Search"
               }
             }
           }
@@ -13901,18 +13901,18 @@
         }
       }
     },
-    "/civicplan/policies/search": {
+    "/townlight_planning/policies/search": {
       "post": {
         "tags": [
           "local-public-planning"
         ],
         "summary": "Public Policies",
-        "operationId": "public_policies_civicplan_policies_search_post",
+        "operationId": "public_policies_townlight_planning_policies_search_post",
         "requestBody": {
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/civicsuite_runtime__planning_bridge__Search"
+                "$ref": "#/components/schemas/townlight_runtime__planning_bridge__Search"
               }
             }
           },
@@ -13940,14 +13940,14 @@
         }
       }
     },
-    "/civicplan/plan-explore": {
+    "/townlight_planning/plan-explore": {
       "post": {
         "tags": [
           "local-public-planning"
         ],
         "summary": "Public Plan Explore",
         "description": "Topic/goal/plan-type exploration over adopted public plan sources only.",
-        "operationId": "public_plan_explore_civicplan_plan_explore_post",
+        "operationId": "public_plan_explore_townlight_planning_plan_explore_post",
         "requestBody": {
           "content": {
             "application/json": {
@@ -13980,13 +13980,13 @@
         }
       }
     },
-    "/civicplan/snapshots": {
+    "/townlight_planning/snapshots": {
       "get": {
         "tags": [
           "local-public-planning"
         ],
         "summary": "Public Snapshots",
-        "operationId": "public_snapshots_civicplan_snapshots_get",
+        "operationId": "public_snapshots_townlight_planning_snapshots_get",
         "parameters": [
           {
             "name": "limit",
@@ -14035,13 +14035,13 @@
         }
       }
     },
-    "/civicplan/snapshots/{snapshot_id}": {
+    "/townlight_planning/snapshots/{snapshot_id}": {
       "get": {
         "tags": [
           "local-public-planning"
         ],
         "summary": "Public Document",
-        "operationId": "public_document_civicplan_snapshots__snapshot_id__get",
+        "operationId": "public_document_townlight_planning_snapshots__snapshot_id__get",
         "parameters": [
           {
             "name": "snapshot_id",
@@ -14076,13 +14076,13 @@
         }
       }
     },
-    "/civicplan/revisions/{revision_id}/documents/{document_id}": {
+    "/townlight_planning/revisions/{revision_id}/documents/{document_id}": {
       "get": {
         "tags": [
           "local-public-planning"
         ],
         "summary": "Public Original",
-        "operationId": "public_original_civicplan_revisions__revision_id__documents__document_id__get",
+        "operationId": "public_original_townlight_planning_revisions__revision_id__documents__document_id__get",
         "parameters": [
           {
             "name": "revision_id",
@@ -14156,7 +14156,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/civicsuite_runtime__permitting_bridge__Import"
+                "$ref": "#/components/schemas/townlight_runtime__permitting_bridge__Import"
               }
             }
           }
@@ -14804,7 +14804,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/civicsuite_runtime__permitting_bridge__Search"
+                "$ref": "#/components/schemas/townlight_runtime__permitting_bridge__Search"
               }
             }
           }
@@ -15557,7 +15557,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/civicsuite_runtime__inspections_bridge__Search"
+                "$ref": "#/components/schemas/townlight_runtime__inspections_bridge__Search"
               }
             }
           }
@@ -19793,7 +19793,7 @@
           },
           "linked_sources": {
             "items": {
-              "$ref": "#/components/schemas/civicinspect__workflow_models__SourceLink"
+              "$ref": "#/components/schemas/townlight_inspections__workflow_models__SourceLink"
             },
             "type": "array",
             "maxItems": 30,
@@ -19915,7 +19915,7 @@
           },
           "linked_sources": {
             "items": {
-              "$ref": "#/components/schemas/civicpermit__workflow_models__SourceLink"
+              "$ref": "#/components/schemas/townlight_permitting__workflow_models__SourceLink"
             },
             "type": "array",
             "maxItems": 30,
@@ -21905,7 +21905,7 @@
           "fee_link": {
             "anyOf": [
               {
-                "$ref": "#/components/schemas/civicpermit__workflow_models__SourceLink"
+                "$ref": "#/components/schemas/townlight_permitting__workflow_models__SourceLink"
               },
               {
                 "type": "null"
@@ -23580,7 +23580,7 @@
           "fee_link": {
             "anyOf": [
               {
-                "$ref": "#/components/schemas/civicpermit__workflow_models__SourceLink"
+                "$ref": "#/components/schemas/townlight_permitting__workflow_models__SourceLink"
               },
               {
                 "type": "null"
@@ -26207,7 +26207,7 @@
         ],
         "title": "_ParcelLookupIn"
       },
-      "civicinspect__workflow_models__SourceLink": {
+      "townlight_inspections__workflow_models__SourceLink": {
         "properties": {
           "provider": {
             "type": "string",
@@ -26235,7 +26235,7 @@
         ],
         "title": "SourceLink"
       },
-      "civicpermit__workflow_models__SourceLink": {
+      "townlight_permitting__workflow_models__SourceLink": {
         "properties": {
           "provider": {
             "type": "string",
@@ -26266,7 +26266,7 @@
         ],
         "title": "SourceLink"
       },
-      "civicsuite_runtime__inspections_bridge__Search": {
+      "townlight_runtime__inspections_bridge__Search": {
         "properties": {
           "provider": {
             "type": "string",
@@ -26288,7 +26288,7 @@
         ],
         "title": "Search"
       },
-      "civicsuite_runtime__permitting_bridge__Import": {
+      "townlight_runtime__permitting_bridge__Import": {
         "properties": {
           "bundle": {
             "$ref": "#/components/schemas/RequirementBundle"
@@ -26313,7 +26313,7 @@
         ],
         "title": "Import"
       },
-      "civicsuite_runtime__permitting_bridge__Search": {
+      "townlight_runtime__permitting_bridge__Search": {
         "properties": {
           "provider": {
             "type": "string",
@@ -26338,7 +26338,7 @@
         ],
         "title": "Search"
       },
-      "civicsuite_runtime__planning_bridge__Import": {
+      "townlight_runtime__planning_bridge__Import": {
         "properties": {
           "bundle": {
             "additionalProperties": true,
@@ -26366,7 +26366,7 @@
         ],
         "title": "Import"
       },
-      "civicsuite_runtime__planning_bridge__Search": {
+      "townlight_runtime__planning_bridge__Search": {
         "properties": {
           "query": {
             "type": "string",
