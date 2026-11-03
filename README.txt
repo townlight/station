@@ -435,4 +435,4 @@ PUBLIC MEETING PORTAL (LOCAL INTEGRATION CANDIDATE)
 
 Townlight's separately deployed portal can publish a reviewed Meetings archive with an explicitly selected, verified Records release copy of the matching completed Station recording. Staff must separately approve publication; fulfilling a Records request does not make the copy public. Review public text and the selected file, then use the Wagtail superuser publication form. Explicit withdrawal hides the meeting and file; unsuccessful synchronization preserves the previous publication. Keep the private original and native proof private. See the suite portal guide for staff steps, setup, API, recovery and source obligations.
 
-This integration is a local candidate. The existing signed Beta 1 installer and historical Sandbox results do not establish that it contains or deploys this portal. CivicCast remains separate.
+This portal beta is distributed separately from the desktop installer. The existing signed Beta 1 installer and historical Sandbox results do not establish that it contains or deploys this portal. CivicCast remains separate.
