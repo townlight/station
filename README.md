@@ -429,3 +429,9 @@ Current owned code is AGPL-3.0-only. Preserve full license, matching correspondi
 ## Station video delivery additions
 
 Staff can upload a verified completed recording to YouTube with explicit approval, title and visibility. Live recordings can simultaneously offer an encrypted SRT feed to the separate CivicCast/PEG operator. Recording continues independently of receiver availability. See the [updated Station manual](https://townlight.github.io/manuals/station.html#completed-recordings-on-youtube-and-live-civiccast-coverage) for setup, API and recovery.
+
+## Public meeting portal (separately deployed beta)
+
+Townlight's separately deployed portal can publish a reviewed Meetings archive with an explicitly selected, verified Records release copy of the matching completed Station recording. Staff must separately approve publication; fulfilling a Records request does not make the copy public. Review public text and the selected file, then use the Wagtail superuser publication form. Explicit withdrawal hides the published meeting and file. An unsuccessful sync preserves the previous publication. Keep the private original and never expose the native session proof. See the [portal guide](https://github.com/townlight/townlight/blob/main/docs/portal/guide.md) for staff steps, setup, API, recovery and source obligations.
+
+This portal beta is distributed separately from the desktop installer. The existing signed Beta 1 installer and historical Sandbox results do not establish that it contains or deploys this portal. CivicCast remains separate.
