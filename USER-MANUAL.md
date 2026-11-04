@@ -1,4 +1,33 @@
-> **Townlight Beta 1 — Station delivery update, 31 October 2026.** [Signed Windows installer, source, documentation and acceptance](https://github.com/townlight/townlight/releases/tag/townlight-beta-1-station-delivery). This edition documents the Sandbox-tested Station delivery additions. Existing component versions are retained. Earlier baseline results remain identified as historical evidence; the new acceptance report identifies the new installer.
+Windows x64 Beta 1 · MSI 1.7.0.1
+
+The signed [Windows x64 beta 1.7.0.1](https://github.com/townlight/townlight/releases/tag/townlight-beta-1-windows-1.7.0.1) passed the documented fresh Windows Sandbox checks with synthetic data.
+
+- <a href="https://townlight.github.io/manuals/station.html#townlight-station-manual" id="toc-townlight-station-manual">Townlight Station Manual</a>
+  - <a href="https://townlight.github.io/manuals/station.html#using-this-manual" id="toc-using-this-manual">Using this manual</a>
+  - <a href="https://townlight.github.io/manuals/station.html#beta-identity" id="toc-beta-identity">Beta identity</a>
+  - <a href="https://townlight.github.io/manuals/station.html#first-run" id="toc-first-run">First run</a>
+  - <a href="https://townlight.github.io/manuals/station.html#daily-workflow" id="toc-daily-workflow">Daily workflow</a>
+  - <a href="https://townlight.github.io/manuals/station.html#connected-workflows" id="toc-connected-workflows">Connected workflows</a>
+  - <a href="https://townlight.github.io/manuals/station.html#architecture" id="toc-architecture">Architecture</a>
+  - <a href="https://townlight.github.io/manuals/station.html#scheduling-playout-and-recovery" id="toc-scheduling-playout-and-recovery">Scheduling playout and recovery</a>
+  - <a href="https://townlight.github.io/manuals/station.html#technical-specifications" id="toc-technical-specifications">Technical specifications</a>
+  - <a href="https://townlight.github.io/manuals/station.html#configuration-and-administration" id="toc-configuration-and-administration">Configuration and administration</a>
+  - <a href="https://townlight.github.io/manuals/station.html#api-and-integration-examples" id="toc-api-and-integration-examples">API and integration examples</a>
+  - <a href="https://townlight.github.io/manuals/station.html#mcp-and-automation-boundary" id="toc-mcp-and-automation-boundary">MCP and automation boundary</a>
+  - <a href="https://townlight.github.io/manuals/station.html#security-and-permissions" id="toc-security-and-permissions">Security and permissions</a>
+  - <a href="https://townlight.github.io/manuals/station.html#backup-recovery-and-maintenance" id="toc-backup-recovery-and-maintenance">Backup recovery and maintenance</a>
+  - <a href="https://townlight.github.io/manuals/station.html#troubleshooting" id="toc-troubleshooting">Troubleshooting</a>
+  - <a href="https://townlight.github.io/manuals/station.html#verified-workflows-and-limits" id="toc-verified-workflows-and-limits">Verified workflows and limits</a>
+  - <a href="https://townlight.github.io/manuals/station.html#terms-of-service-and-license" id="toc-terms-of-service-and-license">Terms of service and license</a>
+  - <a href="https://townlight.github.io/manuals/station.html#glossary" id="toc-glossary">Glossary</a>
+  - <a href="https://townlight.github.io/manuals/station.html#alphabetical-subject-index" id="toc-alphabetical-subject-index">Alphabetical subject index</a>
+  - <a href="https://townlight.github.io/manuals/station.html#source-and-document-control" id="toc-source-and-document-control">Source and document control</a>
+  - <a href="https://townlight.github.io/manuals/station.html#completed-recordings-on-youtube-and-live-civiccast-coverage" id="toc-completed-recordings-on-youtube-and-live-civiccast-coverage">Completed recordings on YouTube and live CivicCast coverage</a>
+  - <a href="https://townlight.github.io/manuals/station.html#delivery-subject-index" id="toc-delivery-subject-index">Delivery subject index</a>
+
+# Townlight Station Manual
+
+The signed [Windows x64 beta 1.7.0.1](https://github.com/townlight/townlight/releases/tag/townlight-beta-1-windows-1.7.0.1) passed the documented fresh Windows Sandbox checks with synthetic data. The [Windows acceptance summary](https://github.com/townlight/townlight/releases/download/townlight-beta-1-windows-1.7.0.1/ACCEPTANCE-Windows-1.7.0.1.md) applies to this exact MSI.
 
 ## Using this manual
 
@@ -9,60 +38,59 @@ Staff should begin with First run and Daily workflow. Administrators should also
 ## Beta identity
 
 | Identity | Value |
-| --- | --- |
-| Public documentation identity | Townlight Beta 1 |
-| Installer version | 1.6.0.1 |
-| Product component | townlight-station 0.3.0 |
-| Native desktop source version | 1.6.0-1 |
-| Candidate artifact identity | Station delivery update; use the release SHA256SUMS.txt |
-| Corresponding source | Updated Station delivery candidate source companion |
-| Current owned software license | AGPL-3.0-only |
-| Supported acceptance profile | Windows x64 fresh install; inspections-preview; separate Station configuration |
+|----|----|
+| Documentation | Townlight naming, Access and Notice candidate |
+| Intended installer | 1.7.0.1 |
+| Desktop source | 1.7.0-1 |
+| Runtime distribution | townlight-runtime 0.2.0 |
+| Station distribution/import | townlight-station 0.3.0 / townlight_station |
+| Acceptance composition | Fresh Windows x64; inspections-preview; Station configured separately |
+| Candidate hashes/signature | [SHA-256 checksums](https://github.com/townlight/townlight/releases/download/townlight-beta-1-windows-1.7.0.1/SHA256SUMS-Windows-1.7.0.1.txt) and [Windows acceptance summary](https://github.com/townlight/townlight/releases/download/townlight-beta-1-windows-1.7.0.1/ACCEPTANCE-Windows-1.7.0.1.md) |
+| Owned software license | AGPL-3.0-only |
 
-
-“Townlight Beta 1” identifies this coordinated beta delivery. It does not renumber the installer, native binary, Python packages or historical receipts. Component versions may differ. This edition accompanies the newly packaged and signed MSI containing the Station delivery additions. The native desktop and other native payload files retain their accepted signed bytes. Historical release pages and manuals describe their own versions and are not the download instructions for this Station delivery candidate.
+This edition updates the paired-runtime instructions for the naming candidate. It does not rename historical Station artifacts or claim new Station software features. Use an empty database and fresh profile; no in-place legacy upgrade or old import shim is supported. Preserve existing city data and the prior release. The approved profile path remains `%LOCALAPPDATA%\CivicSuite` for that path only.
 
 ## First run
 
-1. Download the signed Windows installer and matching source/documentation companions from the [Station delivery release](https://github.com/townlight/townlight/releases/tag/townlight-beta-1-station-delivery). Use that release’s checksums and publisher signature to identify the candidate.
-2. On the intended fresh Windows test installation, verify the MSI hash and publisher signature before installing. Preserve unrelated profiles and recovery material. This candidate has fresh-install acceptance; historical in-place upgrades are unverified.
-3. Launch Townlight under the intended named Windows account. Choose the storage folders. Select **Townlight Inspections candidate** (`inspections-preview`) for all eight desktop products. A narrower default selection will not expose all workspaces.
-4. Enter the city profile, time zone and contacts. Create the first named local administrator, sign in and choose protected backup storage. **Continue without local AI** is valid for the deterministic workflows.
-5. Run Health Check and wait for readiness. Open Townlight. In System Health select **Finish Records Migration** to activate the canonical Python/PostgreSQL runtime. Do not fabricate migration receipts or seed accounts.
-6. Create named staff through Settings. Import authorized sources using each product’s source library. All examples in this package are synthetic; they are not municipal authority.
-7. Provision Station separately if it is part of the beta exercise. Selecting the desktop composition does not start or configure Station. Configure vision explicitly only if automatic photo drafting is selected.
+1.  Download the signed MSI, matching source companion and checksums from the [public Windows release](https://github.com/townlight/townlight/releases/tag/townlight-beta-1-windows-1.7.0.1).
+2.  Verify the MSI hash and Authenticode publisher before installing on a fresh Windows profile. See the [Windows acceptance summary](https://github.com/townlight/townlight/releases/download/townlight-beta-1-windows-1.7.0.1/ACCEPTANCE-Windows-1.7.0.1.md) for the tested setup.
+3.  Launch Townlight under the intended named Windows account. Choose the storage folders. Select **Townlight Inspections candidate** (`inspections-preview`) for the bounded desktop composition, including Access and Notice. A narrower default selection will not expose all workspaces.
+4.  Enter the city profile, time zone and contacts. Create the first named local administrator, sign in and choose protected backup storage. **Continue without local AI** is valid for the deterministic workflows.
+5.  Run Health Check and wait for readiness. Open Townlight. In System Health select **Finish Records Migration** to activate the canonical Python/PostgreSQL runtime. Do not fabricate migration receipts or seed accounts.
+6.  Create named staff through Settings. Import authorized sources using each product’s source library. All examples in this package are synthetic; they are not municipal authority.
+7.  Provision Station separately if it is part of the beta exercise. Selecting the desktop composition does not start or configure Station. Configure vision explicitly only if automatic photo drafting is selected.
 
 ## Daily workflow
 
-### 1. Prepare meeting context {#workflow-1}
+### 1. Prepare meeting context
 
 Create and save the actual meeting and agenda in Meetings. Assign each selected agenda item to that meeting. A recording request cannot substitute an editable meeting label for the canonical records.
 
-### 2. Open the operator {#workflow-2}
+### 2. Open the operator
 
 Sign in as authorized staff. Use the configured local operator command with the explicit native profile root. It obtains a short-lived one-use browser ticket; the native proof is not placed in the URL.
 
-### 3. Choose the input {#workflow-3}
+### 3. Choose the input
 
 Select the meeting, assigned agenda and administrator-configured live-source ID. For recorded-file work, place the source in the managed ingest directory and optionally supply an SRT sidecar. Callers cannot submit arbitrary pipelines or filesystem paths.
 
-### 4. Capture and stop {#workflow-4}
+### 4. Capture and stop
 
 Start capture and distinguish waiting for a signal from active recording. Stop requests pipeline drain. Wait for completed status and validated output; a partial, failed or interrupted attempt is not a completed recording.
 
-### 5. Review recording evidence {#workflow-5}
+### 5. Review recording evidence
 
 Inspect the media and retained context/hash. Retry is explicit for failed/interrupted recorded-file jobs. A lost live signal cannot be reconstructed: begin a new live recording and preserve the failed attempt.
 
-### 6. Hand off to Records {#workflow-6}
+### 6. Hand off to Records
 
 Choose an existing Records request and attach the reviewed recording. The receiver checks bytes/hash and retains a locked private original. Repeating the same handoff retains one canonical document.
 
-### 7. Use playout deliberately {#workflow-7}
+### 7. Use playout deliberately
 
 Scheduling, dry-run/commit playout, staff approval and local publication are distinct API operations. Public playback only serves the separately approved packaged output. Nothing in capture or Records handoff automatically publishes it.
 
-### 8. Close and recover {#workflow-8}
+### 8. Close and recover
 
 Sign out of the operator. Back up Station’s database and media evidence together, separately from Core’s native profile backup. Restart interrupted work deliberately; do not automatically re-air a lost signal.
 
@@ -80,12 +108,10 @@ Drafting, review, approval, attachment, export, fulfillment and publication are 
 
 Meetings → Station → Records is the accepted recording workflow. Townlight owns current session authority; Station owns its database, storage and media children. Standalone CivicCast remains separate, with no shared configuration, service, data directory or automatic updater fallback.
 
-
 | Direction | Material |
-| --- | --- |
+|----|----|
 | Input | A real Townlight staff session, saved Meetings records, a dedicated Station database/data root, a managed ingest filename or configured live-source ID, and optional supplied SRT captions for recorded-file input. |
 | Output | Completed verified recording derivatives, retained original inputs/provenance, separately approved local playback packages and locked private Records evidence. |
-
 
 ### Product boundary
 
@@ -93,7 +119,7 @@ There is no Station first-run wizard or automatic activation by the desktop comp
 
 ## Architecture
 
-<img class="flow" src="https://townlight.github.io/assets/station-architecture.svg" alt="Townlight Station architecture and evidence flow">
+<img src="https://townlight.github.io/assets/station-architecture.svg" class="flow" alt="Townlight Station architecture and evidence flow" />
 
 The drawing shows the principal staff/evidence path. Native commands carry trusted identity to Python business services; PostgreSQL and retained original files hold durable state. A downstream copy does not silently transfer decision authority. Station has its own configured authority/media boundary, database and mutable files. The connected-workflow text supplies the drawing’s reading order and accessibility alternative.
 
@@ -101,11 +127,11 @@ The drawing shows the principal staff/evidence path. Native commands carry trust
 
 ### Schedule a recording and interpret its state
 
-Use **Schedules** after saving the actual meeting/agenda and placing a complete file in Station's managed `ingest` directory. Choose the meeting, **Start** time, **Source file in managed ingest**, and optional SRT **Caption sidecar**, then select **Schedule**. The browser form schedules files. The service's schedule API also supports a configured live-source ID; this is not a second input selector in that browser form.
+Use **Schedules** after saving the actual meeting/agenda and placing a complete file in Station’s managed `ingest` directory. Choose the meeting, **Start** time, **Source file in managed ingest**, and optional SRT **Caption sidecar**, then select **Schedule**. The browser form schedules files. The service’s schedule API also supports a configured live-source ID; this is not a second input selector in that browser form.
 
-The browser's datetime input is interpreted in the operator computer's local timezone and converted to an ISO UTC instant. Verify that computer's timezone before entering a city meeting time. A direct API client should send an explicit timezone offset or `Z`; a timezone-less API datetime is interpreted as UTC. A synthetic `POST /v1/schedules` body is:
+The browser’s datetime input is interpreted in the operator computer’s local timezone and converted to an ISO UTC instant. Verify that computer’s timezone before entering a city meeting time. A direct API client should send an explicit timezone offset or `Z`; a timezone-less API datetime is interpreted as UTC. A synthetic `POST /v1/schedules` body is:
 
-```json
+``` json
 {"meeting_id":"11111111-1111-4111-8111-111111111111","agenda_ids":[],"source_file":"synthetic-program.mp4","captions_file":"synthetic-captions.srt","start_at":"2026-11-05T18:00:00-07:00","idempotency_key":"synthetic-schedule-001"}
 ```
 
@@ -125,11 +151,11 @@ Open a **completed** recording. Select **Check playout** to queue `mode: dry-run
 
 Equivalent `POST /v1/playouts` input is:
 
-```json
+``` json
 {"recording_id":"22222222-2222-4222-8222-222222222222","mode":"dry-run","idempotency_key":"synthetic-playout-check-001"}
 ```
 
-Replace the recording ID with completed synthetic evidence. A separate deliberate commit uses `mode: commit` and a new key; do not reuse the check's key with a changed mode. Inspect the returned playout `id` and read `/v1/playouts/{id}` until terminal. The scheduled on-air program follows verified committed output, not every dry-run or every recording. Keep the worker and air roles distinct: one renders work, the other follows durable on-air state and emits the local program.
+Replace the recording ID with completed synthetic evidence. A separate deliberate commit uses `mode: commit` and a new key; do not reuse the check’s key with a changed mode. Inspect the returned playout `id` and read `/v1/playouts/{id}` until terminal. The scheduled on-air program follows verified committed output, not every dry-run or every recording. Keep the worker and air roles distinct: one renders work, the other follows durable on-air state and emits the local program.
 
 ### Take a live override and return
 
@@ -151,12 +177,12 @@ After a worker/API/air interruption, inspect durable schedules, recordings, atte
 
 Future scheduled intent survives restart. A claimed/dispatched schedule must not be duplicated; one beyond the ten-minute grace becomes missed. Read its linked recording and create new future intent only when deliberately required. On-air recovery preserves attribution and does not automatically resume a stale live override as if the source had remained valid. Check the actual on-air mode and available committed program after restart before choosing a new override.
 
-Visible failed/interrupted states and error text in the operator are the existing alert mechanism for this beta. Preserve the private process logs and attempt evidence. Reopen a normal operator ticket after API restart; do not replay an old ticket or bypass current staff authority. Restore Station's database and its matching media as one recovery set, separately from Core's native backup. Recheck original/output hashes and intended state after restoration. No automatic repair or database reset is implied by restart.
+Visible failed/interrupted states and error text in the operator are the existing alert mechanism for this beta. Preserve the private process logs and attempt evidence. Reopen a normal operator ticket after API restart; do not replay an old ticket or bypass current staff authority. Restore Station’s database and its matching media as one recovery set, separately from Core’s native backup. Recheck original/output hashes and intended state after restoration. No automatic repair or database reset is implied by restart.
 
 Source contracts: `townlight_station/operations.py`, `worker.py`, `airplay.py`, `operator.py`, the pinned media profile and `station/operator-ui/src/operator.tsx`. Service request models are in the Station API companion. The three suite-side Station paths in its OpenAPI download are not the full separate `/v1` service schema.
 
-
 ## Technical specifications
+
 ### Runtime and storage
 
 The accepted package targets **Windows x64 fresh installation**. Its native shell uses **Rust 2021, Tauri 2 and Microsoft WebView2**; browser assets are JavaScript built with **Vite 8.1.6**. This describes the native desktop frontend; Station has a separate React operator, specified below or in its product manual. Canonical business workflows use bundled **CPython 3.13.5, FastAPI, Pydantic, SQLAlchemy and Alembic**, with **PostgreSQL 17 / PostGIS** and managed original files. The installed runtime tested here contains FastAPI 0.162.0. Package minimum Python requirements can differ from the bundled executable; the metadata reference preserves both. No stack rewrite is implied by the beta label.
@@ -179,9 +205,9 @@ The exact [runtime payload lock](https://townlight.github.io/reference/runtime-p
 
 ### Station operator and media components
 
-The native desktop frontend above is distinct from Station's browser operator. The pinned operator package `townlight-station-operator` is version **0.1.0**, using **React/react-dom 19.1.1**, **TypeScript 5.9.2**, **Vite 7.3.7** and the React Vite plugin 5.0.2. Station serves its built assets through its own operator API. Its Python control/API package remains **townlight-station 0.3.0**, while its retained storage identity remains **0.1.0**. These identities have different purposes and are not renumbered.
+The native desktop frontend above is distinct from Station’s browser operator. The pinned operator package `townlight-station-operator` is version **0.1.0**, using **React/react-dom 19.1.1**, **TypeScript 5.9.2**, **Vite 7.3.7** and the React Vite plugin 5.0.2. Station serves its built assets through its own operator API. Its Python control/API package remains **townlight-station 0.3.0**, while its retained storage identity remains **0.1.0**. These identities have different purposes and are not renumbered.
 
-The separate pinned CivicCast-derived media engine uses Python/native GStreamer processing and bounded media children. It is not the standalone CivicCast application. Station's control database, data root, service/configuration and update identity remain independent. This describes the current mixed stack; no runtime rewrite or CivicCast migration is implied.
+The separate pinned CivicCast-derived media engine uses Python/native GStreamer processing and bounded media children. It is not the standalone CivicCast application. Station’s control database, data root, service/configuration and update identity remain independent. This describes the current mixed stack; no runtime rewrite or CivicCast migration is implied.
 
 ### Station media and lifecycle contract
 
@@ -194,19 +220,20 @@ Recorded-file requests accept a managed ingest filename, optional SRT sidecar an
 `queued` and `running` do not make content available as completed. Completion requires the worker’s clean media teardown and stream validation. Failed/interrupted file jobs may be explicitly retried; a live gap requires a new capture. Records receives verified bytes and canonical provenance as a locked private original. Local publication is an explicit later operation on separately approved playout; its MP4/WebVTT package is distinct from the retained recording and from a Records release.
 
 ## Configuration and administration
+
 ### Prepare the normally activated synthetic profile
 
-This procedure describes a future isolated beta installation. Documentation generation does not execute it. Complete normal Townlight Setup under the intended Windows account, select `inspections-preview`, sign in, and use **Finish Records Migration**. Keep the native database running and confirm the canonical runtime is ready. Use that account's actual profile path; the default is `%LOCALAPPDATA%\CivicSuite`. Do not create session files, seed accounts or force `domain_enabled=True`.
+This procedure describes a future isolated beta installation. Documentation generation does not execute it. Complete normal Townlight Setup under the intended Windows account, select `inspections-preview`, sign in, and use **Finish Records Migration**. Keep the native database running and confirm the canonical runtime is ready. Use that account’s actual profile path; the default is `%LOCALAPPDATA%\CivicSuite`. Do not create session files, seed accounts or force `domain_enabled=True`.
 
-Station needs its own database and initially empty absolute data directory. It uses the same named Townlight staff authority through an additional configured loopback suite process. It does not launch or modify CivicCast. No SCM installation, registry edit or replacement of the desktop's fixed-origin service is needed.
+Station needs its own database and initially empty absolute data directory. It uses the same named Townlight staff authority through an additional configured loopback suite process. It does not launch or modify CivicCast. No SCM installation, registry edit or replacement of the desktop’s fixed-origin service is needed.
 
-The examples reserve suite port **15481**, Station port **8756** and synthetic UDP input port **19000**. Choose unused ports and change both configured origins together if needed. Never point these instructions at a city's live profile or data. Use the actual installation directory if Townlight was installed elsewhere.
+The examples reserve suite port **15481**, Station port **8756** and synthetic UDP input port **19000**. Choose unused ports and change both configured origins together if needed. Never point these instructions at a city’s live profile or data. Use the actual installation directory if Townlight was installed elsewhere.
 
 ### Store the independent test configuration
 
-Run the following in a deployment PowerShell session under the same Windows user. Keep this session for startup and shutdown. The dedicated parent holds configuration/logs; its `data` child is Station's initially empty managed store.
+Run the following in a deployment PowerShell session under the same Windows user. Keep this session for startup and shutdown. The dedicated parent holds configuration/logs; its `data` child is Station’s initially empty managed store.
 
-```powershell
+``` powershell
 $profilePath = Join-Path $env:LOCALAPPDATA 'CivicSuite'
 $control = Join-Path $profilePath 'runtime\python\python.exe'
 $payload = 'C:\Program Files\Townlight\_up_\runtime\payload\station'
@@ -228,24 +255,24 @@ $stationPassword | ConvertTo-SecureString -AsPlainText -Force | ConvertFrom-Secu
 Remove-Variable stationPassword,randomBytes
 ```
 
-The password file uses the current Windows user's DPAPI protection. It is not portable to a different user or machine without an explicit credential/recovery decision. Keep it out of source control, support bundles and public documentation. Reuse this protected configuration on restart rather than creating another database or password.
+The password file uses the current Windows user’s DPAPI protection. It is not portable to a different user or machine without an explicit credential/recovery decision. Keep it out of source control, support bundles and public documentation. Reuse this protected configuration on restart rather than creating another database or password.
 
 In the same session, establish the exact process environment. On a later restart, set `$profilePath`, `$control`, `$payload` and `$stationRoot` to these same existing locations, then repeat this environment/start section, **not** the first-time provisioning section.
 
-```powershell
+``` powershell
 $secret = Get-Content -LiteralPath (Join-Path $stationRoot 'station-password.dpapi') -Raw |
   ConvertTo-SecureString
 $stationPassword = [System.Net.NetworkCredential]::new('', $secret).Password
 $nativePassword = (Get-Content -LiteralPath (Join-Path $profilePath 'config\secrets\postgres-password.txt') -Raw).Trim()
 $encodedNative = [uri]::EscapeDataString($nativePassword)
 $env:TOWNLIGHT_PROFILE_ROOT = $profilePath
-$env:CIVICSUITE_DATA_DIR = Join-Path $profilePath 'Data'
-$env:CIVICSUITE_FILE_STORAGE_DIR = Join-Path $profilePath 'Data\files'
-$env:DATABASE_URL = "postgresql+asyncpg://civicsuite:${encodedNative}@127.0.0.1:15432/civicsuite"
+$env:TOWNLIGHT_DATA_DIR = Join-Path $profilePath 'Data'
+$env:TOWNLIGHT_FILE_STORAGE_DIR = Join-Path $profilePath 'Data\files'
+$env:DATABASE_URL = "postgresql+asyncpg://townlight:${encodedNative}@127.0.0.1:15432/townlight"
 $env:TOWNLIGHT_PRODUCT_PROFILE = 'inspections-preview'
 $env:PORTAL_MODE = 'private'
-$env:CIVICSUITE_RUNTIME_HOST = '127.0.0.1'
-$env:CIVICSUITE_RUNTIME_PORT = '15481'
+$env:TOWNLIGHT_RUNTIME_HOST = '127.0.0.1'
+$env:TOWNLIGHT_RUNTIME_PORT = '15481'
 $env:TOWNLIGHT_STATION_URL = 'http://127.0.0.1:8756'
 $env:TOWNLIGHT_STATION_SUITE_URL = 'http://127.0.0.1:15481'
 $env:TOWNLIGHT_STATION_DATA_ROOT = Join-Path $stationRoot 'data'
@@ -264,9 +291,9 @@ Use the actual native PostgreSQL port/database/user if the deployment differs fr
 
 ### Provision the Station database once
 
-This first-time step creates only the dedicated synthetic role/database. Its role owns that database and its Station schema, with no superuser/global administration grant. It connects to the normally provisioned local database using the current profile's protected credential. Existing role/database names cause a refusal before creation; do not drop or repurpose them automatically.
+This first-time step creates only the dedicated synthetic role/database. Its role owns that database and its Station schema, with no superuser/global administration grant. It connects to the normally provisioned local database using the current profile’s protected credential. Existing role/database names cause a refusal before creation; do not drop or repurpose them automatically.
 
-```powershell
+``` powershell
 @'
 import os
 from pathlib import Path
@@ -277,7 +304,7 @@ from sqlalchemy.engine import make_url
 url = make_url(os.environ['TOWNLIGHT_STATION_DATABASE_URL'])
 profile = Path(os.environ['TOWNLIGHT_PROFILE_ROOT'])
 password = (profile/'config/secrets/postgres-password.txt').read_text().strip()
-conn = psycopg2.connect(host='127.0.0.1', port=15432, user='civicsuite',
+conn = psycopg2.connect(host='127.0.0.1', port=15432, user='townlight',
                         password=password, dbname='postgres')
 conn.autocommit = True
 try:
@@ -303,9 +330,9 @@ If database creation fails after the role was created, the operation is partiall
 
 ### Start and check the paired processes
 
-Use the same configured session. The standard suite entry point verifies the existing native activation. Check readiness of that exact paired origin, not only the desktop's canonical port. Startup below creates hidden children with private log files and records their identities; it does not focus windows or install services.
+Use the same configured session. The standard suite entry point verifies the existing native activation. Check readiness of that exact paired origin, not only the desktop’s canonical port. Startup below creates hidden children with private log files and records their identities; it does not focus windows or install services.
 
-```powershell
+``` powershell
 $owned = @()
 function Start-StationRole([string]$name, [string[]]$arguments) {
   $p = Start-Process -FilePath $control -ArgumentList $arguments -WindowStyle Hidden -PassThru `
@@ -326,7 +353,7 @@ function Wait-StationReady([string]$url, $process) {
   }
   throw "Readiness not established: $url; inspect the owned logs"
 }
-$suite = Start-StationRole 'paired-suite' @('-B','-m','civicsuite_runtime.services')
+$suite = Start-StationRole 'paired-suite' @('-B','-m','townlight_runtime.services')
 Wait-StationReady 'http://127.0.0.1:15481/ready' $suite
 $api = Start-StationRole 'station-api' @('-B','-m','townlight_station.cli','serve','--port','8756')
 Wait-StationReady 'http://127.0.0.1:8756/health' $api
@@ -336,19 +363,19 @@ $air = Start-StationRole 'station-air' @('-B','-m','townlight_station.cli','air'
 $owned | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $stationRoot 'owned-processes.json')
 ```
 
-Before launching, confirm ports 15481 and 8756 are unused. If readiness fails, inspect the relevant logs and retained profile/schema state; do not start another copy. A port that answers belongs to the intended process only when its ownership is established. A single worker owns a database. `worker --once` performs a bounded pass; it is not the normal continuous worker. The `air` role follows durable on-air state and emits the local program; it does not commission a physical transmitter or CDN. Its currently configured local output is under Station's `air` directory. Back up the dedicated database and media together; Core's native backup does not cover them.
+Before launching, confirm ports 15481 and 8756 are unused. If readiness fails, inspect the relevant logs and retained profile/schema state; do not start another copy. A port that answers belongs to the intended process only when its ownership is established. A single worker owns a database. `worker --once` performs a bounded pass; it is not the normal continuous worker. The `air` role follows durable on-air state and emits the local program; it does not commission a physical transmitter or CDN. Its currently configured local output is under Station’s `air` directory. Back up the dedicated database and media together; Core’s native backup does not cover them.
 
 ### Configure a live input and open the operator
 
 Create `live-sources.json` under the Station **data** directory with the following fictional input. An actual sender must supply UDP MPEG-TS to that receiver; this configuration alone does not generate a signal.
 
-```json
+``` json
 [{"id":"synthetic-chamber","label":"Synthetic chamber feed","kind":"udp-mpegts","address":"127.0.0.1","port":19000}]
 ```
 
 At most 32 rows are accepted. IDs are unique 1–64 letters/digits/underscore/hyphen; labels have 1–100 characters; IPv4 and ports 1024–65535 are validated. Each row has exactly the five shown keys. Protect the source network; UDP is not authenticated. Then, under the same signed-in native account:
 
-```powershell
+``` powershell
 & $control -B -m townlight_station.cli operator --profile-root $profilePath --port 8756
 ```
 
@@ -358,9 +385,9 @@ This normal operator command opens the operator for a future staff exercise. It 
 
 Default encoding is 1920×1080, 30 fps, 6000 kbps. Optional Station variables permit `MAX_SECONDS` 10–86400 (default 7200), even `WIDTH` 320–3840 and `HEIGHT` 180–2160, `FPS` 1–60 and `BITRATE_KBPS` 128–50000; each is prefixed `TOWNLIGHT_STATION_`. The media source lock and exclusive data identity are verified before use. The dedicated database name must end in `_station`; unowned nonempty storage and escaping/reparse paths are refused. The existing SCM entry point is not a claim of installed service acceptance.
 
-To finish an exercise, stop live capture from the operator and wait for its completed or failed terminal state. Wait for any recording/playout work to finish, cancel unwanted future schedules, sign out and preserve the evidence/logs. The air role starts a separate media child; force-stopping only its parent does not run Python cleanup. Stop only the process trees you started, checking each root's identity before using a saved PID:
+To finish an exercise, stop live capture from the operator and wait for its completed or failed terminal state. Wait for any recording/playout work to finish, cancel unwanted future schedules, sign out and preserve the evidence/logs. The air role starts a separate media child; force-stopping only its parent does not run Python cleanup. Stop only the process trees you started, checking each root’s identity before using a saved PID:
 
-```powershell
+``` powershell
 foreach ($entry in @($owned | Sort-Object StartTime -Descending)) {
   $process = Get-Process -Id $entry.Id -ErrorAction SilentlyContinue
   if ($process -and $process.StartTime -eq $entry.StartTime -and $process.Path -eq $entry.Path) {
@@ -374,11 +401,12 @@ foreach ($entry in @($owned | Sort-Object StartTime -Descending)) {
 Retain the ownership file if the shell must close; parse and verify its actual process paths/start times before acting. Do not terminate the native database/supervisor or CivicCast. Interrupting a worker during a job preserves an interrupted attempt, not completed media; recovery is described in the Station operating procedure. Clear secret-bearing environment values when closing the dedicated deployment shell. Do not delete the database/data root to “reset” an uncertain result.
 
 ## API and integration examples
+
 ### Native command example
 
 The following JavaScript belongs in the existing trusted Townlight frontend/development environment with `invoke` imported from `@tauri-apps/api/core`. It is not a command for an arbitrary web page or an instruction for nontechnical staff. IDs must come from records created in an isolated synthetic exercise.
 
-```javascript
+``` javascript
 import { invoke } from '@tauri-apps/api/core';
 const result = await invoke('meetings_domain_request', {request: {operation: 'get-meeting', id: meetingId}});
 console.log(result);
@@ -388,7 +416,7 @@ console.log(result);
 
 An administrator/developer can inspect an already-configured isolated runtime from a trusted local process. This PowerShell example reads the signed-in synthetic profile’s existing proof into memory; it does not create a user, seed a session, reveal the proof in output or bypass a permission check. Do not use real city data in development examples. A read response does not prove approval or publication.
 
-```powershell
+``` powershell
 Invoke-RestMethod -Uri 'http://127.0.0.1:8756/health'
 # Authenticated recording operations additionally require current native proof.
 ```
@@ -397,7 +425,7 @@ Invoke-RestMethod -Uri 'http://127.0.0.1:8756/health'
 
 This example demonstrates the existing Meetings HTTP contract in an isolated exercise. It is intentionally fictional. It does not start a service. Its authentication setup is included so it can be run independently under the signed-in synthetic account. If a write times out, inspect current records before repeating it.
 
-```powershell
+``` powershell
 $profilePath = Join-Path $env:LOCALAPPDATA 'CivicSuite'
 $sessionPath = Join-Path $profilePath 'config/local-session.json'
 $session = Get-Content -LiteralPath $sessionPath -Raw | ConvertFrom-Json
@@ -423,7 +451,7 @@ This write requires Meetings to be enabled and the signed-in staff role to permi
 
 An authenticated local client sends `POST http://127.0.0.1:8756/v1/recordings` with `X-Townlight-Session` and this JSON, replacing the synthetic UUIDs with saved synthetic meeting/agenda IDs. Configure `synthetic-chamber` first.
 
-```json
+``` json
 {
   "meeting_id": "11111111-1111-4111-8111-111111111111",
   "agenda_ids": ["22222222-2222-4222-8222-222222222222"],
@@ -434,7 +462,7 @@ An authenticated local client sends `POST http://127.0.0.1:8756/v1/recordings` w
 
 The initial response is `202` with a queued/running identity rather than completed media. Read `/v1/recordings/{identity}`, explicitly stop live capture through `/v1/recordings/{identity}/stop`, and wait for completed status before reading `/content`. Then the authorized Records client calls `POST /desktop/v1/requests/{request_id}/station-recordings` on the paired Suite runtime with:
 
-```json
+``` json
 {
   "recording_id": "33333333-3333-4333-8333-333333333333",
   "expected_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -455,14 +483,13 @@ The bundled transcription code includes a **TextFlowKit MCP adapter** as a separ
 
 For a transcription client already provisioned separately, an illustrative tool call is:
 
-```json
+``` json
 {"name":"get_job_status","arguments":{"job_id":"synthetic-existing-job-id"}}
 ```
 
 Use a job ID returned by that transcription service. This example does not create a Townlight record or bypass its review/Records handoff. The exact optional adapter tool signatures are supplied in the [MCP source reference](https://townlight.github.io/reference/mcp.html). Station meeting capture does not become live speech recognition because this optional donor adapter exists.
 
 ## Security and permissions
-
 
 Use your own named account and save before leaving a screen. A saved draft is durable; unsaved form text may not be. If a write has an unknown result, reopen its record before repeating it.
 
@@ -480,7 +507,7 @@ Use protected local folders, account permissions and credential storage. Never i
 
 Save work and use Core’s canonical **Backup Now** before maintenance. That operation stops writers. Preserve the coherent profile/database/document backup and its receipt, then use **Start** to resume. A source export is not a full backup.
 
-Use **Restore Latest Backup** through the supported controls. If the result says **Restore needs service start**, use **Start**, then **Check**, and reopen a known record. Do not repeat restore merely because services need to start. The fresh-profile acceptance verified that a fulfilled request survived restore and a post-backup marker did not.
+Use **Restore Latest Backup** through the supported controls. If the result says **Restore needs service start**, use **Start**, then **Check**, and reopen a known record. Do not repeat restore merely because services need to start. The prior accepted profile exercise verified request/marker recovery for its identified artifact. Repeat the required recovery proof for this changed signed candidate before calling it accepted.
 
 Keep Station’s dedicated database and media evidence together in its own backup. Core’s native-profile backup must not be assumed to include an external Station data directory. Stop writers during a coordinated backup. Preserve failed media attempts and logs.
 
@@ -489,7 +516,7 @@ On failure, record the time, selected composition, component/installer versions 
 ## Troubleshooting
 
 | Symptom | Likely meaning | Next action |
-| --- | --- | --- |
+|----|----|----|
 | Workspace absent | Wrong product composition or unavailable canonical runtime. | Check selected composition; activate through Finish Records Migration; wait for readiness. |
 | Cannot sign in / 401 | Missing or expired named account session. | Sign in normally; reopen a Station launch ticket if applicable. |
 | Permission denied / 403 | Account, module, source or browser-origin permission. | Ask the authorized administrator to inspect the intended permission; do not invent role headers. |
@@ -502,25 +529,19 @@ On failure, record the time, selected composition, component/installer versions 
 | Recording interrupted | Input/worker failed or a live signal was lost. | Retain attempt/logs. Retry eligible file work explicitly; start a new live capture for a live gap. |
 | Recording not downloadable | It is not complete or its retained bytes failed validation. | Inspect state and evidence; do not serve a partial attempt as completed media. |
 
-
 ## Verified workflows and limits
 
-| Product | Recorded result | Precisely exercised |
-| --- | --- | --- |
-| Station | PASS | Actual native staff session and normally created meeting; headless operator live start/stop, decoded generated audio/video, served hash, private Records readback, idempotent locked original and logout. |
+The original accepted Station manual and its workflow claims are preserved [byte for byte](https://townlight.github.io/history/station/pre-naming-2026-11/USER-MANUAL.md). Those results identify earlier artifacts; they are not installed signoff for this naming candidate. The current package retains the same Beta Python service and pinned CivicCast donor. Source presence and a successful wheel import do not establish the required Windows Meetings → Station → Records handoff.
 
+The new candidate must verify actual saved meeting/agenda context, authorized Station capture and stop, completed media/hash readback, private Records handoff, idempotency, authorization/logout, persistence and the agreed recovery path. Its ACCEPTANCE.md must distinguish new proof from justified reused evidence. This source documentation does not certify a signed MSI, live YouTube upload, physical PEG broadcast, city deployment or long-duration commissioning.
 
-The following baseline results come from the previously accepted signed candidate’s fresh normal-profile Sandbox exercise: real native IPC/HTTP/PostgreSQL and selected headless controls. All accounts, source bundles and media were synthetic. The guest install/uninstall and recovery passed, and the owned Sandbox stopped. No host installed application or standalone CivicCast was changed. Those baseline receipts are retained for unchanged workflows. The accompanying ACCEPTANCE.md records the separate installed verification and exact identity of this new Station delivery candidate.
-
-The [workflow matrix](https://townlight.github.io/reference/workflow-matrix.json) identifies raw receipt filenames. The [evidence index](https://townlight.github.io/reference/sandbox-evidence-index.json) retains their original hashes; raw receipts remain in the private beta handoff rather than being silently republished with the documentation site.
-
-The limits remain: actual city field acceptance and equipment/network commissioning; Station automatic provisioning/SCM commissioning; every UI/role combination; field recognition accuracy; and historical in-place upgrades are not certified. They are not five invented feature requirements. Fresh-install controlled beta handoff remains the accepted scope. This package makes no city-deployment, publication or general-availability claim.
+The separate provisioning/service boundary and existing external-service limits remain as described below. Staff remain responsible for official release and publication decisions. No additional provider or selected-model change is made.
 
 ## Terms of service and license
 
 ### Scope and status
 
-These terms describe the Townlight Beta 1 software and this documentation package. This is a public beta software distribution. It does not create a hosted-service subscription or a city deployment agreement. No uptime commitment, support response time, indemnity, data-processing agreement or paid service is created by these documents. A separate signed agreement, if any, governs services it actually provides.
+These terms describe the Townlight Beta 1 software and this documentation package. This public Windows beta is for evaluation. No uptime commitment, support response time, indemnity, data-processing agreement or paid service is created by these documents. A separate signed agreement, if any, governs services it actually provides.
 
 ### Software license and rights
 
@@ -534,7 +555,7 @@ Importing a document does not transfer its ownership or grant permission to publ
 
 ### Local operation and external processors
 
-The accepted beta workflow is local and uses named staff accounts. Station has separate storage and credentials. Configure backup destinations and optional model/network providers deliberately. A configured external provider may receive submitted prompts, images or audio according to that configuration and provider’s terms; this documentation does not promise that every optional configuration is offline. An email outbox or local public view does not establish external delivery or an internet deployment. This static documentation site has no analytics, account collection or remote font dependency.
+The tested Windows beta workflow uses named staff accounts. Station has separate storage and credentials. Configure backup destinations and optional model/network providers deliberately. A configured external provider may receive submitted prompts, images or audio according to that configuration and provider’s terms; this documentation does not promise that every optional configuration is offline. An email outbox or local public view does not establish external delivery or an internet deployment. This static documentation site has no analytics, account collection or remote font dependency.
 
 ### Staff decisions and source applicability
 
@@ -559,7 +580,7 @@ When an organization ends testing, it controls retention/export and removes acce
 ## Glossary
 
 | Term | Meaning |
-| --- | --- |
+|----|----|
 | Approval | An explicit authorized decision on the saved text/artifact. It is separate from saving or attachment. |
 | Canonical record | The owning product’s retained identity and saved version, rather than an editable copied label. |
 | Composition | The selected set of desktop modules; inspections-preview exposes the eight staff products. |
@@ -575,123 +596,100 @@ When an organization ends testing, it controls retention/export and removes acce
 | Snapshot | A fixed audience-specific copy tied to a source/reviewed revision. |
 | Station | Townlight’s separate media boundary using a pinned CivicCast-derived engine; standalone CivicCast remains separate. |
 
-
 ## Alphabetical subject index
 
-- **Accounts and authentication** — [Security and permissions](#security-and-permissions).
-- **AGPL and source** — [Terms of service and license](#terms-of-service-and-license).
-- **API contracts** — [API and integration examples](#api-and-integration-examples).
-- **Architecture** — [Architecture](#architecture).
-- **Backup** — [Backup recovery and maintenance](#backup-recovery-and-maintenance).
-- **Beta version** — [Beta identity](#beta-identity).
-- **Configuration** — [Configuration and administration](#configuration-and-administration).
-- **Evidence and acceptance** — [Verified workflows and limits](#verified-workflows-and-limits).
-- **Fees and official decisions** — [Terms of service and license](#terms-of-service-and-license).
-- **First run** — [First run](#first-run).
-- **Handoffs and audience** — [Connected workflows](#connected-workflows).
-- **MCP** — [MCP and automation boundary](#mcp-and-automation-boundary).
-- **Originals and provenance** — [Security and permissions](#security-and-permissions).
-- **Recovery** — [Backup recovery and maintenance](#backup-recovery-and-maintenance).
-- **Staff procedures** — [Daily workflow](#daily-workflow).
-- **Station configuration** — [Configuration and administration](#configuration-and-administration).
-- **Technical stack** — [Technical specifications](#technical-specifications).
-- **Troubleshooting** — [Troubleshooting](#troubleshooting).
+- **Accounts and authentication** — [Security and permissions](https://townlight.github.io/manuals/station.html#security-and-permissions).
+- **AGPL and source** — [Terms of service and license](https://townlight.github.io/manuals/station.html#terms-of-service-and-license).
+- **API contracts** — [API and integration examples](https://townlight.github.io/manuals/station.html#api-and-integration-examples).
+- **Architecture** — [Architecture](https://townlight.github.io/manuals/station.html#architecture).
+- **Backup** — [Backup recovery and maintenance](https://townlight.github.io/manuals/station.html#backup-recovery-and-maintenance).
+- **Beta version** — [Beta identity](https://townlight.github.io/manuals/station.html#beta-identity).
+- **Configuration** — [Configuration and administration](https://townlight.github.io/manuals/station.html#configuration-and-administration).
+- **Evidence and acceptance** — [Verified workflows and limits](https://townlight.github.io/manuals/station.html#verified-workflows-and-limits).
+- **Fees and official decisions** — [Terms of service and license](https://townlight.github.io/manuals/station.html#terms-of-service-and-license).
+- **First run** — [First run](https://townlight.github.io/manuals/station.html#first-run).
+- **Handoffs and audience** — [Connected workflows](https://townlight.github.io/manuals/station.html#connected-workflows).
+- **MCP** — [MCP and automation boundary](https://townlight.github.io/manuals/station.html#mcp-and-automation-boundary).
+- **Originals and provenance** — [Security and permissions](https://townlight.github.io/manuals/station.html#security-and-permissions).
+- **Recovery** — [Backup recovery and maintenance](https://townlight.github.io/manuals/station.html#backup-recovery-and-maintenance).
+- **Staff procedures** — [Daily workflow](https://townlight.github.io/manuals/station.html#daily-workflow).
+- **Station configuration** — [Configuration and administration](https://townlight.github.io/manuals/station.html#configuration-and-administration).
+- **Technical stack** — [Technical specifications](https://townlight.github.io/manuals/station.html#technical-specifications).
+- **Troubleshooting** — [Troubleshooting](https://townlight.github.io/manuals/station.html#troubleshooting).
 
 ### Operating subject links
 
-- **Apply the caption profile** — [Apply the caption profile](#apply-the-caption-profile).
-- **Approve and publish local playback** — [Approve and publish local playback](#approve-and-publish-local-playback).
-- **Bounds and shutdown** — [Bounds and shutdown](#bounds-and-shutdown).
-- **Check playout and commit deliberately** — [Check playout and commit deliberately](#check-playout-and-commit-deliberately).
-- **Configure a live input and open the operator** — [Configure a live input and open the operator](#configure-a-live-input-and-open-the-operator).
-- **Prepare the normally activated synthetic profile** — [Prepare the normally activated synthetic profile](#prepare-the-normally-activated-synthetic-profile).
-- **Provision the Station database once** — [Provision the Station database once](#provision-the-station-database-once).
-- **Recover without replaying unknown work** — [Recover without replaying unknown work](#recover-without-replaying-unknown-work).
-- **Schedule a recording and interpret its state** — [Schedule a recording and interpret its state](#schedule-a-recording-and-interpret-its-state).
-- **Scheduling playout and recovery** — [Scheduling playout and recovery](#scheduling-playout-and-recovery).
-- **Start and check the paired processes** — [Start and check the paired processes](#start-and-check-the-paired-processes).
-- **Store the independent test configuration** — [Store the independent test configuration](#store-the-independent-test-configuration).
-- **Take a live override and return** — [Take a live override and return](#take-a-live-override-and-return).
+- **Apply the caption profile** — [Apply the caption profile](https://townlight.github.io/manuals/station.html#apply-the-caption-profile).
+- **Approve and publish local playback** — [Approve and publish local playback](https://townlight.github.io/manuals/station.html#approve-and-publish-local-playback).
+- **Bounds and shutdown** — [Bounds and shutdown](https://townlight.github.io/manuals/station.html#bounds-and-shutdown).
+- **Check playout and commit deliberately** — [Check playout and commit deliberately](https://townlight.github.io/manuals/station.html#check-playout-and-commit-deliberately).
+- **Configure a live input and open the operator** — [Configure a live input and open the operator](https://townlight.github.io/manuals/station.html#configure-a-live-input-and-open-the-operator).
+- **Prepare the normally activated synthetic profile** — [Prepare the normally activated synthetic profile](https://townlight.github.io/manuals/station.html#prepare-the-normally-activated-synthetic-profile).
+- **Provision the Station database once** — [Provision the Station database once](https://townlight.github.io/manuals/station.html#provision-the-station-database-once).
+- **Recover without replaying unknown work** — [Recover without replaying unknown work](https://townlight.github.io/manuals/station.html#recover-without-replaying-unknown-work).
+- **Schedule a recording and interpret its state** — [Schedule a recording and interpret its state](https://townlight.github.io/manuals/station.html#schedule-a-recording-and-interpret-its-state).
+- **Scheduling playout and recovery** — [Scheduling playout and recovery](https://townlight.github.io/manuals/station.html#scheduling-playout-and-recovery).
+- **Start and check the paired processes** — [Start and check the paired processes](https://townlight.github.io/manuals/station.html#start-and-check-the-paired-processes).
+- **Store the independent test configuration** — [Store the independent test configuration](https://townlight.github.io/manuals/station.html#store-the-independent-test-configuration).
+- **Take a live override and return** — [Take a live override and return](https://townlight.github.io/manuals/station.html#take-a-live-override-and-return).
 
 ## Source and document control
 
-This edition is authored from the immutable corresponding-source companion, the generated installed-domain schema and the retained workflow receipts. Component version numbers are retained. The private MSI has its own new hash and signing receipt. Historical release tags and their artifacts remain unchanged.
+This manual covers the Station service paired with Windows MSI 1.7.0.1. The [Windows acceptance summary](https://github.com/townlight/townlight/releases/download/townlight-beta-1-windows-1.7.0.1/ACCEPTANCE-Windows-1.7.0.1.md) records the tested Meetings, Station and Records handoff.
 
 ### Workflow subject index
 
-- **Capture and stop** — [Daily workflow, step 4](#workflow-4).
-- **Choose the input** — [Daily workflow, step 3](#workflow-3).
-- **Close and recover** — [Daily workflow, step 8](#workflow-8).
-- **Hand off to Records** — [Daily workflow, step 6](#workflow-6).
-- **Open the operator** — [Daily workflow, step 2](#workflow-2).
-- **Prepare meeting context** — [Daily workflow, step 1](#workflow-1).
-- **Review recording evidence** — [Daily workflow, step 5](#workflow-5).
-- **Use playout deliberately** — [Daily workflow, step 7](#workflow-7).
+- **Capture and stop** — [Daily workflow, step 4](https://townlight.github.io/manuals/station.html#workflow-4).
+
+- **Choose the input** — [Daily workflow, step 3](https://townlight.github.io/manuals/station.html#workflow-3).
+
+- **Close and recover** — [Daily workflow, step 8](https://townlight.github.io/manuals/station.html#workflow-8).
+
+- **Hand off to Records** — [Daily workflow, step 6](https://townlight.github.io/manuals/station.html#workflow-6).
+
+- **Open the operator** — [Daily workflow, step 2](https://townlight.github.io/manuals/station.html#workflow-2).
+
+- **Prepare meeting context** — [Daily workflow, step 1](https://townlight.github.io/manuals/station.html#workflow-1).
+
+- **Review recording evidence** — [Daily workflow, step 5](https://townlight.github.io/manuals/station.html#workflow-5).
+
+- **Use playout deliberately** — [Daily workflow, step 7](https://townlight.github.io/manuals/station.html#workflow-7).
 
 - [Source inventory and file hashes](https://townlight.github.io/reference/source-inventory.json)
-- [All component metadata](https://townlight.github.io/reference/component-metadata.json)
-- [Installed domain OpenAPI](https://townlight.github.io/reference/desktop-domain-openapi.json)
-- [Workflow matrix](https://townlight.github.io/reference/workflow-matrix.json)
-- [Full AGPL text](https://townlight.github.io/reference/AGPL-3.0.txt)
 
+- [All component metadata](https://townlight.github.io/reference/component-metadata.json)
+
+- [Installed domain OpenAPI](https://townlight.github.io/reference/desktop-domain-openapi.json)
+
+- [Workflow matrix](https://townlight.github.io/reference/workflow-matrix.json)
+
+- [Full AGPL text](https://townlight.github.io/reference/AGPL-3.0.txt)
 
 ## Completed recordings on YouTube and live CivicCast coverage
 
-This source extension adds only completed-recording YouTube uploads and a live
-Station-to-CivicCast feed. It is **not in the published Beta 1 installer**. Existing
-component versions are retained. New Station code is AGPL-3.0-only. The pinned
-CivicCast source and third-party licenses remain unchanged. Standalone CivicCast
-is a separate product; no installer, account, database, service or default in it
-is changed by Station.
+This source extension adds only completed-recording YouTube uploads and a live Station-to-CivicCast feed. It is **not in the published Beta 1 installer**. Existing component versions are retained. New Station code is AGPL-3.0-only. The pinned CivicCast source and third-party licenses remain unchanged. Standalone CivicCast is a separate product; no installer, account, database, service or default in it is changed by Station.
 
 ### Staff workflow
 
-For live coverage, choose a meeting, its chamber input and the administrator's
-**CivicCast live feed** option, then start recording. Choose **Recording only**
-to capture privately without a network feed. A disconnected receiver does not
-stop the recording. Station sends the live MPEG-TS bytes as the recording grows;
-it does not wait for the completed file. The feed is available only during that
-capture. The CivicCast/PEG operator selects that source and controls when it is
-broadcast on local cable. Station does not automatically put the PEG channel on
-air. `sending` means transport bytes were sent, not proof of cable carriage.
+For live coverage, choose a meeting, its chamber input and the administrator’s **CivicCast live feed** option, then start recording. Choose **Recording only** to capture privately without a network feed. A disconnected receiver does not stop the recording. Station sends the live MPEG-TS bytes as the recording grows; it does not wait for the completed file. The feed is available only during that capture. The CivicCast/PEG operator selects that source and controls when it is broadcast on local cable. Station does not automatically put the PEG channel on air. `sending` means transport bytes were sent, not proof of cable carriage.
 
-After Station shows **complete**, use **Upload completed recording to YouTube**.
-Review the title, select private/unlisted/public visibility (default **private**),
-and enter the approval note. Click **Upload to YouTube**. This is an explicit
-external upload to the Station-configured OAuth account. No upload occurs just
-because recording stopped, a playout was committed or a Records attachment was
-made. Station does not create a YouTube livestream.
+After Station shows **complete**, use **Upload completed recording to YouTube**. Review the title, select private/unlisted/public visibility (default **private**), and enter the approval note. Click **Upload to YouTube**. This is an explicit external upload to the Station-configured OAuth account. No upload occurs just because recording stopped, a playout was committed or a Records attachment was made. Station does not create a YouTube livestream.
 
-The upload receipt shows queued/running/uploaded/failed/needs-reconciliation,
-the chosen visibility and returned video link. `uploaded` is the YouTube upload
-acknowledgement; YouTube may still be processing the video. The canonical
-recording remains private and byte-identical for the existing Records handoff.
-The YouTube visibility is separate from local playback/disclosure approval.
+The upload receipt shows queued/running/uploaded/failed/needs-reconciliation, the chosen visibility and returned video link. `uploaded` is the YouTube upload acknowledgement; YouTube may still be processing the video. The canonical recording remains private and byte-identical for the existing Records handoff. The YouTube visibility is separate from local playback/disclosure approval.
 
 ### Architecture
 
-<img class="flow" src="https://townlight.github.io/assets/station-delivery-architecture.svg" alt="Station live feed to separate CivicCast and completed recording upload to YouTube">
+<img src="https://townlight.github.io/assets/station-delivery-architecture.svg" class="flow" alt="Station live feed to separate CivicCast and completed recording upload to YouTube" />
 
-The sender has bounded, leaky buffers and follows the live edge after congestion.
-Its network sink shares no pipeline with the recorder. A late join or connection
-loss can leave a live coverage gap, while the private recording continues.
-H.264/AAC and existing MPEG-TS captions are forwarded without another encode.
-The MP4 upload remux reuses `vod_job.py`; it does not generate transcripts or
-captions, and does not upload a separate caption track. Upload queue work runs
-in a separate process so a long upload never monopolizes the capture worker.
+The sender has bounded, leaky buffers and follows the live edge after congestion. Its network sink shares no pipeline with the recorder. A late join or connection loss can leave a live coverage gap, while the private recording continues. H.264/AAC and existing MPEG-TS captions are forwarded without another encode. The MP4 upload remux reuses `vod_job.py`; it does not generate transcripts or captions, and does not upload a separate caption track. Upload queue work runs in a separate process so a long upload never monopolizes the capture worker.
 
 ### Administrator setup
 
-Use Station's existing dedicated data root and PostgreSQL database. Stop Station
-writers for a coordinated backup, retain that backup, and run the explicit
-`townlight-station migrate` before starting this source version. Schema **4** adds
-`station.youtube_uploads`, keeping existing recording/schedule/playout evidence.
-The data identity marker and component versions are unchanged. Old services
-expect schema 3; use a matched source/runtime and preserve the backup for rollback.
+Use Station’s existing dedicated data root and PostgreSQL database. Stop Station writers for a coordinated backup, retain that backup, and run the explicit `townlight-station migrate` before starting this source version. Schema **4** adds `station.youtube_uploads`, keeping existing recording/schedule/playout evidence. The data identity marker and component versions are unchanged. Old services expect schema 3; use a matched source/runtime and preserve the backup for rollback.
 
 Create `civiccast-feeds.json` in the private Station data directory:
 
-```json
+``` json
 [
   {
     "id": "peg",
@@ -703,35 +701,19 @@ Create `civiccast-feeds.json` in the private Station data directory:
 ]
 ```
 
-The address is a numeric IPv4 **local interface bind address on Station**, not the
-CivicCast computer. `192.0.2.10` is a documentation placeholder. Use the actual
-Station interface, an unused port (1024–65535), and appropriate network access
-between those two systems. Clients select an administrator-defined ID, never an
-arbitrary destination or media pipeline. Keep configuration files private.
+The address is a numeric IPv4 **local interface bind address on Station**, not the CivicCast computer. `192.0.2.10` is a documentation placeholder. Use the actual Station interface, an unused port (1024–65535), and appropriate network access between those two systems. Clients select an administrator-defined ID, never an arbitrary destination or media pipeline. Keep configuration files private.
 
-Set `TOWNLIGHT_STATION_SRT_PEG` in the capture worker's process environment to a
-10–79 character SRT passphrase. Configure a separate CivicCast SRT live source
-with the caller URI `srt://<Station-address>:10080?mode=caller&latency=200` and the
-same passphrase through CivicCast's existing credential control. Do **not** put
-the passphrase in the URI. Station's listener uses 128-bit SRT encryption.
-Keep the two accounts and configuration stores separate; matching this specific
-transport credential is the deliberate pairing. Site-specific camera, headend
-and firewall commissioning remain deployment work.
+Set `TOWNLIGHT_STATION_SRT_PEG` in the capture worker’s process environment to a 10–79 character SRT passphrase. Configure a separate CivicCast SRT live source with the caller URI `srt://<Station-address>:10080?mode=caller&latency=200` and the same passphrase through CivicCast’s existing credential control. Do **not** put the passphrase in the URI. Station’s listener uses 128-bit SRT encryption. Keep the two accounts and configuration stores separate; matching this specific transport credential is the deliberate pairing. Site-specific camera, headend and firewall commissioning remain deployment work.
 
-For completed uploads, configure these **Station-only** environment variables in
-the upload worker process. Obtain OAuth authorization for the intended Station
-YouTube channel/account through the existing deployment's Google configuration;
-no OAuth onboarding framework is added here. Do not use CivicCast's credentials
-implicitly or copy its profile.
+For completed uploads, configure these **Station-only** environment variables in the upload worker process. Obtain OAuth authorization for the intended Station YouTube channel/account through the existing deployment’s Google configuration; no OAuth onboarding framework is added here. Do not use CivicCast’s credentials implicitly or copy its profile.
 
 - `TOWNLIGHT_STATION_YOUTUBE_CLIENT_ID`
 - `TOWNLIGHT_STATION_YOUTUBE_CLIENT_SECRET`
 - `TOWNLIGHT_STATION_YOUTUBE_REFRESH_TOKEN` (authorized for YouTube video uploads)
 
-Run the existing `serve` and capture `worker`, plus the separate upload consumer
-with the same Station settings and dedicated database:
+Run the existing `serve` and capture `worker`, plus the separate upload consumer with the same Station settings and dedicated database:
 
-```powershell
+``` powershell
 townlight-station migrate
 townlight-station serve
 # In separate managed processes with the same explicit Station configuration:
@@ -739,34 +721,23 @@ townlight-station worker
 townlight-station uploads
 ```
 
-These are deployment commands, **not commands executed against installed apps
-by this development task**. Run only one capture worker and one upload worker per
-database. Each holds a distinct advisory lock; media children require the existing
-Windows job containment. The recorder child gets no provider credentials; the
-SRT child receives only its explicit transport passphrase plus the existing
-runtime allowlist. The upload worker reads only the Station OAuth variables.
-OAuth/upload HTTP is restricted to Google HTTPS hosts; redirects are not followed.
-The pinned donor import is checked against Station's declared media source.
+These are deployment commands, **not commands executed against installed apps by this development task**. Run only one capture worker and one upload worker per database. Each holds a distinct advisory lock; media children require the existing Windows job containment. The recorder child gets no provider credentials; the SRT child receives only its explicit transport passphrase plus the existing runtime allowlist. The upload worker reads only the Station OAuth variables. OAuth/upload HTTP is restricted to Google HTTPS hosts; redirects are not followed. The pinned donor import is checked against Station’s declared media source.
 
 ### HTTP API and examples
 
-All `/v1` operations below require the existing current Townlight staff session
-header (`X-Townlight-Session`) or the existing same-origin operator session. Read
-roles can inspect receipts. Starting live feed/upload/retry requires the existing
-Station `capture` capability. No new login, role system or MCP server is added.
+All `/v1` operations below require the existing current Townlight staff session header (`X-Townlight-Session`) or the existing same-origin operator session. Read roles can inspect receipts. Starting live feed/upload/retry requires the existing Station `capture` capability. No new login, role system or MCP server is added.
 
 | Method and route | Purpose |
-| --- | --- |
+|----|----|
 | GET `/v1/civiccast-feeds` | Capture-authorized list of configured IDs and labels; no transport credentials |
 | POST `/v1/recordings` | Existing capture contract plus optional `civiccast_feed_id`, allowed only with `live_source_id` |
 | POST `/v1/recordings/{recording_id}/youtube` | Queue one explicit completed-recording upload |
 | GET `/v1/youtube-uploads` | Read-authorized latest 100 durable upload receipts |
 | POST `/v1/youtube-uploads/{upload_id}/retry` | Capture-authorized retry of a **preparation** failure only |
 
-Station's generated `/openapi.json` includes the new routes and request schemas.
-Example bodies (use real canonical IDs from the selected deployment):
+Station’s generated `/openapi.json` includes the new routes and request schemas. Example bodies (use real canonical IDs from the selected deployment):
 
-```json
+``` json
 {
   "meeting_id": "11111111-1111-4111-8111-111111111111",
   "agenda_ids": [],
@@ -776,7 +747,7 @@ Example bodies (use real canonical IDs from the selected deployment):
 }
 ```
 
-```json
+``` json
 {
   "title": "City council meeting — 30 October 2026",
   "privacy": "private",
@@ -785,70 +756,37 @@ Example bodies (use real canonical IDs from the selected deployment):
 }
 ```
 
-Upload titles are 1–100 characters; control characters and angle brackets are
-rejected. Visibility is private/unlisted/public; approval note 3–500 characters;
-key 1–100 characters. Repeating the same key returns the same intent, a changed
-request conflicts, and another key cannot duplicate an existing recording upload.
-A missing/uncompleted/tampered recording is rejected before upload admission;
-the worker independently verifies the recording hash before remuxing/sending.
-Retained receipts include approving actor, note/time, recording hash, MP4 path/
-hash/size, chosen title/privacy and provider video ID/URL after acknowledgement.
-No OAuth token, passphrase or donor credential pointer is stored in receipts.
+Upload titles are 1–100 characters; control characters and angle brackets are rejected. Visibility is private/unlisted/public; approval note 3–500 characters; key 1–100 characters. Repeating the same key returns the same intent, a changed request conflicts, and another key cannot duplicate an existing recording upload. A missing/uncompleted/tampered recording is rejected before upload admission; the worker independently verifies the recording hash before remuxing/sending. Retained receipts include approving actor, note/time, recording hash, MP4 path/ hash/size, chosen title/privacy and provider video ID/URL after acknowledgement. No OAuth token, passphrase or donor credential pointer is stored in receipts.
 
 ### Recovery and limits
 
-A failed preparation (for example missing Station OAuth configuration or failed
-remux) is `failed`; correct the cause and explicitly call its retry route. The
-prior attempt files remain retained. Once any external request begins, an error
-is conservatively `needs-reconciliation`. A worker restart also moves interrupted
-`running` uploads to that state. There is no automatic retry that could create a
-duplicate YouTube video. Check YouTube Studio and the retained job before a human
-chooses another external action. This increment provides no automatic remote
-reconciliation/delete/reupload control. A valid uploaded link is retained even
-if the capture worker is restarted. The existing recording/Records path does
-not depend on the external upload succeeding.
+A failed preparation (for example missing Station OAuth configuration or failed remux) is `failed`; correct the cause and explicitly call its retry route. The prior attempt files remain retained. Once any external request begins, an error is conservatively `needs-reconciliation`. A worker restart also moves interrupted `running` uploads to that state. There is no automatic retry that could create a duplicate YouTube video. Check YouTube Studio and the retained job before a human chooses another external action. This increment provides no automatic remote reconciliation/delete/reupload control. A valid uploaded link is retained even if the capture worker is restarted. The existing recording/Records path does not depend on the external upload succeeding.
 
-Live sender state is in the recording's `details.civiccast_delivery`; its final
-byte count and per-attempt status/log files stay with the private recording.
-On capture-worker restart, an interrupted feed is marked interrupted rather
-than left appearing to send. Stop/reap is bounded even if the network child hangs.
-No feed is automatically re-aired after recovery.
+Live sender state is in the recording’s `details.civiccast_delivery`; its final byte count and per-attempt status/log files stay with the private recording. On capture-worker restart, an interrupted feed is marked interrupted rather than left appearing to send. Stop/reap is bounded even if the network child hangs. No feed is automatically re-aired after recovery.
 
 ### Verification and release status
 
-`tests/accept_deliveries.py` exercises the real Station API/store/media/remux,
-CivicCast's pinned SRT source adapter and real YouTube file-upload client using a
-disposable PostgreSQL cluster, generated audio/video, synthetic staff authority
-and `httpx.MockTransport` for Google. No city systems or external publication
-are involved. `tests/accept_delivery_ui.cjs` drives the actual compiled operator
-controls in headless Chromium with synthetic API responses. Existing boundary/
-operations checks and TypeScript compilation also apply.
+`tests/accept_deliveries.py` exercises the real Station API/store/media/remux, CivicCast’s pinned SRT source adapter and real YouTube file-upload client using a disposable PostgreSQL cluster, generated audio/video, synthetic staff authority and `httpx.MockTransport` for Google. No city systems or external publication are involved. `tests/accept_delivery_ui.cjs` drives the actual compiled operator controls in headless Chromium with synthetic API responses. Existing boundary/ operations checks and TypeScript compilation also apply.
 
 Example invocation from a development environment with existing dependencies:
 
-```powershell
+``` powershell
 $env:PYTHONPATH = (Resolve-Path ./beta-1).Path
 $env:STATION_TEST_PG_BIN = 'C:/test-tools/postgres/bin'
 $env:STATION_TEST_MEDIA_RUNTIME = 'C:/test-tools/station-media-runtime'
 python -B ./beta-1/tests/accept_deliveries.py C:/test-output/station-deliveries-new
 ```
 
-Use a **new** output directory; the script starts/stops only its owned disposable
-cluster and children. See the task's retained acceptance receipts for actual
-results. This evidence establishes the new source wiring synthetically. It does
-not replace CivicCast's already established real YouTube delivery evidence, nor
-claim a new real YouTube upload, physical cable broadcast, signed installer or
-Sandbox acceptance of this extension. Published Beta 1 artifacts stay unchanged.
-
+Use a **new** output directory; the script starts/stops only its owned disposable cluster and children. See the task’s retained acceptance receipts for actual results. This evidence establishes the new source wiring synthetically. It does not replace CivicCast’s already established real YouTube delivery evidence, nor claim a new real YouTube upload, physical cable broadcast, signed installer or Sandbox acceptance of this extension. Published Beta 1 artifacts stay unchanged.
 
 ## Delivery subject index
 
-- [CivicCast live feed](#completed-recordings-on-youtube-and-live-civiccast-coverage)
+- [CivicCast live feed](https://townlight.github.io/manuals/station.html#completed-recordings-on-youtube-and-live-civiccast-coverage)
 - YouTube: explicit completed recording upload; visibility; receipt and reconciliation.
 - Schema4: durable upload intent; existing evidence retained.
 
-## Public meeting portal (separately deployed beta)
+<div class="section" aria-label="Resident portal">
 
-Townlight's separately deployed portal can publish a reviewed Meetings archive with an explicitly selected, verified Records release copy of the matching completed Station recording. Staff must separately approve publication; fulfilling a Records request does not make the copy public. Review public text and the selected file, then use the Wagtail superuser publication form. Explicit withdrawal hides the published meeting and file. An unsuccessful sync preserves the previous publication. Keep the private original and never expose the native session proof. See the [portal guide](https://github.com/townlight/townlight/blob/main/docs/portal/guide.md) for staff steps, setup, API, recovery and source obligations.
+The resident portal is deployed separately. See the [Townlight Portal Guide](https://townlight.github.io/manuals/portal.html) for its workflow and acceptance limits.
 
-This portal beta is distributed separately from the desktop installer. The existing signed Beta 1 installer and historical Sandbox results do not establish that it contains or deploys this portal. CivicCast remains separate.
+</div>

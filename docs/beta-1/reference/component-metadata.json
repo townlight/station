@@ -1,19 +1,19 @@
 {
-  "townlight_access-0.4.0.dist-info": {
+  "townlight_access-0.5.0.dist-info": {
     "Name": [
-      "townlight_access"
+      "townlight-access"
     ],
     "Version": [
-      "0.4.0"
+      "0.5.0"
     ],
     "Requires-Python": [
       ">=3.11"
     ],
     "Requires-Dist": [
-      "townlight_core @ https://github.com/townlight/core/releases/download/v1.2.0/townlight_core-1.2.0-py3-none-any.whl#sha256=a94ce958e36fb03c8d961e4db4672ce5bcfa25765c57d75886e999cf15703ec7",
       "fastapi<1.0.0,>=0.115.0",
       "psycopg2-binary<3.0.0,>=2.9.0",
       "sqlalchemy<3.0.0,>=2.0.0",
+      "townlight-core==1.3.0.dev2",
       "uvicorn[standard]<1.0.0,>=0.30.0",
       "build<2.0.0,>=1.2.0; extra == 'dev'",
       "httpx<1.0.0,>=0.27.0; extra == 'dev'",
@@ -25,39 +25,12 @@
       "AGPL-3.0-only"
     ]
   },
-  "townlight_meetings-1.0.4.dist-info": {
+  "townlight_code-1.0.9.dist-info": {
     "Name": [
-      "townlight_meetings"
+      "townlight-code"
     ],
     "Version": [
-      "1.0.4"
-    ],
-    "Requires-Python": [
-      ">=3.11"
-    ],
-    "Requires-Dist": [
-      "celery[redis]<6.0.0,>=5.4.0",
-      "townlight_core @ https://github.com/townlight/core/releases/download/v1.2.1/townlight_core-1.2.1-py3-none-any.whl#sha256=8dde29408e206048bde63ec14156a8e6329382af4d16b12710d12aa5c27f3f59",
-      "fastapi<1.0.0,>=0.115.0",
-      "httpx<1.0.0,>=0.27.0",
-      "psycopg2-binary<3.0.0,>=2.9.0",
-      "pyjwt<3.0.0,>=2.8.0",
-      "uvicorn[standard]<1.0.0,>=0.30.0",
-      "httpx<1.0.0,>=0.27.0; extra == 'dev'",
-      "pytest-asyncio<1.0.0,>=0.23.0; extra == 'dev'",
-      "pytest<9.0.0,>=8.0.0; extra == 'dev'"
-    ],
-    "License": [
-      "AGPL-3.0-only"
-    ],
-    "License-Expression": []
-  },
-  "townlight_code-1.0.8.dist-info": {
-    "Name": [
-      "townlight_code"
-    ],
-    "Version": [
-      "1.0.8"
+      "1.0.9"
     ],
     "Requires-Python": [
       ">=3.11"
@@ -65,11 +38,11 @@
     "Requires-Dist": [
       "alembic<2.0.0,>=1.13.0",
       "asyncpg<1.0.0,>=0.29.0",
-      "townlight_core @ https://github.com/townlight/core/releases/download/v1.2.1/townlight_core-1.2.1-py3-none-any.whl#sha256=8dde29408e206048bde63ec14156a8e6329382af4d16b12710d12aa5c27f3f59",
       "fastapi<1.0.0,>=0.115.0",
       "psycopg2-binary<3.0.0,>=2.9.0",
       "pymupdf<2.0.0,>=1.26.0",
       "sqlalchemy<3.0.0,>=2.0.0",
+      "townlight-core==1.3.0.dev2",
       "uvicorn[standard]<1.0.0,>=0.30.0",
       "build<2.0.0,>=1.2.0; extra == 'dev'",
       "httpx<1.0.0,>=0.27.0; extra == 'dev'",
@@ -82,75 +55,75 @@
     ],
     "License-Expression": []
   },
-  "townlight_core-1.3.0.dev1.dist-info": {
+  "townlight_core-1.3.0.dev2.dist-info": {
     "Name": [
-      "townlight_core\r"
+      "townlight-core"
     ],
     "Version": [
-      "1.3.0.dev1\r"
+      "1.3.0.dev2"
     ],
     "Requires-Python": [
-      ">=3.11\r"
+      ">=3.11"
     ],
     "Requires-Dist": [
-      "packaging>=24.0\r",
-      "fastapi>=0.135.0\r",
-      "uvicorn[standard]>=0.44.0\r",
-      "sqlalchemy[asyncio]>=2.0.49\r",
-      "asyncpg>=0.31.0\r",
-      "alembic>=1.18.0\r",
-      "pgvector>=0.4.2\r",
-      "pydantic>=2.12.0\r",
-      "pydantic-settings>=2.13.0\r",
-      "fastapi-users[sqlalchemy]>=15.0.0\r",
-      "python-jose[cryptography]>=3.5.0\r",
-      "passlib[bcrypt]>=1.7.4\r",
-      "celery>=5.6.0\r",
-      "croniter>=2.0.0\r",
-      "redis<8.0.0,>=5.0.0\r",
-      "httpx>=0.28.0\r",
-      "pdfplumber>=0.11.0\r",
-      "python-docx>=1.1.0\r",
-      "openpyxl>=3.1.0\r",
-      "beautifulsoup4>=4.12.0\r",
-      "Pillow>=11.0.0\r",
-      "pytesseract>=0.3.10\r",
-      "aiofiles>=24.1.0\r",
-      "PyJWT>=2.8.0\r",
-      "regex>=2024.0.0\r",
-      "anthropic>=0.40.0; extra == \"anthropic\"\r",
-      "openai>=1.50.0; extra == \"openai\"\r",
-      "build>=1.2.0; extra == \"dev\"\r",
-      "psycopg2-binary>=2.9.0; extra == \"dev\"\r",
-      "pytest>=9.0.0; extra == \"dev\"\r",
-      "pytest-asyncio>=1.0.0; extra == \"dev\"\r",
-      "respx>=0.22.0; extra == \"dev\"\r",
-      "ruff==0.15.22; extra == \"dev\"\r",
-      "testcontainers[postgres]>=4.9.0; extra == \"dev\"\r",
-      "openai>=1.50.0; extra == \"dev\"\r",
-      "anthropic>=0.40.0; extra == \"dev\"\r"
+      "packaging>=24.0",
+      "fastapi>=0.135.0",
+      "uvicorn[standard]>=0.44.0",
+      "sqlalchemy[asyncio]>=2.0.49",
+      "asyncpg>=0.31.0",
+      "alembic>=1.18.0",
+      "pgvector>=0.4.2",
+      "pydantic>=2.12.0",
+      "pydantic-settings>=2.13.0",
+      "fastapi-users[sqlalchemy]>=15.0.0",
+      "python-jose[cryptography]>=3.5.0",
+      "passlib[bcrypt]>=1.7.4",
+      "celery>=5.6.0",
+      "croniter>=2.0.0",
+      "redis<8.0.0,>=5.0.0",
+      "httpx>=0.28.0",
+      "pdfplumber>=0.11.0",
+      "python-docx>=1.1.0",
+      "openpyxl>=3.1.0",
+      "beautifulsoup4>=4.12.0",
+      "Pillow>=11.0.0",
+      "pytesseract>=0.3.10",
+      "aiofiles>=24.1.0",
+      "PyJWT>=2.8.0",
+      "regex>=2024.0.0",
+      "anthropic>=0.40.0; extra == \"anthropic\"",
+      "openai>=1.50.0; extra == \"openai\"",
+      "build>=1.2.0; extra == \"dev\"",
+      "psycopg2-binary>=2.9.0; extra == \"dev\"",
+      "pytest>=9.0.0; extra == \"dev\"",
+      "pytest-asyncio>=1.0.0; extra == \"dev\"",
+      "respx>=0.22.0; extra == \"dev\"",
+      "ruff==0.15.22; extra == \"dev\"",
+      "testcontainers[postgres]>=4.9.0; extra == \"dev\"",
+      "openai>=1.50.0; extra == \"dev\"",
+      "anthropic>=0.40.0; extra == \"dev\""
     ],
     "License": [],
     "License-Expression": [
-      "AGPL-3.0-only\r"
+      "AGPL-3.0-only"
     ]
   },
-  "townlight_inspections-0.3.0+dev.1.dist-info": {
+  "townlight_inspections-0.3.0+dev.2.dist-info": {
     "Name": [
-      "townlight_inspections"
+      "townlight-inspections"
     ],
     "Version": [
-      "0.3.0+dev.1"
+      "0.3.0+dev.2"
     ],
     "Requires-Python": [
       ">=3.11"
     ],
     "Requires-Dist": [
       "alembic<2.0.0,>=1.14.0",
-      "townlight_core @ https://github.com/townlight/core/releases/download/v1.2.1/townlight_core-1.2.1-py3-none-any.whl#sha256=8dde29408e206048bde63ec14156a8e6329382af4d16b12710d12aa5c27f3f59",
       "fastapi<1.0.0,>=0.115.0",
       "psycopg2-binary<3.0.0,>=2.9.0",
       "sqlalchemy<3.0.0,>=2.0.0",
+      "townlight-core==1.3.0.dev2",
       "uvicorn[standard]<1.0.0,>=0.30.0",
       "build<2.0.0,>=1.2.0; extra == 'dev'",
       "httpx<1.0.0,>=0.27.0; extra == 'dev'",
@@ -163,20 +136,47 @@
     ],
     "License-Expression": []
   },
-  "townlight_notice-0.2.0.dist-info": {
+  "townlight_meetings-1.0.5.dist-info": {
     "Name": [
-      "townlight_notice"
+      "townlight-meetings"
     ],
     "Version": [
-      "0.2.0"
+      "1.0.5"
     ],
     "Requires-Python": [
       ">=3.11"
     ],
     "Requires-Dist": [
-      "townlight_core @ https://github.com/townlight/core/releases/download/v1.2.0/townlight_core-1.2.0-py3-none-any.whl#sha256=a94ce958e36fb03c8d961e4db4672ce5bcfa25765c57d75886e999cf15703ec7",
+      "celery[redis]<6.0.0,>=5.4.0",
+      "fastapi<1.0.0,>=0.115.0",
+      "httpx<1.0.0,>=0.27.0",
+      "psycopg2-binary<3.0.0,>=2.9.0",
+      "pyjwt<3.0.0,>=2.8.0",
+      "townlight-core==1.3.0.dev2",
+      "uvicorn[standard]<1.0.0,>=0.30.0",
+      "httpx<1.0.0,>=0.27.0; extra == 'dev'",
+      "pytest-asyncio<1.0.0,>=0.23.0; extra == 'dev'",
+      "pytest<9.0.0,>=8.0.0; extra == 'dev'"
+    ],
+    "License": [
+      "AGPL-3.0-only"
+    ],
+    "License-Expression": []
+  },
+  "townlight_notice-0.3.0.dist-info": {
+    "Name": [
+      "townlight-notice"
+    ],
+    "Version": [
+      "0.3.0"
+    ],
+    "Requires-Python": [
+      ">=3.11"
+    ],
+    "Requires-Dist": [
       "fastapi<1.0.0,>=0.115.0",
       "sqlalchemy<3.0.0,>=2.0.0",
+      "townlight-core==1.3.0.dev2",
       "uvicorn[standard]<1.0.0,>=0.30.0",
       "build<2.0.0,>=1.2.0; extra == 'dev'",
       "httpx<1.0.0,>=0.27.0; extra == 'dev'",
@@ -190,25 +190,26 @@
       "AGPL-3.0-only"
     ]
   },
-  "townlight_permitting-0.3.0+dev.1.dist-info": {
+  "townlight_permitting-0.3.0+dev.2.dist-info": {
     "Name": [
-      "townlight_permitting"
+      "townlight-permitting"
     ],
     "Version": [
-      "0.3.0+dev.1"
+      "0.3.0+dev.2"
     ],
     "Requires-Python": [
       ">=3.11"
     ],
     "Requires-Dist": [
       "alembic<2.0.0,>=1.13.0",
-      "townlight_core @ https://github.com/townlight/core/releases/download/v1.2.1/townlight_core-1.2.1-py3-none-any.whl#sha256=8dde29408e206048bde63ec14156a8e6329382af4d16b12710d12aa5c27f3f59",
       "fastapi<1.0.0,>=0.115.0",
       "sqlalchemy<3.0.0,>=2.0.0",
+      "townlight-core==1.3.0.dev2",
       "uvicorn[standard]<1.0.0,>=0.30.0",
       "build<2.0.0,>=1.2.0; extra == 'dev'",
       "httpx<1.0.0,>=0.27.0; extra == 'dev'",
       "psycopg2-binary<3.0.0,>=2.9.0; extra == 'dev'",
+      "pymupdf<2,>=1.24; extra == 'dev'",
       "pytest<9.0.0,>=8.0.0; extra == 'dev'",
       "ruff==0.15.22; extra == 'dev'"
     ],
@@ -217,21 +218,21 @@
     ],
     "License-Expression": []
   },
-  "townlight_planning-0.4.0.dev1.dist-info": {
+  "townlight_planning-0.4.0.dev2.dist-info": {
     "Name": [
-      "townlight_planning"
+      "townlight-planning"
     ],
     "Version": [
-      "0.4.0.dev1"
+      "0.4.0.dev2"
     ],
     "Requires-Python": [
       ">=3.11"
     ],
     "Requires-Dist": [
-      "townlight_core==1.3.0.dev1",
       "fastapi<1.0.0,>=0.115.0",
       "psycopg2-binary<3.0.0,>=2.9.0",
       "sqlalchemy<3.0.0,>=2.0.0",
+      "townlight-core==1.3.0.dev2",
       "uvicorn[standard]<1.0.0,>=0.30.0",
       "build<2.0.0,>=1.2.0; extra == 'dev'",
       "httpx<1.0.0,>=0.27.0; extra == 'dev'",
@@ -244,65 +245,65 @@
       "AGPL-3.0-only"
     ]
   },
-  "townlight_records-1.8.0.dev1.dist-info": {
+  "townlight_records-1.8.0.dev2.dist-info": {
     "Name": [
-      "townlight_records\r"
+      "townlight-records"
     ],
     "Version": [
-      "1.8.0.dev1\r"
+      "1.8.0.dev2"
     ],
     "Requires-Python": [
-      ">=3.12\r"
+      ">=3.12"
     ],
     "Requires-Dist": [
-      "fastapi>=0.135.0\r",
-      "uvicorn[standard]>=0.44.0\r",
-      "sqlalchemy[asyncio]>=2.0.49\r",
-      "asyncpg>=0.31.0\r",
-      "alembic>=1.18.0\r",
-      "pgvector>=0.4.2\r",
-      "pydantic>=2.12.0\r",
-      "pydantic-settings>=2.13.0\r",
-      "fastapi-users[sqlalchemy]>=15.0.0\r",
-      "python-jose[cryptography]>=3.5.0\r",
-      "passlib[bcrypt]>=1.7.4\r",
-      "celery>=5.6.0\r",
-      "townlight_core==1.3.0.dev1\r",
-      "redis<8.0.0,>=5.0.0\r",
-      "httpx>=0.28.0\r",
-      "pdfplumber>=0.11.0\r",
-      "python-docx>=1.1.0\r",
-      "openpyxl>=3.1.0\r",
-      "beautifulsoup4>=4.12.0\r",
-      "Pillow>=11.0.0\r",
-      "pytesseract>=0.3.10\r",
-      "aiofiles>=24.1.0\r",
-      "PyJWT>=2.8.0\r",
-      "regex>=2024.0.0\r",
-      "pytest>=9.0.0; extra == \"dev\"\r",
-      "pytest-asyncio>=1.0.0; extra == \"dev\"\r",
-      "respx>=0.22.0; extra == \"dev\"\r",
-      "ruff==0.15.21; extra == \"dev\"\r",
-      "psycopg2-binary>=2.9.0; extra == \"dev\"\r"
+      "fastapi>=0.135.0",
+      "uvicorn[standard]>=0.44.0",
+      "sqlalchemy[asyncio]>=2.0.49",
+      "asyncpg>=0.31.0",
+      "alembic>=1.18.0",
+      "pgvector>=0.4.2",
+      "pydantic>=2.12.0",
+      "pydantic-settings>=2.13.0",
+      "fastapi-users[sqlalchemy]>=15.0.0",
+      "python-jose[cryptography]>=3.5.0",
+      "passlib[bcrypt]>=1.7.4",
+      "celery>=5.6.0",
+      "townlight-core==1.3.0.dev2",
+      "redis<8.0.0,>=5.0.0",
+      "httpx>=0.28.0",
+      "pdfplumber>=0.11.0",
+      "python-docx>=1.1.0",
+      "openpyxl>=3.1.0",
+      "beautifulsoup4>=4.12.0",
+      "Pillow>=11.0.0",
+      "pytesseract>=0.3.10",
+      "aiofiles>=24.1.0",
+      "PyJWT>=2.8.0",
+      "regex>=2024.0.0",
+      "pytest>=9.0.0; extra == \"dev\"",
+      "pytest-asyncio>=1.0.0; extra == \"dev\"",
+      "respx>=0.22.0; extra == \"dev\"",
+      "ruff==0.15.21; extra == \"dev\"",
+      "psycopg2-binary>=2.9.0; extra == \"dev\""
     ],
     "License": [],
     "License-Expression": [
-      "AGPL-3.0-only\r"
+      "AGPL-3.0-only"
     ]
   },
-  "townlight_runtime-0.1.0.dist-info": {
+  "townlight_runtime-0.2.0.dist-info": {
     "Name": [
-      "townlight_runtime"
+      "townlight-runtime"
     ],
     "Version": [
-      "0.1.0"
+      "0.2.0"
     ],
     "Requires-Python": [
       ">=3.11"
     ],
     "Requires-Dist": [
-      "fastapi>=0.135.0",
       "sqlalchemy>=2.0",
+      "fastapi>=0.135.0",
       "uvicorn>=0.44.0"
     ],
     "License": [],
@@ -310,19 +311,19 @@
       "AGPL-3.0-only"
     ]
   },
-  "townlight_zoning-0.2.2.dist-info": {
+  "townlight_zoning-0.2.3.dist-info": {
     "Name": [
-      "townlight_zoning"
+      "townlight-zoning"
     ],
     "Version": [
-      "0.2.2"
+      "0.2.3"
     ],
     "Requires-Python": [
       ">=3.11"
     ],
     "Requires-Dist": [
-      "townlight_core @ https://github.com/townlight/core/releases/download/v1.2.1/townlight_core-1.2.1-py3-none-any.whl#sha256=8dde29408e206048bde63ec14156a8e6329382af4d16b12710d12aa5c27f3f59",
       "fastapi<1.0.0,>=0.115.0",
+      "townlight-core==1.3.0.dev2",
       "uvicorn[standard]<1.0.0,>=0.30.0",
       "build<2.0.0,>=1.2.0; extra == 'dev'",
       "httpx<1.0.0,>=0.27.0; extra == 'dev'",
@@ -334,45 +335,5 @@
       "AGPL-3.0-only"
     ],
     "License-Expression": []
-  },
-  "townlight_inspection_transcriber-0.1.19.dist-info": {
-    "Name": [
-      "townlight-inspection-transcriber"
-    ],
-    "Version": [
-      "0.1.19"
-    ],
-    "Requires-Python": [
-      ">=3.11"
-    ],
-    "Requires-Dist": [],
-    "License": [],
-    "License-Expression": [
-      "AGPL-3.0-only"
-    ]
-  },
-  "townlight_station-0.3.0.dist-info": {
-    "Name": [
-      "townlight-station\r"
-    ],
-    "Version": [
-      "0.3.0\r"
-    ],
-    "Requires-Python": [
-      ">=3.12\r"
-    ],
-    "Requires-Dist": [
-      "fastapi<1,>=0.115\r",
-      "uvicorn<1,>=0.30\r",
-      "httpx<1,>=0.27\r",
-      "sqlalchemy<3,>=2\r",
-      "psycopg2-binary<3,>=2.9\r",
-      "pydantic<3,>=2\r",
-      "pywin32>=311; sys_platform == \"win32\"\r"
-    ],
-    "License": [],
-    "License-Expression": [
-      "AGPL-3.0-only\r"
-    ]
   }
 }

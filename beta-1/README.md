@@ -1,4 +1,4 @@
-> **Naming candidate:** this unchanged Beta 1 Python service remains 0.3.0. Use [the current candidate manual](USER-MANUAL.md); signed Windows installed acceptance is pending. The [prior Station delivery release](https://github.com/townlight/townlight/releases/tag/townlight-beta-1-station-delivery) retains its original artifacts and evidence.
+> **Windows Beta 1:** this unchanged service remains 0.3.0. See the [current manual](USER-MANUAL.md) and [exact Windows acceptance](https://github.com/townlight/townlight/releases/download/townlight-beta-1-windows-1.7.0.1/ACCEPTANCE-Windows-1.7.0.1.md).
 
 # Townlight Station service boundary
 

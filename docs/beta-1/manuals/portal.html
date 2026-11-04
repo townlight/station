@@ -1,0 +1,565 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="description" content="Townlight
+public meeting portal guide"><title>Townlight Portal
+Guide | Townlight Beta 1</title><style>
+:root{--ink:#182f3a;--muted:#526775;--accent:#006b64;--paper:#fff;--wash:#f1f6f5;--line:#cfdddf;--warm:#dceab2}
+*{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;background:var(--paper);color:var(--ink);font:17px/1.65 "Segoe UI",Arial,sans-serif}a{color:#006b64;text-underline-offset:3px}a:hover{text-decoration-thickness:2px}a:focus-visible,button:focus-visible,input:focus-visible{outline:3px solid #a25900;outline-offset:4px}.skip{position:absolute;left:-9999px}.skip:focus{left:1rem;top:1rem;background:white;padding:1rem;z-index:20}header{border-bottom:1px solid var(--line);padding:1.1rem 5vw;display:flex;align-items:center;gap:1.5rem;flex-wrap:wrap}header .brand{font-size:1.3rem;font-weight:750;letter-spacing:-.04em;text-decoration:none;color:var(--ink)}header nav{margin-left:auto;display:flex;gap:1.25rem;flex-wrap:wrap;font-size:.88rem}.edition{font:700 .72rem/1.5 "Segoe UI",sans-serif;letter-spacing:.12em;text-transform:uppercase;color:var(--accent)}.wrap{max-width:1240px;margin:auto;padding:0 4vw}.hero{padding:5rem 0 3.2rem;max-width:950px}.hero h1{font-size:clamp(2.5rem,5vw,4.7rem);line-height:1.08;letter-spacing:-.045em;margin:1rem 0 1.5rem;font-weight:650}.hero .lead{font-size:1.26rem;max-width:780px;color:var(--muted)}.actions{display:flex;gap:.8rem;flex-wrap:wrap;margin:1.8rem 0}.button{display:inline-block;padding:.7rem 1.15rem;border:1px solid var(--accent);border-radius:4px;text-decoration:none;font-weight:650}.button.primary{background:var(--accent);color:#fff}.facts{display:flex;gap:1.5rem;flex-wrap:wrap;font-size:.85rem;color:var(--muted)}.section{padding:3rem 0;border-top:1px solid var(--line)}h2{font-size:1.8rem;line-height:1.3;letter-spacing:-.025em;margin:2.5rem 0 1rem}h3{font-size:1.18rem;line-height:1.45;margin:1.8rem 0 .7rem}h4{font-size:1rem;margin:1.3rem 0 .6rem}p{margin:.85rem 0 1rem}ul,ol{padding-left:1.6rem}li{margin:.4rem 0}strong{font-weight:650}.grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:1.6rem}.product{border-top:3px solid var(--accent);padding:1.4rem 0}.product h3{font-size:1.65rem;margin:.4rem 0}.product p{color:var(--muted)}.number{font-size:.76rem;letter-spacing:.1em}.split{display:grid;grid-template-columns:1fr 1fr;gap:3rem}.flow{width:100%;height:auto;display:block;margin:1.8rem 0}.caption{font-size:.85rem;color:var(--muted)}.reading{max-width:860px}.doclayout{display:grid;grid-template-columns:245px minmax(0,1fr);gap:3rem;max-width:1320px;margin:auto;padding:2rem 4vw}.toc{font-size:.84rem;align-self:start;position:sticky;top:1rem;max-height:90vh;overflow:auto;padding-right:.8rem}.toc ul{list-style:none;padding:0}.toc li{margin:.5rem 0}.toc li li{padding-left:.8rem}.toc a{text-decoration:none}.docbody{min-width:0}.docbody h1{font-size:2.7rem;line-height:1.1;letter-spacing:-.04em}.docbody h2{border-top:1px solid var(--line);padding-top:1.8rem}.docbody img{max-width:100%;height:auto}.docmeta{color:var(--muted);font-size:.9rem}.docbody section{scroll-margin-top:1rem}table{width:100%;border-collapse:collapse;font-size:.87rem;line-height:1.5;margin:1.3rem 0;table-layout:auto}th{text-align:left;background:var(--wash);font-weight:650}th,td{padding:.65rem .7rem;border-bottom:1px solid var(--line);vertical-align:top;overflow-wrap:anywhere}thead{display:table-header-group}pre{background:#f2f5f6;padding:1rem;border:1px solid #dfe7e8;white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;font:13px/1.6 Consolas,monospace}code{font: .85em/1.6 Consolas,monospace;overflow-wrap:anywhere}pre code{font-size:inherit}blockquote{border-left:3px solid var(--accent);padding-left:1rem;margin-left:0;color:var(--muted)}.search{padding:.65rem;border:1px solid #789399;border-radius:4px;width:100%;font:inherit}.search-status{font-size:.8rem;color:var(--muted)}footer{border-top:1px solid var(--line);padding:2rem 5vw;margin-top:3rem;font-size:.85rem;color:var(--muted);display:flex;gap:2rem;justify-content:space-between;flex-wrap:wrap}.small{font-size:.9rem;color:var(--muted)}.api-entry{padding:1.2rem 0;border-top:1px solid var(--line)}.api-entry h3{overflow-wrap:anywhere}.method{font-size:.76rem;font-weight:750;color:var(--accent)}details{margin:1rem 0}summary{cursor:pointer;font-weight:650}.index-columns{columns:2;column-gap:2rem}.index-columns li{break-inside:avoid}
+@media(max-width:850px){.grid{grid-template-columns:1fr 1fr}.split{grid-template-columns:1fr}.doclayout{grid-template-columns:1fr;gap:1rem}.toc{position:static;max-height:none}.hero{padding-top:3rem}header nav{margin-left:0}.docbody h1{font-size:2.2rem}}
+@media(max-width:520px){.grid{grid-template-columns:1fr}.wrap{padding:0 6vw}header{padding:1rem 6vw}.hero h1{font-size:2.6rem}.index-columns{columns:1}table{font-size:.78rem}th,td{padding:.45rem}.doclayout{padding:1rem 6vw}.facts{gap:.5rem}}
+main,.toc a,.hero h1{overflow-wrap:anywhere}
+@page{size:Letter;margin:.7in .65in .75in}
+@media print{html{scroll-behavior:auto}body{font:10.5pt/1.45 Arial,sans-serif;color:#172f39}header,footer,.search-area,.screen-only{display:none}.doclayout{display:block;padding:0;max-width:none}.toc{position:static;max-height:none;overflow:visible;font-size:10pt;break-after:page}.toc>h2{border:0}.toc ul{columns:2;column-gap:.3in}.toc li{break-inside:avoid}.docbody h1{font-size:30pt}.docbody h2{font-size:19pt;break-after:avoid;padding-top:.15in;margin-top:.35in}.docbody h3{font-size:12pt;break-after:avoid}.docbody h4{break-after:avoid}p{orphans:3;widows:3}pre{font-size:8.2pt;line-height:1.4;padding:.1in;break-inside:auto}table{font-size:8.4pt;line-height:1.35}th,td{padding:.06in .07in}tr{break-inside:avoid}.flow{max-height:6in;object-fit:contain;break-inside:avoid}a{color:#172f39;text-decoration:underline}.cover{break-after:page;padding-top:1in}.cover .edition{font-size:11pt}.cover h1{font-size:32pt}.cover .lead{font-size:14pt}.api-entry{break-inside:auto}.api-entry h3{break-after:avoid}.index-columns{columns:2}}
+</style></head><body><a class="skip" href="#main">Skip to content</a><header><a class="brand" href="../index.html">townlight<span aria-hidden="true"> ·</span></a><span class="edition">Townlight Beta 1</span><nav aria-label="Main"><a href="../index.html#products">Products</a><a href="../manuals/suite.html">Suite manual</a><a href="../reference/index.html">Technical reference</a><a href="../terms.html">Terms and license</a></nav></header>
+<main id="main"><div class="cover wrap"><div class="hero"><div class="edition">Townlight Beta 1</div><h1>Townlight
+Portal
+Guide</h1><p class="lead">Staff guide and technical reference</p><p class="docmeta">Separately deployed portal beta · 2 November 2026<br>Existing signed installer and historical acceptance predate this integration</p></div></div><div class="doclayout"><aside class="toc" aria-label="Table of contents"><h2>Contents</h2><div class="search-area"><label for="find-section">Find a section</label><input class="search" id="find-section" type="search" placeholder="Type a heading"><p class="search-status" aria-live="polite"></p></div><ul>
+<li><a href="#townlight-portal-guide"
+id="toc-townlight-portal-guide">Townlight Portal guide</a>
+<ul>
+<li><a href="#for-staff-prepare-and-publish"
+id="toc-for-staff-prepare-and-publish">For staff: prepare and
+publish</a></li>
+<li><a href="#residents" id="toc-residents">Residents</a></li>
+<li><a href="#city-editors-branding-and-service-content"
+id="toc-city-editors-branding-and-service-content">City editors:
+branding and service content</a></li>
+<li><a href="#deployment-and-setup"
+id="toc-deployment-and-setup">Deployment and setup</a></li>
+<li><a href="#prepare-the-candidate-native-runtime"
+id="toc-prepare-the-candidate-native-runtime">Prepare the candidate
+native runtime</a></li>
+<li><a href="#production-service-and-reverse-proxy"
+id="toc-production-service-and-reverse-proxy">Production service and
+reverse proxy</a></li>
+<li><a href="#architecture-and-api"
+id="toc-architecture-and-api">Architecture and API</a></li>
+<li><a href="#source-license-and-demonstration-data"
+id="toc-source-license-and-demonstration-data">Source, license and
+demonstration data</a></li>
+<li><a href="#subject-index" id="toc-subject-index">Subject
+index</a></li>
+<li><a href="#rebuild-this-guide" id="toc-rebuild-this-guide">Rebuild
+this guide</a></li>
+</ul></li>
+</ul></aside><article class="docbody"><h2 id="townlight-portal-guide">Townlight Portal guide</h2>
+<p>Townlight Beta 1 · separately deployed portal beta</p><p><a href="../pdf/Townlight-Portal-Guide-Beta-1.pdf">Printable PDF</a> · <a href="../docx/Townlight-Portal-Guide-Beta-1.docx">Editable Word</a></p>
+<p>The portal is a separately deployed suite capability for city pages
+and public meeting archives. It brings together a public Meetings
+archive, a completed Station recording and a Records release copy
+selected for publication. It does not add a tenth product. The existing
+signed Beta 1 installer and prior Sandbox evidence predate this local
+portal integration; they do not demonstrate that it is installed or
+publicly deployed. CivicCast remains separate.</p>
+<h2 id="for-staff-prepare-and-publish">For staff: prepare and
+publish</h2>
+<ol type="1">
+<li>In Meetings, publish the intended non-closed meeting archive. Review
+its title, scheduled time, agenda, packet, minutes and summary for
+public use.</li>
+<li>Complete the corresponding Station recording and the Records request
+and release workflow. Records must have a current approved response,
+completed verified artifacts, a fulfilled request and an eligible
+managed release copy with verified lineage to that recording. Keep the
+original private.</li>
+<li>Obtain the Records request UUID from the trusted staff workflow. A
+fulfilled request or prepared copy is not consent to publish.</li>
+<li>A Wagtail superuser opens <strong>Townlight publication</strong> in
+<code>/admin/</code>, enters the request UUID, selects <strong>Find
+approved releases</strong>, and chooses the intended result. The form
+fills the archive, meeting, recording, request and release-copy IDs and
+expected SHA-256; approval remains unchecked. Review the selection and
+public content, select <strong>Publish or update</strong>, and
+explicitly approve. Confirm the resulting meeting page and approved file
+as a resident would. Ordinary Wagtail editors cannot use this
+publisher.</li>
+<li>To remove it from the public archive, use the same selection and
+hash, choose <strong>Withdraw</strong>, and explicitly approve. Verify
+that the meeting and file are no longer accessible. Withdrawal hides the
+projection; retain source records and follow local retention
+policy.</li>
+</ol>
+<p>An unsuccessful synchronization leaves the previous publication
+intact. Repeating a successful publication updates the same archive
+identity. If source records change, review and explicitly publish again;
+do not assume a source error withdraws a prior version.</p>
+<h2 id="residents">Residents</h2>
+<figure>
+<img src="../assets/portal-home.png"
+alt="Actual Wagtail homepage with fictional Juniper Falls content" />
+<figcaption aria-hidden="true">Actual Wagtail homepage with fictional
+Juniper Falls content</figcaption>
+</figure>
+<p>The meeting archive is at <code>/meetings/</code>. A published
+meeting page at <code>/meetings/&lt;pk&gt;/</code> presents the approved
+public meeting text and links to its release at
+<code>/meetings/&lt;pk&gt;/release/</code>. The approved release bytes
+are served with the selected MIME type and support byte ranges for video
+playback. Public text is filtered; requester contact information,
+internal notes, raw payloads, local paths and session proof are not
+public fields. This integration is for completed release copies, not
+live YouTube streaming. Station’s separate CivicCast and YouTube
+workflows retain their own controls.</p>
+<p>The city-branded homepage presents a resident task finder, service
+information and the latest published playable recording when one is
+available. The archive offers upcoming, past and all dates, title
+search, a meeting-series selector and 20 results per page. Meeting
+series uses the actual public title: the source contract does not supply
+a separate board taxonomy. Each date uses that meeting’s configured IANA
+time zone. Cancelled entries remain identifiable, with no offered
+playback or documents.</p>
+<figure>
+<img src="../assets/portal-meeting.png"
+alt="Actual public meeting page with a synthetic approved recording" />
+<figcaption aria-hidden="true">Actual public meeting page with a
+synthetic approved recording</figcaption>
+</figure>
+<p>On a native Townlight meeting, open <strong>Agenda</strong>,
+<strong>Meeting packet</strong> or <strong>Approved minutes</strong> to
+read the actual approved text in a separate printable page. These are
+text documents, not invented PDF attachments. Video controls play the
+approved release; <strong>Download approved release</strong> retrieves
+the same checked bytes. Expand <strong>About this public record</strong>
+for provenance IDs, hashes and precise timestamps. PrimeGov fixtures
+instead identify their links as synthetic references; they do not imply
+live vendor downloads or playable media.</p>
+<p><strong>Search</strong> matches published service-page titles and
+published meeting titles only, with at most 50 results of each type. It
+excludes drafts, restricted city pages, withdrawn meetings and private
+staff content. It does not search the bodies of documents, external
+systems or private Records requests. Service buttons name the
+destination host before taking a resident to the city’s configured
+existing service. Applications, requests and payments stay in that
+designated system. Navigation, the task finder and filters work without
+JavaScript; JavaScript enhances the mobile menu.</p>
+<h2 id="city-editors-branding-and-service-content">City editors:
+branding and service content</h2>
+<ol type="1">
+<li>Open the home page in Wagtail. Set <strong>Brand name</strong>,
+<strong>Brand prefix</strong>, the optional city <strong>Logo</strong>
+and <strong>Hero image</strong>, the <strong>Hero title</strong>,
+introduction, address and hours. Uploaded imagery must be approved for
+public use. With no uploaded images, the original generic civic emblem
+and illustrations are used. The page title is the fallback brand name;
+<code>TOWNLIGHT_BRAND</code> remains the administrative
+site-name/fallback setting. Existing versions stay unchanged and the
+suite label is <strong>Townlight Beta 1</strong>.</li>
+<li>Create or edit a <strong>Service page</strong> under the home page.
+Set its title, kind, summary, section heading and body. Enter one next
+step per line. Optional question/answer blocks become expandable common
+questions. Set the department and public contact details where
+relevant.</li>
+<li>For a handoff, enter the designated HTTPS <strong>Destination
+URL</strong> and clear <strong>Destination label</strong>. Addresses
+containing credentials and non-HTTPS schemes are rejected. The resident
+sees the destination host. This field is a link, not a vendor connector
+or new portal transaction. Verify it against the city’s authorized
+service before use.</li>
+<li>Page kinds determine icons and shared links. <code>records</code>,
+<code>permits</code>, <code>code</code>, <code>planning</code> and
+<code>contact</code> are resident service entries.
+<code>government</code> supplies the government navigation link;
+<code>privacy</code> and <code>accessibility</code> supply
+footer/utility links. Only live, public pages appear. Use Wagtail’s
+existing editor submission and moderator approval workflow; editing a
+draft does not update public pages.</li>
+<li>Review the public home, service page and phone layout after
+publishing. Unpublishing or restricting a page removes it from
+navigation, the task finder and title search. Configure city-approved
+privacy, accessibility and contact content; the fictional
+demonstration’s notices are examples, not an adopted city’s
+policies.</li>
+</ol>
+<p><code>setup_demo</code> creates the fictional <strong>Juniper
+Falls</strong> homepage and eight information pages on a fresh portal.
+The persistent synthetic notice is controlled by the home page’s
+<strong>Synthetic demo</strong> field. Example service destinations use
+reserved <code>.example</code> domains and do not operate real services.
+Repeating the command preserves any existing Townlight home and its
+editorial content; it does not replace a city’s website. Existing
+deployments receive additive fields through <code>migrate</code>; no
+existing text is overwritten. Configure their home and service pages
+through Wagtail after migration.</p>
+<p>No resident account framework, official fee calculation, payment
+processor, live-stream host or new vendor integration is introduced by
+this interface.</p>
+<h2 id="deployment-and-setup">Deployment and setup</h2>
+<p>The portal is a separate Wagtail deployment with its own database.
+Keep the native desktop runtime bound to loopback; do not expose it to
+the internet. Arrange a trusted private connection between the portal
+service and native runtime. The bridge accepts HTTPS origins or loopback
+HTTP origins; it does not follow redirects or use environment proxies.
+Restrict the server-side proof file to the portal service account and
+provision a native principal with both Meetings and Records permissions.
+Never put the proof in a browser, selection file, log or public
+document.</p>
+<p>From the <code>portal</code> directory, use Python 3.13, install
+<code>python -m pip install --require-hashes -r requirements.lock</code>,
+run <code>python manage.py migrate</code>,
+<code>python manage.py setup_demo</code>, and
+<code>python manage.py createsuperuser</code>. For local evaluation run
+<code>python manage.py runserver 127.0.0.1:8000</code>. Set a unique
+<code>TOWNLIGHT_SECRET_KEY</code>, <code>TOWNLIGHT_DEBUG=0</code>,
+allowed hosts, TLS and appropriate static and media service before
+deployment. <code>TOWNLIGHT_DB</code> selects the database path;
+<code>TOWNLIGHT_BRAND</code> selects the site name. Protect the database
+and the private release directory together.
+<code>TOWNLIGHT_RELEASE_ROOT</code> is an absolute private directory
+outside public media; by default it is <code>private-releases</code>
+under the portal directory. These setup steps do not commission a hosted
+site or alter the already released installer.</p>
+<p>Set <code>TOWNLIGHT_NATIVE_ORIGIN</code> to the trusted native origin
+and <code>TOWNLIGHT_NATIVE_PROOF_FILE</code> to an absolute private
+proof-file path. Sign in to the active native desktop with an account
+authorized for both modules. The active profile’s
+<code>config/local-session.json</code> contains
+<code>session_hash</code>; this is an active session proof, not a
+durable service token. Copy it without displaying it into an absolute
+file in a directory already restricted to the portal service account.
+Replace both placeholders in this PowerShell command with the actual
+private paths:</p>
+<div class="sourceCode" id="cb1"><pre
+class="sourceCode powershell"><code class="sourceCode powershell"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a><span class="op">[</span>System<span class="op">.</span><span class="fu">IO</span><span class="op">.</span><span class="fu">File</span><span class="op">]::</span>WriteAllText<span class="op">(</span><span class="st">&#39;&lt;protected-absolute-path&gt;\portal-proof.txt&#39;</span><span class="op">,</span> <span class="op">(</span><span class="fu">Get-Content</span> <span class="op">-</span>LiteralPath <span class="st">&#39;&lt;active-profile&gt;\config\local-session.json&#39;</span> <span class="op">-</span>Raw <span class="op">|</span> <span class="fu">ConvertFrom-Json</span><span class="op">).</span><span class="fu">session_hash</span><span class="op">,</span> <span class="op">[</span>System<span class="op">.</span><span class="fu">Text</span><span class="op">.</span><span class="fu">UTF8Encoding</span><span class="op">]::</span>new<span class="op">(</span><span class="va">$false</span><span class="op">))</span></span></code></pre></div>
+<p>Refresh the protected proof after session expiry, sign-out, account
+change or credential change. Do not print or publish it.
+<code>TOWNLIGHT_DISPLAY_TIMEZONE</code> is an IANA time zone, defaulting
+to <code>UTC</code>. A private selection file can drive the same
+operation from the portal directory:</p>
+<div class="sourceCode" id="cb2"><pre
+class="sourceCode json"><code class="sourceCode json"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a><span class="fu">{</span><span class="dt">&quot;action&quot;</span><span class="fu">:</span><span class="st">&quot;publish&quot;</span><span class="fu">,</span><span class="dt">&quot;approve_publication&quot;</span><span class="fu">:</span><span class="kw">true</span><span class="fu">,</span><span class="dt">&quot;archive_id&quot;</span><span class="fu">:</span><span class="st">&quot;00000000-0000-4000-8000-000000000001&quot;</span><span class="fu">,</span><span class="dt">&quot;meeting_id&quot;</span><span class="fu">:</span><span class="st">&quot;00000000-0000-4000-8000-000000000002&quot;</span><span class="fu">,</span><span class="dt">&quot;recording_id&quot;</span><span class="fu">:</span><span class="st">&quot;00000000-0000-4000-8000-000000000003&quot;</span><span class="fu">,</span><span class="dt">&quot;request_id&quot;</span><span class="fu">:</span><span class="st">&quot;00000000-0000-4000-8000-000000000004&quot;</span><span class="fu">,</span><span class="dt">&quot;release_copy_id&quot;</span><span class="fu">:</span><span class="st">&quot;00000000-0000-4000-8000-000000000005&quot;</span><span class="fu">,</span><span class="dt">&quot;expected_release_sha256&quot;</span><span class="fu">:</span><span class="st">&quot;0000000000000000000000000000000000000000000000000000000000000000&quot;</span><span class="fu">}</span></span></code></pre></div>
+<p>These IDs and hash are placeholders. Run
+<code>python manage.py sync_townlight selection.json</code>. For
+withdrawal change <code>action</code> to <code>withdraw</code>, retain
+the selection fields and explicit approval, and verify removal. Restrict
+the selection file because it contains internal identifiers.</p>
+<h2 id="prepare-the-candidate-native-runtime">Prepare the candidate
+native runtime</h2>
+<p>The existing signed installer predates the portal bridge and does not
+include its native endpoints. Prepare a separate matching native runtime
+with the compatible Records, Meetings, Core, Access and Notice
+dependencies, normal activation, profile and database contracts. Do not
+patch the installed host runtime. From the suite source root, build the
+candidate wheel into a chosen output directory:</p>
+<div class="sourceCode" id="cb3"><pre
+class="sourceCode powershell"><code class="sourceCode powershell"><span id="cb3-1"><a href="#cb3-1" aria-hidden="true" tabindex="-1"></a>python <span class="op">-</span>m pip wheel <span class="op">--</span>no-deps <span class="op">--</span>wheel-dir <span class="st">&#39;&lt;wheel-output&gt;&#39;</span> desktop<span class="op">/</span>runtime<span class="op">/</span>python-services</span></code></pre></div>
+<p>In the separately prepared matching runtime, use its Python
+executable to install the built
+<code>townlight_runtime-0.2.0-py3-none-any.whl</code> with
+<code>python -m pip install --no-deps --force-reinstall '&lt;wheel-output&gt;\townlight_runtime-0.2.0-py3-none-any.whl'</code>.
+Preserve the intended profile, activation and database configuration;
+use <code>meetings-beta</code> or a higher applicable product profile.
+With that runtime’s Python, start
+<code>python -m townlight_runtime.services</code>; it binds
+<code>127.0.0.1:15480</code> by default, or the port selected by
+<code>TOWNLIGHT_RUNTIME_PORT</code>. Keep this private and provide the
+portal’s server-side active proof and trusted origin as described above.
+Verify the authenticated selections endpoint with a real eligible
+request in the prepared environment before relying on publication. See
+<a href="../reference/portal-verification.html">verification and test inputs</a> for the
+isolated acceptance runner and its explicit flags. These instructions do
+not upgrade the old installer or establish installed or public
+deployment acceptance.</p>
+<h2 id="production-service-and-reverse-proxy">Production service and
+reverse proxy</h2>
+<p><code>runserver</code> is for local demonstration only. For
+deployment set <code>TOWNLIGHT_DEBUG=0</code>, a unique
+<code>TOWNLIGHT_SECRET_KEY</code> of at least 50 characters,
+<code>TOWNLIGHT_ALLOWED_HOSTS</code> to the canonical host,
+<code>TOWNLIGHT_BASE_URL</code> to the HTTPS origin,
+<code>TOWNLIGHT_CSRF_TRUSTED_ORIGINS</code> to that HTTPS origin, and
+<code>TOWNLIGHT_STATIC_ROOT</code> to the private deployment’s
+collected-static directory. Run <code>python manage.py migrate</code>,
+then <code>python manage.py collectstatic</code>, and start
+<code>python serve.py --port 8000</code> under a supervised service
+account. Waitress binds only <code>127.0.0.1</code>; stop the supervised
+service cleanly before backup or maintenance. In production Django
+enables secure cookies, HTTPS redirect and HSTS.</p>
+<p>Terminate TLS in a reverse proxy on the same host. Set
+<code>TOWNLIGHT_TRUST_TLS_PROXY=1</code> only when the proxy removes
+client-supplied forwarded headers and sets its own HTTPS scheme and
+canonical Host. Never expose the native desktop port. Replace the
+example hostname, certificate and static directory with deployment
+values; serve only collected static files directly. The application
+handles all other routes, including approved release files:</p>
+<pre class="nginx"><code>server {
+    listen 443 ssl;
+    server_name town.example.gov;
+    ssl_certificate /etc/ssl/town/fullchain.pem;
+    ssl_certificate_key /etc/ssl/town/privkey.pem;
+    location /static/ { alias /srv/townlight/static/; }
+    location /media/images/ { alias /srv/townlight/media/images/; }
+    location / {
+        proxy_pass http://127.0.0.1:8000;
+        proxy_set_header Host town.example.gov;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-For &quot;&quot;;
+        proxy_set_header X-Forwarded-Host &quot;&quot;;
+        proxy_set_header Forwarded &quot;&quot;;
+    }
+}</code></pre>
+<p>Keep the release directory outside every public static or media
+alias. Test the deployed HTTPS origin, admin, archive, range playback
+and explicit withdrawal using an approved synthetic record before
+use.</p>
+<p><code>TOWNLIGHT_MEDIA_ROOT</code> selects Wagtail’s uploaded-media
+storage (default <code>portal/media</code>). The image alias above
+serves generated branding renditions from that root’s
+<code>images</code> directory. Set the actual path for the deployment.
+Do not alias the entire media root: Wagtail document downloads may have
+their own access restrictions, and private releases must never be placed
+there. Back up the full media root privately, including originals, with
+the database.</p>
+<h2 id="architecture-and-api">Architecture and API</h2>
+<figure>
+<img src="../assets/portal-architecture.svg"
+alt="Townlight portal architecture" />
+<figcaption aria-hidden="true">Townlight portal
+architecture</figcaption>
+</figure>
+<p>The server calls <code>POST /desktop/v1/portal/bundle</code> with the
+selection JSON and the <code>X-Townlight-Session</code> header. The
+native principal must have both <code>townlight_meetings</code> and
+<code>townlight_records</code> permissions. The returned ZIP contains
+<code>manifest.json</code> and, for publication,
+<code>release.bin</code>; the portal validates identity, hashes, sizes
+and allowable fields before an atomic update. Withdrawal carries a
+manifest without release bytes. The public projection includes meeting
+text and ID/hash provenance, not the private source payload. The bridge
+streams bundles and release bytes through private files. Set
+<code>TOWNLIGHT_PORTAL_MAX_BYTES</code> consistently on both services;
+the default is 8 GiB and the maximum is 64 GiB. Allow private disk space
+for the bundle, staged copy and retained releases. The portal serves MP4
+or octet-stream releases. This transport limit is not the end-to-end
+recording limit: the inherited Records managed-file receipt limits both
+originals and release copies to 2,147,483,647 bytes. At Station’s
+default 6,000 kbps video rate, approximately 47 minutes reaches 2 GiB
+before accounting for audio and container overhead. Plan capture
+duration and bitrate before recording: for example, 2,000 kbps video
+plus audio for two hours is roughly 1.9 GB, depending on actual rates
+and overhead. Measure the resulting files and leave margin. The portal
+does not automatically transcode recordings. Consult the checked-in
+bridge and portal source for the exact contract and errors; do not log
+session proofs.</p>
+<p><code>python manage.py export_public &lt;empty-directory&gt;</code>
+exports published pages, metadata and approved release bytes with
+hashes. Secure the export as appropriate. Stop the portal and any
+synchronization before taking a consistent backup of the SQLite database
+and private release directory together; preserve private configuration
+and proof separately. Restore the matched database and releases to an
+isolated environment, set permissions and paths, then verify public
+pages, approved file hashes and withdrawal state before resuming
+service. A failed source sync preserves the prior projection;
+investigate permissions, source eligibility, IDs, expected hash,
+connection and proof-file access before retrying. An explicit withdrawal
+is necessary to remove a previously published item.</p>
+<p>The export also includes city branding fields, all published service
+guidance, destinations, contact details, question/answer blocks and the
+original uploaded logo/hero files referenced by the published home, with
+hashes. It excludes draft/restricted page content and unreferenced
+uploads. Back up Wagtail’s media directory with its database as well as
+the private approved releases; city-uploaded branding is stored in media
+and its generated renditions must be served by the deployment. The
+public export is a portable content bundle, not a replacement for a
+consistent full backup or a one-command restore.</p>
+<h3 id="public-presentation-routes">Public presentation routes</h3>
+<table>
+<colgroup>
+<col style="width: 50%" />
+<col style="width: 50%" />
+</colgroup>
+<thead>
+<tr>
+<th>Route</th>
+<th>Behavior and example</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>GET /</code></td>
+<td>City home, live/public service navigation and latest published
+playable recording</td>
+</tr>
+<tr>
+<td><code>GET /find-service/?service=meetings</code></td>
+<td>Task finder redirects to the archive; a numeric ID selects a
+live/public service under this site’s home; arbitrary redirect
+destinations are refused</td>
+</tr>
+<tr>
+<td><code>GET /meetings/?period=past&amp;q=Council&amp;series=Council%20Meeting&amp;page=1</code></td>
+<td>Published-title filters; <code>period</code> is
+<code>upcoming</code>, <code>past</code> or <code>all</code>; series
+matches a full public title; pages contain at most 20 results</td>
+</tr>
+<tr>
+<td><code>GET /meetings/&lt;pk&gt;/</code></td>
+<td>Published meeting and available public materials; unpublished
+identity returns 404</td>
+</tr>
+<tr>
+<td><code>GET /meetings/&lt;pk&gt;/documents/agenda/</code></td>
+<td>Approved native agenda text; <code>packet</code> and
+<code>minutes</code> select the other approved text documents;
+unavailable, cancelled, non-native or unpublished material returns
+404</td>
+</tr>
+<tr>
+<td><code>GET /meetings/&lt;pk&gt;/release/</code></td>
+<td>Existing integrity-checked approved release route with byte ranges;
+publication status is checked on every request</td>
+</tr>
+<tr>
+<td><code>GET /search/?q=records</code></td>
+<td>Live/public service title and published meeting title search; no
+private or external search</td>
+</tr>
+<tr>
+<td><code>GET /&lt;service-slug&gt;/</code></td>
+<td>Wagtail-published guidance and any configured service handoff</td>
+</tr>
+<tr>
+<td><code>GET /source/</code></td>
+<td>Allowlisted corresponding portal source, including deployed CSS,
+JavaScript, SVG illustrations, templates and native bridge source when
+present</td>
+</tr>
+</tbody>
+</table>
+<p>These resident routes create no records or accounts. The private
+native API and explicit publication approval contract below are
+unchanged. There is no new portal MCP endpoint.</p>
+<h3 id="editable-data-and-presentation-specifications">Editable data and
+presentation specifications</h3>
+<table>
+<colgroup>
+<col style="width: 50%" />
+<col style="width: 50%" />
+</colgroup>
+<thead>
+<tr>
+<th>Model</th>
+<th>Additional presentation fields</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>HomePage</td>
+<td>Brand name (120 characters), prefix (40), hero title (160),
+introduction, address, hours, synthetic notice flag and optional Wagtail
+logo/hero image references</td>
+</tr>
+<tr>
+<td>ServicePage</td>
+<td>Kind (20), summary (300), heading (180), body and next-step text,
+destination URL and label (120), department (120), public contact text
+and Wagtail question/answer blocks</td>
+</tr>
+<tr>
+<td>Meeting</td>
+<td>Existing public identity, timestamps/time zone,
+cancellation/publication status, agenda/document projection and approved
+release/provenance fields; no invented board metadata</td>
+</tr>
+</tbody>
+</table>
+<p>The layouts reuse the approved civic navy/teal, warm white and gold
+design with local fonts and original local illustrations. CSS and a
+small menu script ship in <code>portal/website/static/website/</code>;
+there are no remote fonts, analytics or client-side vendor calls.
+Existing Wagtail permissions, revisions, media storage and static
+collection are reused. Focus styles, skip navigation, semantic headings,
+phone layouts, reduced-motion handling and printable document styling
+are included. Accessible source material, captions/transcripts where
+applicable and the adopting city’s assistance contact remain part of its
+content responsibilities; no accessibility certification is claimed.</p>
+<h3 id="bundle-contract-and-errors">Bundle contract and errors</h3>
+<p>For discovery, the trusted portal server can call
+<code>GET /desktop/v1/portal/selections?request_id=&lt;UUID&gt;</code>
+with <code>X-Townlight-Session</code>. The native actor must have both
+module permissions. The JSON response is
+<code>{"selections":[{"title":"&lt;public archive title&gt;","selection":{...}}]}</code>;
+each <code>selection</code> has all publication request fields, with
+<code>action</code> set to <code>publish</code> and
+<code>approve_publication</code> set to <code>false</code>. The Wagtail
+lookup uses this endpoint. Selecting a result supplies
+<code>request_id</code>, <code>release_copy_id</code> and
+<code>archive_id</code> as query parameters and fills the form without
+granting approval. An empty list means no eligible choice was returned;
+review source readiness and the request.</p>
+<p>The JSON request requires <code>action</code> (<code>publish</code>
+or <code>withdraw</code>), boolean <code>approve_publication</code> set
+to <code>true</code>, UUIDs <code>archive_id</code>,
+<code>meeting_id</code>, <code>recording_id</code>,
+<code>request_id</code>, <code>release_copy_id</code>, and a
+64-character lowercase <code>expected_release_sha256</code>. No extra
+request fields are accepted. Send it only from the trusted portal server
+with <code>X-Townlight-Session</code> containing its private session
+proof. For example, the supported operator command
+<code>python manage.py sync_townlight selection.json</code> reads the
+selection illustrated above and supplies that header from the protected
+proof file.</p>
+<p>A successful publish returns <code>application/zip</code> with
+<code>manifest.json</code> and <code>release.bin</code>. Manifest
+version 1 contains <code>version</code>, <code>action</code>,
+<code>archive_id</code>, <code>meeting_id</code>,
+<code>recording_id</code>, <code>request_id</code>,
+<code>release_copy_id</code>, <code>original_sha256</code>,
+<code>title</code>, timezone-aware <code>scheduled_start</code>,
+<code>agenda</code>, <code>packet</code>, <code>minutes</code>,
+<code>summary</code>, and <code>release</code>. The <code>release</code>
+object contains <code>path</code> (<code>release.bin</code>),
+<code>sha256</code>, <code>size</code>, and <code>media_type</code>.
+Withdrawal returns a ZIP containing only <code>manifest.json</code> with
+<code>version</code>, <code>action</code> and <code>archive_id</code>.
+The portal validates the selection, manifest and bytes before changing
+its projection.</p>
+<p>Invalid input or missing explicit approval is rejected; authorization
+failures are rejected by the native identity layer. Unavailable or
+changed source data produces HTTP 409 with
+<code>Publication sources unavailable or changed</code>; the portal
+command reports synchronization failure and retains the existing
+publication. Resolve the underlying staff-side source, identity, hash or
+connectivity issue before retrying. Do not publish error logs containing
+proof or private source details.</p>
+<h2 id="source-license-and-demonstration-data">Source, license and
+demonstration data</h2>
+<p>The synthetic PrimeGov transport is for demonstration and does not
+contact a real tenant. Townlight-owned portal code is AGPL-3.0-only;
+vendored CivicCast code retains its Apache-2.0 notices.
+<code>/source/</code> offers allowlisted portal source and the native
+bridge from a repository checkout. Operators must provide the exact
+deployed corresponding source, modifications and dependencies as
+required by their license obligations. See the repository licenses,
+<code>portal/UPSTREAM.md</code>, and the existing <a
+href="../terms.html">terms and license</a>; no city-specific
+legal terms are supplied here.</p>
+<h2 id="subject-index">Subject index</h2>
+<ul>
+<li>Approval and selection: For staff: prepare and publish</li>
+<li>Database and recovery: Deployment and setup; Architecture and
+API</li>
+<li>Proof and permissions: Deployment and setup; Architecture and
+API</li>
+<li>Resident pages and file: Residents</li>
+<li>Branding and city service guidance: City editors: branding and
+service content</li>
+<li>Search, filtering and document routes: Public presentation
+routes</li>
+<li>Data fields and responsive design: Editable data and presentation
+specifications</li>
+<li>Source and license: Source, license and demonstration data</li>
+<li>Withdrawal: For staff: prepare and publish; Architecture and
+API</li>
+</ul>
+<h2 id="rebuild-this-guide">Rebuild this guide</h2>
+<p>From the suite repository root, install the repository’s Node
+dependencies (including Playwright), install a Playwright Chromium
+browser and make Python and Pandoc available on <code>PATH</code>. Run
+<code>node scripts/docs/build_portal_guide.cjs</code>. This rebuilds the
+portal guide HTML, editable Word, PDF and architecture PNG, and the
+portal verification reference HTML, from the checked-in Markdown, SVG,
+template and Word reference. To use an existing Playwright installation
+or Chromium executable, set <code>PLAYWRIGHT_MODULE</code> or
+<code>CHROMIUM_EXECUTABLE</code>; <code>PYTHON</code> selects a Python
+executable. The sibling product repositories are not needed to rebuild
+this
+guide.</p></article></div></main><footer><span>Townlight Beta 1 · Local private-beta documentation · AGPL-3.0-only</span><span><a href="../versions.html">Exact versions and candidate</a> · CivicCast remains separate</span></footer>
+<script>const search=document.getElementById('find-section');if(search)search.addEventListener('input',()=>{const q=search.value.toLowerCase();let n=0;document.querySelectorAll('.toc li').forEach(li=>{const match=li.textContent.toLowerCase().includes(q);li.hidden=!match;if(match)n++;});document.querySelector('.search-status').textContent=q?n+' matching entries':'';});</script></body></html>
