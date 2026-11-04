@@ -1,5 +1,8 @@
 # Changelog
 
+> Windows delivery: this package is included in [MSI 1.7.0.1](https://github.com/townlight/townlight/releases/tag/townlight-beta-1-windows-1.7.0.1); [installed acceptance](https://github.com/townlight/townlight/releases/download/townlight-beta-1-windows-1.7.0.1/ACCEPTANCE-Windows-1.7.0.1.md) applies only to the identified artifact. Earlier entries retain their original release context.
+
+
 All notable changes to TownLight Station will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
