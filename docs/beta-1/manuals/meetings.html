@@ -14,8 +14,8 @@ main,.toc a,.hero h1{overflow-wrap:anywhere}
 <nav aria-label="Main"><a href="../manuals/suite.html">Suite manual</a>
 <a href="../versions.html">Versions and Windows release</a>
 <a href="../terms.html">Terms and license</a></nav></header>
-<main id="main" class="reading wrap"><p class="edition">Windows x64 Beta 1 · MSI 1.7.0.1</p>
-<p>The signed <a href="https://github.com/townlight/townlight/releases/tag/townlight-beta-1-windows-1.7.0.1">Windows x64 beta 1.7.0.1</a> passed the documented fresh Windows Sandbox checks with synthetic data.</p>
+<main id="main" class="reading wrap"><aside aria-label="Windows 1.7.1.1 acceptance"><p>Windows 1.7.1.1 promotes the exact signed candidate from source 919f2492cf43a83e693db71fe1371001e529cf40. Its fresh installation passed 34 control checks and three independent provenance checks. Other workflow evidence is reused as specified in the acceptance summary; no claim that every workflow was rerun on this build. The installer retains its tested name, Townlight Windows Fix Candidate. Use a fresh Windows x64 installation/profile; upgrade from 1.7.0.1 is not established. Station still requires separate setup. <a href="https://github.com/townlight/townlight/releases/download/townlight-v1.7.1-beta.1/ACCEPTANCE-Windows-1.7.1.1.md">Read new versus reused evidence and limits</a>.</p></aside><p class="edition">Windows x64 Beta 1 · MSI 1.7.1.1</p>
+<p>The signed <a href="https://github.com/townlight/townlight/releases/tag/townlight-v1.7.1-beta.1">Windows x64 beta 1.7.1.1</a> passed the documented fresh Windows Sandbox checks with synthetic data.</p>
 
 <nav id="TOC" role="doc-toc">
 <ul>
@@ -137,7 +137,7 @@ included with the same documentation companion.</p>
 </tr>
 <tr>
 <td>Intended installer version</td>
-<td>1.7.0.1</td>
+<td>1.7.1.1</td>
 </tr>
 <tr>
 <td>Product component</td>
@@ -149,15 +149,15 @@ included with the same documentation companion.</p>
 </tr>
 <tr>
 <td>Native desktop source version</td>
-<td>1.7.0-1</td>
+<td>1.7.1-1</td>
 </tr>
 <tr>
 <td>Candidate MSI SHA256</td>
-<td><a href="https://github.com/townlight/townlight/releases/download/townlight-beta-1-windows-1.7.0.1/ACCEPTANCE-Windows-1.7.0.1.md">Windows acceptance summary</a></td>
+<td><a href="https://github.com/townlight/townlight/releases/download/townlight-v1.7.1-beta.1/ACCEPTANCE-Windows-1.7.1.1.md">Windows acceptance summary</a></td>
 </tr>
 <tr>
 <td>Corresponding-source SHA256</td>
-<td><a href="https://github.com/townlight/townlight/releases/tag/townlight-beta-1-windows-1.7.0.1">Corresponding source archive and checksums</a></td>
+<td><a href="https://github.com/townlight/townlight/releases/tag/townlight-v1.7.1-beta.1">Corresponding source archive and checksums</a></td>
 </tr>
 <tr>
 <td>Current owned software license</td>
@@ -170,11 +170,11 @@ configuration</td>
 </tr>
 </tbody>
 </table>
-<p>Windows MSI 1.7.0.1 includes Townlight Meetings 1.0.5. Use a fresh profile and empty database. The approved profile path is <code>%LOCALAPPDATA%\CivicSuite</code>. Preserve existing profiles, data and backups.</p>
+<p>Windows MSI 1.7.1.1 includes Townlight Meetings 1.0.5. Use a fresh profile and empty database. The approved profile path is <code>%LOCALAPPDATA%\CivicSuite</code>. Preserve existing profiles, data and backups.</p>
 <h2 id="first-run">First run</h2>
 <ol type="1">
-<li>Download the signed MSI, matching source companion and checksums from the <a href="https://github.com/townlight/townlight/releases/tag/townlight-beta-1-windows-1.7.0.1">public Windows release</a>.</li>
-<li>Verify the MSI hash and Authenticode publisher before installing on a fresh Windows profile. See the <a href="https://github.com/townlight/townlight/releases/download/townlight-beta-1-windows-1.7.0.1/ACCEPTANCE-Windows-1.7.0.1.md">Windows acceptance summary</a> for the tested setup.</li>
+<li>Download the signed MSI, matching source companion and checksums from the <a href="https://github.com/townlight/townlight/releases/tag/townlight-v1.7.1-beta.1">public Windows release</a>.</li>
+<li>Verify the MSI hash and Authenticode publisher before installing on a fresh Windows profile. See the <a href="https://github.com/townlight/townlight/releases/download/townlight-v1.7.1-beta.1/ACCEPTANCE-Windows-1.7.1.1.md">Windows acceptance summary</a> for the tested setup.</li>
 <li>Launch Townlight under the intended named Windows account. Choose
 the storage folders. Select <strong>Townlight Inspections
 candidate</strong> (<code>inspections-preview</code>) for the bounded
@@ -400,7 +400,7 @@ statements</h3>
 <p>This beta has synthetic single-profile workflow evidence. It does not
 have a published benchmark for concurrent staff capacity, minimum
 RAM/CPU, large-source limits or a field SLA. Do not turn a developer
-machine’s specification into a supported minimum. The signed MSI is 2,082,697,216 bytes; allow additional disk for extracted runtime,
+machine’s specification into a supported minimum. The signed MSI is 2,081,316,864 bytes; allow additional disk for extracted runtime,
 database, originals, exports, media and backups. Select
 equipment/storage after sizing those actual workloads.</p>
 <p>The exact <a
@@ -674,7 +674,7 @@ synthetic. The guest install/uninstall and recovery passed, and the
 owned Sandbox stopped. No host installed application or standalone
 CivicCast was changed. This documentation task reuses those receipts; it
 does not claim a new software acceptance run.</p>
-<p>See the <a href="https://github.com/townlight/townlight/releases/download/townlight-beta-1-windows-1.7.0.1/ACCEPTANCE-Windows-1.7.0.1.md">Windows acceptance summary</a> for this MSI. The historical <a href="https://townlight.github.io/reference/sandbox-evidence-index.json">evidence index</a> applies to its original build.</p>
+<p>See the <a href="https://github.com/townlight/townlight/releases/download/townlight-v1.7.1-beta.1/ACCEPTANCE-Windows-1.7.1.1.md">Windows acceptance summary</a> for this MSI. The historical <a href="https://townlight.github.io/reference/sandbox-evidence-index.json">evidence index</a> applies to its original build.</p>
 <p>The limits remain: actual city field acceptance and equipment/network
 commissioning; Station automatic provisioning/SCM commissioning; every
 UI/role combination; field recognition accuracy; and historical in-place
