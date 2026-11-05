@@ -14,8 +14,8 @@ main,.toc a,.hero h1{overflow-wrap:anywhere}
 <nav aria-label="Main"><a href="../manuals/suite.html">Suite manual</a>
 <a href="../versions.html">Versions and Windows release</a>
 <a href="../terms.html">Terms and license</a></nav></header>
-<main id="main" class="reading wrap"><aside aria-label="Windows 1.7.1.1 acceptance"><p>Windows 1.7.1.1 promotes the exact signed candidate from source 919f2492cf43a83e693db71fe1371001e529cf40. Its fresh installation passed 34 control checks and three independent provenance checks. Other workflow evidence is reused as specified in the acceptance summary; no claim that every workflow was rerun on this build. The installer retains its tested name, Townlight Windows Fix Candidate. Use a fresh Windows x64 installation/profile; upgrade from 1.7.0.1 is not established. Station still requires separate setup. <a href="https://github.com/townlight/townlight/releases/download/townlight-v1.7.1-beta.1/ACCEPTANCE-Windows-1.7.1.1.md">Read new versus reused evidence and limits</a>.</p></aside><p class="edition">Windows x64 Beta 1 · MSI 1.7.1.1</p>
-<p>The signed <a href="https://github.com/townlight/townlight/releases/tag/townlight-v1.7.1-beta.1">Windows x64 beta 1.7.1.1</a> passed the documented fresh Windows Sandbox checks with synthetic data.</p>
+<main id="main" class="reading wrap"><aside aria-label="Windows 1.7.2.1 acceptance"><p>Windows 1.7.2.1 changes installer metadata and displays Townlight as the installed product name. Its new outer MSI is Azure-signed by Scott Converse and independently verified. The signed application/runtime cabinet is unchanged from 1.7.1.1. Functional and fresh-install evidence is reused from 1.7.1.1; no full-suite or independent fresh-install rerun is claimed for this metadata revision. See the release for separately dated installed upgrade evidence. Upgrade from 1.7.0.1 is not established. Station requires separate setup. <a href="https://github.com/townlight/townlight/releases/download/townlight-windows-v1.7.2.1/Metadata-Verification-Windows-1.7.2.1.md">Read new versus reused evidence and limits</a>.</p></aside><p class="edition">Windows x64 Beta 1 · MSI 1.7.2.1</p>
+<p>The signed <a href="https://github.com/townlight/townlight/releases/tag/townlight-windows-v1.7.2.1">Windows x64 beta 1.7.2.1</a> updates installer metadata while preserving the accepted signed application/runtime cabinet.</p>
 
 <nav id="TOC" role="doc-toc">
 <ul>
@@ -75,7 +75,7 @@ id="toc-delivery-subject-index">Delivery subject index</a></li>
 </ul>
 </nav>
 <h1 id="townlight-station-manual">Townlight Station Manual</h1>
-<p>The signed <a href="https://github.com/townlight/townlight/releases/tag/townlight-v1.7.1-beta.1">Windows x64 beta 1.7.1.1</a> passed the documented fresh Windows Sandbox checks with synthetic data. The <a href="https://github.com/townlight/townlight/releases/download/townlight-v1.7.1-beta.1/ACCEPTANCE-Windows-1.7.1.1.md">Windows acceptance summary</a> applies to this exact MSI.</p>
+<p>The signed <a href="https://github.com/townlight/townlight/releases/tag/townlight-windows-v1.7.2.1">Windows x64 beta 1.7.2.1</a> updates installer metadata while preserving the accepted signed application/runtime cabinet. The <a href="https://github.com/townlight/townlight/releases/download/townlight-windows-v1.7.2.1/ACCEPTANCE-Windows-1.7.2.1.md">Windows acceptance summary</a> applies to this exact MSI.</p>
 <h2 id="using-this-manual">Using this manual</h2>
 <p>Townlight Station helps station operators, clerks, records staff and
 deployment administrators. Station adapts a pinned CivicCast media
@@ -110,7 +110,7 @@ included with the same documentation companion.</p>
 </tr>
 <tr>
 <td>Intended installer</td>
-<td>1.7.1.1</td>
+<td>1.7.2.1</td>
 </tr>
 <tr>
 <td>Desktop source</td>
@@ -131,7 +131,7 @@ separately</td>
 </tr>
 <tr>
 <td>Candidate hashes/signature</td>
-<td><a href="https://github.com/townlight/townlight/releases/download/townlight-v1.7.1-beta.1/SHA256SUMS-Windows-1.7.1.1.txt">SHA-256 checksums</a> and <a href="https://github.com/townlight/townlight/releases/download/townlight-v1.7.1-beta.1/ACCEPTANCE-Windows-1.7.1.1.md">Windows acceptance summary</a></td>
+<td><a href="https://github.com/townlight/townlight/releases/download/townlight-windows-v1.7.2.1/SHA256SUMS-Windows-1.7.2.1.txt">SHA-256 checksums</a> and <a href="https://github.com/townlight/townlight/releases/download/townlight-windows-v1.7.2.1/ACCEPTANCE-Windows-1.7.2.1.md">Windows acceptance summary</a></td>
 </tr>
 <tr>
 <td>Owned software license</td>
@@ -147,8 +147,8 @@ existing city data and the prior release. The approved profile path
 remains <code>%LOCALAPPDATA%\CivicSuite</code> for that path only.</p>
 <h2 id="first-run">First run</h2>
 <ol type="1">
-<li>Download the signed MSI, matching source companion and checksums from the <a href="https://github.com/townlight/townlight/releases/tag/townlight-v1.7.1-beta.1">public Windows release</a>.</li>
-<li>Verify the MSI hash and Authenticode publisher before installing on a fresh Windows profile. See the <a href="https://github.com/townlight/townlight/releases/download/townlight-v1.7.1-beta.1/ACCEPTANCE-Windows-1.7.1.1.md">Windows acceptance summary</a> for the tested setup.</li>
+<li>Download the signed MSI, matching source companion and checksums from the <a href="https://github.com/townlight/townlight/releases/tag/townlight-windows-v1.7.2.1">public Windows release</a>.</li>
+<li>Verify the MSI hash and Authenticode publisher before installation. See the <a href="https://github.com/townlight/townlight/releases/download/townlight-windows-v1.7.2.1/ACCEPTANCE-Windows-1.7.2.1.md">Windows acceptance summary</a> for the tested setup.</li>
 <li>Launch Townlight under the intended named Windows account. Choose
 the storage folders. Select <strong>Townlight Inspections
 candidate</strong> (<code>inspections-preview</code>) for the bounded
@@ -1292,7 +1292,7 @@ href="#take-a-live-override-and-return">Take a live override and
 return</a>.</li>
 </ul>
 <h2 id="source-and-document-control">Source and document control</h2>
-<p>This manual covers the Station service paired with Windows MSI 1.7.1.1. The <a href="https://github.com/townlight/townlight/releases/download/townlight-v1.7.1-beta.1/ACCEPTANCE-Windows-1.7.1.1.md">Windows acceptance summary</a> records the tested Meetings, Station and Records handoff.</p>
+<p>This manual covers the Station service paired with Windows MSI 1.7.2.1. The <a href="https://github.com/townlight/townlight/releases/download/townlight-windows-v1.7.2.1/ACCEPTANCE-Windows-1.7.2.1.md">Windows acceptance summary</a> records the tested Meetings, Station and Records handoff.</p>
 <h3 id="workflow-subject-index">Workflow subject index</h3>
 <ul>
 <li><p><strong>Capture and stop</strong> — <a href="#workflow-4">Daily
