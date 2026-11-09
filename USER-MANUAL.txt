@@ -1,6 +1,6 @@
-Windows x64 Beta 1 · MSI 1.7.2.1
+Windows x64 Beta 1 · MSI 1.8.0.1
 
-The signed Windows x64 beta 1.7.2.1 updates installer metadata while
+The signed Windows x64 beta 1.8.0.1 updates installer metadata while
 preserving the accepted signed application/runtime cabinet.
 
 - Townlight Station Manual
@@ -28,7 +28,7 @@ preserving the accepted signed application/runtime cabinet.
 
 Townlight Station Manual
 
-The signed Windows x64 beta 1.7.2.1 updates installer metadata while
+The signed Windows x64 beta 1.8.0.1 updates installer metadata while
 preserving the accepted signed application/runtime cabinet. The Windows
 acceptance summary applies to this exact MSI.
 
@@ -55,8 +55,8 @@ Beta identity
   Identity                      Value
   ----------------------------- -----------------------------------------------------------------------
   Documentation                 Townlight naming, Access and Notice candidate
-  Intended installer            1.7.2.1
-  Desktop source                1.7.1-1
+  Intended installer            1.8.0.1
+  Desktop source                1.8.0-1
   Runtime distribution          townlight-runtime 0.2.0
   Station distribution/import   townlight-station 0.3.0 / townlight_station
   Acceptance composition        Fresh Windows x64; inspections-preview; Station configured separately
@@ -1099,7 +1099,7 @@ Operating subject links
 
 Source and document control
 
-This manual covers the Station service paired with Windows MSI 1.7.2.1.
+This manual covers the Station service paired with Windows MSI 1.8.0.1.
 The Windows acceptance summary records the tested Meetings, Station and
 Records handoff.
 

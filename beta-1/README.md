@@ -1,4 +1,4 @@
-> **Windows Beta 1:** this unchanged service remains 0.3.0. See the [current manual](USER-MANUAL.md) and [exact Windows acceptance](https://github.com/townlight/townlight/releases/download/townlight-windows-v1.7.2.1/ACCEPTANCE-Windows-1.7.2.1.md).
+> **Windows Beta 1:** this unchanged service remains 0.3.0. See the [current manual](USER-MANUAL.md) and [exact Windows acceptance](https://github.com/townlight/townlight/releases/download/townlight-windows-v1.8.0.1/ACCEPTANCE-Windows-1.8.0.1.md).
 
 # Townlight Station service boundary
 
