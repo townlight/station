@@ -14,8 +14,8 @@ main,.toc a,.hero h1{overflow-wrap:anywhere}
 <nav aria-label="Main"><a href="../manuals/suite.html">Suite manual</a>
 <a href="../versions.html">Versions and Windows release</a>
 <a href="../terms.html">Terms and license</a></nav></header>
-<main id="main" class="reading wrap"><aside aria-label="Windows 1.7.2.1 acceptance"><p>Windows 1.7.2.1 changes installer metadata and displays Townlight as the installed product name. Its new outer MSI is Azure-signed by Scott Converse and independently verified. The signed application/runtime cabinet is unchanged from 1.7.1.1. Functional and fresh-install evidence is reused from 1.7.1.1; no full-suite or independent fresh-install rerun is claimed for this metadata revision. See the release for separately dated installed upgrade evidence. Upgrade from 1.7.0.1 is not established. Station requires separate setup. <a href="https://github.com/townlight/townlight/releases/download/townlight-windows-v1.7.2.1/Metadata-Verification-Windows-1.7.2.1.md">Read new versus reused evidence and limits</a>.</p></aside><p class="edition">Windows x64 Beta 1 · MSI 1.7.2.1</p>
-<p>The signed <a href="https://github.com/townlight/townlight/releases/tag/townlight-windows-v1.7.2.1">Windows x64 beta 1.7.2.1</a> updates installer metadata while preserving the accepted signed application/runtime cabinet.</p>
+<main id="main" class="reading wrap"><aside aria-label="Windows 1.8.0.1 acceptance"><p>Windows 1.8.0.1 adds Boards &amp; Commissions, Contracts, and Procurement to the full Windows profile. The signed Windows Sandbox checks cover a fresh installation, the three staff workflows, role boundaries, record persistence, and upgrade from 1.7.2.1 with retained city data and settings. Station continues to use its separately configured local service. <a href="https://github.com/townlight/townlight/releases/download/townlight-windows-v1.8.0.1/ACCEPTANCE-Windows-1.8.0.1.md">Acceptance and limits</a>.</p></aside><p class="edition">Windows x64 Beta 1 · MSI 1.8.0.1</p>
+<p>The signed <a href="https://github.com/townlight/townlight/releases/tag/townlight-windows-v1.8.0.1">Windows x64 beta 1.8.0.1</a> adds the three staff workspaces and automatically refreshes the bundled runtime when upgrading from 1.7.2.1.</p>
 
 <nav id="TOC" role="doc-toc">
 <ul>
@@ -136,8 +136,8 @@ included with the same documentation companion.</p>
 <td>Townlight Beta 1 naming, Access and Notice candidate</td>
 </tr>
 <tr>
-<td>Intended installer version</td>
-<td>1.7.2.1</td>
+<td>Windows MSI version</td>
+<td>1.8.0.1</td>
 </tr>
 <tr>
 <td>Product component</td>
@@ -149,11 +149,11 @@ included with the same documentation companion.</p>
 </tr>
 <tr>
 <td>Native desktop source version</td>
-<td>1.7.1-1</td>
+<td>1.8.0-1</td>
 </tr>
 <tr>
 <td>Candidate hashes</td>
-<td><a href="https://github.com/townlight/townlight/releases/download/townlight-windows-v1.7.2.1/SHA256SUMS-Windows-1.7.2.1.txt">SHA-256 checksums</a> and <a href="https://github.com/townlight/townlight/releases/download/townlight-windows-v1.7.2.1/ACCEPTANCE-Windows-1.7.2.1.md">Windows acceptance summary</a></td>
+<td><a href="https://github.com/townlight/townlight/releases/download/townlight-windows-v1.8.0.1/SHA256SUMS-Windows-1.8.0.1.txt">SHA-256 checksums</a> and <a href="https://github.com/townlight/townlight/releases/download/townlight-windows-v1.8.0.1/ACCEPTANCE-Windows-1.8.0.1.md">Windows acceptance summary</a></td>
 </tr>
 <tr>
 <td>Current owned software license</td>
@@ -166,11 +166,11 @@ separately</td>
 </tr>
 </tbody>
 </table>
-<p>Use an empty database and fresh Windows profile. The installer refuses legacy profile initialization. The approved profile path is <code>%LOCALAPPDATA%\CivicSuite</code>. Keep existing profiles and backups.</p>
+<p>Start a new installation with an empty database and fresh Windows profile. For an upgrade from Windows 1.7.2.1, keep the existing profile. The approved profile path is <code>%LOCALAPPDATA%\CivicSuite</code>. Keep existing profiles and backups.</p>
 <h2 id="first-run">First run</h2>
 <ol type="1">
-<li>Download the signed MSI, matching source companion and checksums from the <a href="https://github.com/townlight/townlight/releases/tag/townlight-windows-v1.7.2.1">public Windows release</a>.</li>
-<li>Verify the MSI hash and Authenticode publisher before installation. See the <a href="https://github.com/townlight/townlight/releases/download/townlight-windows-v1.7.2.1/ACCEPTANCE-Windows-1.7.2.1.md">Windows acceptance summary</a> for the tested setup.</li>
+<li>Download the signed MSI, matching source companion and checksums from the <a href="https://github.com/townlight/townlight/releases/tag/townlight-windows-v1.8.0.1">public Windows release</a>.</li>
+<li>Verify the MSI hash and Authenticode publisher before installation. See the <a href="https://github.com/townlight/townlight/releases/download/townlight-windows-v1.8.0.1/ACCEPTANCE-Windows-1.8.0.1.md">Windows acceptance summary</a> for the tested setup.</li>
 <li>Launch Townlight under the intended named Windows account. Choose
 the storage folders. Select <strong>Townlight Inspections
 candidate</strong> (<code>inspections-preview</code>) for the bounded
@@ -714,7 +714,7 @@ synthetic. The guest install/uninstall and recovery passed, and the
 owned Sandbox stopped. No host installed application or standalone
 CivicCast was changed. This documentation task reuses those receipts; it
 does not claim a new software acceptance run.</p>
-<p>See the <a href="https://github.com/townlight/townlight/releases/download/townlight-windows-v1.7.2.1/ACCEPTANCE-Windows-1.7.2.1.md">Windows acceptance summary</a> for this MSI. The historical <a href="https://townlight.github.io/reference/sandbox-evidence-index.json">evidence index</a> applies to its original build.</p>
+<p>See the <a href="https://github.com/townlight/townlight/releases/download/townlight-windows-v1.8.0.1/ACCEPTANCE-Windows-1.8.0.1.md">Windows acceptance summary</a> for this MSI. The historical <a href="https://townlight.github.io/reference/sandbox-evidence-index.json">evidence index</a> applies to its original build.</p>
 <p>The limits remain: actual city field acceptance and equipment/network
 commissioning; Station automatic provisioning/SCM commissioning; every
 UI/role combination; field recognition accuracy; and historical in-place

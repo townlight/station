@@ -1,6 +1,6 @@
-Windows x64 Beta 1 · MSI 1.7.2.1
+Windows x64 Beta 1 · MSI 1.8.0.1
 
-The signed [Windows x64 beta 1.7.2.1](https://github.com/townlight/townlight/releases/tag/townlight-windows-v1.7.2.1) updates installer metadata while preserving the accepted signed application/runtime cabinet.
+The signed [Windows x64 beta 1.8.0.1](https://github.com/townlight/townlight/releases/tag/townlight-windows-v1.8.0.1) adds the three staff workspaces and automatically refreshes the bundled runtime when upgrading from 1.7.2.1.
 
 - <a href="https://townlight.github.io/manuals/station.html#townlight-station-manual" id="toc-townlight-station-manual">Townlight Station Manual</a>
   - <a href="https://townlight.github.io/manuals/station.html#using-this-manual" id="toc-using-this-manual">Using this manual</a>
@@ -27,7 +27,7 @@ The signed [Windows x64 beta 1.7.2.1](https://github.com/townlight/townlight/rel
 
 # Townlight Station Manual
 
-The signed [Windows x64 beta 1.7.2.1](https://github.com/townlight/townlight/releases/tag/townlight-windows-v1.7.2.1) updates installer metadata while preserving the accepted signed application/runtime cabinet. The [Windows acceptance summary](https://github.com/townlight/townlight/releases/download/townlight-windows-v1.7.2.1/ACCEPTANCE-Windows-1.7.2.1.md) applies to this exact MSI.
+The signed [Windows x64 beta 1.8.0.1](https://github.com/townlight/townlight/releases/tag/townlight-windows-v1.8.0.1) adds the three staff workspaces and automatically refreshes the bundled runtime when upgrading from 1.7.2.1. The [Windows acceptance summary](https://github.com/townlight/townlight/releases/download/townlight-windows-v1.8.0.1/ACCEPTANCE-Windows-1.8.0.1.md) applies to this exact MSI.
 
 ## Using this manual
 
@@ -40,20 +40,20 @@ Staff should begin with First run and Daily workflow. Administrators should also
 | Identity | Value |
 |----|----|
 | Documentation | Townlight naming, Access and Notice candidate |
-| Intended installer | 1.7.2.1 |
-| Desktop source | 1.7.1-1 |
+| Intended installer | 1.8.0.1 |
+| Desktop source | 1.8.0-1 |
 | Runtime distribution | townlight-runtime 0.2.0 |
 | Station distribution/import | townlight-station 0.3.0 / townlight_station |
 | Acceptance composition | Fresh Windows x64; inspections-preview; Station configured separately |
-| Candidate hashes/signature | [SHA-256 checksums](https://github.com/townlight/townlight/releases/download/townlight-windows-v1.7.2.1/SHA256SUMS-Windows-1.7.2.1.txt) and [Windows acceptance summary](https://github.com/townlight/townlight/releases/download/townlight-windows-v1.7.2.1/ACCEPTANCE-Windows-1.7.2.1.md) |
+| Candidate hashes/signature | [SHA-256 checksums](https://github.com/townlight/townlight/releases/download/townlight-windows-v1.8.0.1/SHA256SUMS-Windows-1.8.0.1.txt) and [Windows acceptance summary](https://github.com/townlight/townlight/releases/download/townlight-windows-v1.8.0.1/ACCEPTANCE-Windows-1.8.0.1.md) |
 | Owned software license | AGPL-3.0-only |
 
 This edition updates the paired-runtime instructions for the naming candidate. It does not rename historical Station artifacts or claim new Station software features. Use an empty database and fresh profile; no in-place legacy upgrade or old import shim is supported. Preserve existing city data and the prior release. The approved profile path remains `%LOCALAPPDATA%\CivicSuite` for that path only.
 
 ## First run
 
-1.  Download the signed MSI, matching source companion and checksums from the [public Windows release](https://github.com/townlight/townlight/releases/tag/townlight-windows-v1.7.2.1).
-2.  Verify the MSI hash and Authenticode publisher before installation. See the [Windows acceptance summary](https://github.com/townlight/townlight/releases/download/townlight-windows-v1.7.2.1/ACCEPTANCE-Windows-1.7.2.1.md) for the tested setup.
+1.  Download the signed MSI, matching source companion and checksums from the [public Windows release](https://github.com/townlight/townlight/releases/tag/townlight-windows-v1.8.0.1).
+2.  Verify the MSI hash and Authenticode publisher before installation. See the [Windows acceptance summary](https://github.com/townlight/townlight/releases/download/townlight-windows-v1.8.0.1/ACCEPTANCE-Windows-1.8.0.1.md) for the tested setup.
 3.  Launch Townlight under the intended named Windows account. Choose the storage folders. Select **Townlight Inspections candidate** (`inspections-preview`) for the bounded desktop composition, including Access and Notice. A narrower default selection will not expose all workspaces.
 4.  Enter the city profile, time zone and contacts. Create the first named local administrator, sign in and choose protected backup storage. **Continue without local AI** is valid for the deterministic workflows.
 5.  Run Health Check and wait for readiness. Open Townlight. In System Health select **Finish Records Migration** to activate the canonical Python/PostgreSQL runtime. Do not fabricate migration receipts or seed accounts.
@@ -635,7 +635,7 @@ When an organization ends testing, it controls retention/export and removes acce
 
 ## Source and document control
 
-This manual covers the Station service paired with Windows MSI 1.7.2.1. The [Windows acceptance summary](https://github.com/townlight/townlight/releases/download/townlight-windows-v1.7.2.1/ACCEPTANCE-Windows-1.7.2.1.md) records the tested Meetings, Station and Records handoff.
+This manual covers the Station service paired with Windows MSI 1.8.0.1. The [Windows acceptance summary](https://github.com/townlight/townlight/releases/download/townlight-windows-v1.8.0.1/ACCEPTANCE-Windows-1.8.0.1.md) records the tested Meetings, Station and Records handoff.
 
 ### Workflow subject index
 
