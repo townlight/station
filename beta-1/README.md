@@ -7,6 +7,16 @@ private recording store and media adapter. It uses a pinned CivicCast media
 implementation; it does not start CivicCast's application or installer. The
 standalone CivicCast product remains independent.
 
+## Import a public recording from Townlight
+
+With the shared Townlight importer installed, a capture operator can select a
+saved imported meeting, choose a direct MP4 and stage it from the Station
+operator page. Use the normal private ingest action to queue it for processing.
+The job retains the meeting citation and downloaded file hash. Player-only
+sources stay available as references. A separately deployed Station service
+needs the matching Townlight runtime package in its Python environment to stage
+these recordings.
+
 ## Identity and configuration
 
 Product/app ID: `townlight-station` / `org.townlight.station`. Windows service:

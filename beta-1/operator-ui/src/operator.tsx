@@ -14,6 +14,7 @@ function App(){
  const [schedules,setSchedules]=useState<any[]>([]),[playouts,setPlayouts]=useState<any[]>([]),[air,setAir]=useState<Air>({mode:'schedule'});
  const [meeting,setMeeting]=useState(''),[agenda,setAgenda]=useState<string[]>([]),[source,setSource]=useState(''),[busy,setBusy]=useState(false);
  const [sourceFile,setSourceFile]=useState(''),[captionsFile,setCaptionsFile]=useState(''),[startsAt,setStartsAt]=useState('');
+ const [imported,setImported]=useState<{index:number;direct:boolean}[]>([]),[importIndex,setImportIndex]=useState('');
  const [onAirSource,setOnAirSource]=useState(''),[reason,setReason]=useState('');
  const [feeds,setFeeds]=useState<any[]>([]),[feed,setFeed]=useState(''),[uploads,setUploads]=useState<any[]>([]);
  const pending=useRef<any>(null), refreshing=useRef(false);
@@ -45,11 +46,29 @@ function App(){
  await refresh();
  }catch(e){fail(e);}})();return()=>{alive=false;};},[]);
  useEffect(()=>{if(!connected)return;const timer=setInterval(refresh,2000);return()=>clearInterval(timer);},[connected]);
- async function start(e:React.FormEvent){e.preventDefault();if(busy)return;setBusy(true);try{
- const values={meeting_id:meeting,agenda_ids:agenda,live_source_id:source,civiccast_feed_id:feed||null};
+ async function queueCapture(values:object){
  if(!pending.current||JSON.stringify(pending.current.values)!==JSON.stringify(values))pending.current={values,key:crypto.randomUUID()};
  await api('/v1/recordings',{...values,idempotency_key:pending.current.key});pending.current=null;tell('Recording accepted. Watch its status below.');await refresh();
+ }
+ async function start(e:React.FormEvent){e.preventDefault();if(busy)return;setBusy(true);try{
+ await queueCapture({meeting_id:meeting,agenda_ids:agenda,live_source_id:source,civiccast_feed_id:feed||null});
  }catch(e){fail(e);}finally{setBusy(false);}}
+ function selectMeeting(id:string){setMeeting(id);setAgenda([]);setImported([]);setImportIndex('');}
+ async function loadImported(){
+  setBusy(true);
+  try{
+   const data=await api(`/operator/meeting/${meeting}/imported-recordings`);
+   setImported(data);setImportIndex('');
+   tell(data.some((record:{direct:boolean})=>record.direct)?'Select a direct recording to bring into Station.':'This meeting has no direct MP4 recording available.');
+  }catch(e){fail(e);}finally{setBusy(false);}
+ }
+ async function captureImported(e:React.FormEvent){
+  e.preventDefault();if(busy||!importIndex)return;setBusy(true);
+  try{
+   const staged=await api(`/operator/meeting/${meeting}/imported-recordings`,{index:Number(importIndex)});
+   await queueCapture({meeting_id:meeting,agenda_ids:agenda,source_file:staged.source_file});
+  }catch(e){fail(e);}finally{setBusy(false);}
+ }
  async function stop(id:string){try{await api(`/v1/recordings/${id}/stop`,{});tell('Stop requested. Station is finishing and verifying the recording.');await refresh();}catch(e){fail(e);}}
  async function attach(id:string,hash:string,request:string){try{const receipt=await api('/operator/handoff',{request_id:request,recording_id:id,expected_sha256:hash});tell(`Attached privately to Records. Request ${receipt.request.id} has ${receipt.request.documents.length} document(s).`);}catch(e){fail(e);}}
  async function act(label:string, path:string, body:unknown, done:string){
@@ -71,15 +90,21 @@ function App(){
  <button id="go-live" disabled={!onAirSource||reason.trim().length<3||busy}>Take live override</button></form>}
  {!sources.length&&<p>No live input configured. Ask your Station administrator to configure the chamber feed.</p>}</section>}
  {connected&&catalog?.can_capture&&<section id="capture"><h2>Record a meeting</h2><p>Select the meeting and chamber feed. Recordings remain private for Records review.</p>
- <form id="capture-form" onSubmit={start}><label>Meeting<select id="meeting-id" required value={meeting} onChange={e=>{setMeeting(e.target.value);setAgenda([]);}}><option value="">Choose a meeting</option>{catalog.meetings.map(m=><option key={m.id} value={m.id}>{m.title}</option>)}</select></label>
+ <form id="capture-form" onSubmit={start}><label>Meeting<select id="meeting-id" required value={meeting} disabled={busy} onChange={e=>selectMeeting(e.target.value)}><option value="">Choose a meeting</option>{catalog.meetings.map(m=><option key={m.id} value={m.id}>{m.title}</option>)}</select></label>
  <label>Live input<select id="source" required value={source} onChange={e=>setSource(e.target.value)}>{sources.map(s=><option key={s.id} value={s.id}>{s.label}</option>)}</select></label><label>CivicCast live feed<select id="civiccast-feed" value={feed} onChange={e=>setFeed(e.target.value)}><option value="">Recording only</option>{feeds.map(f=><option key={f.id} value={f.id}>{f.label}</option>)}</select></label><button id="start" disabled={!meeting||!source||active||busy}>Start recording</button></form>
  {catalog.agenda.filter(a=>a.meeting_id===meeting).map(a=><label className="agenda-choice" key={a.id}><input type="checkbox" checked={agenda.includes(a.id)} onChange={e=>setAgenda(e.target.checked?[...agenda,a.id]:agenda.filter(id=>id!==a.id))}/>{a.title}</label>)}
+ <button type="button" disabled={!meeting||busy} onClick={loadImported}>Find imported recordings</button>
+ {imported.length>0&&<form onSubmit={captureImported}>
+  <label>Imported recording<select required value={importIndex} disabled={busy} onChange={e=>setImportIndex(e.target.value)}>
+   <option value="">Choose a recording</option>{imported.map(r=><option key={r.index} value={r.index} disabled={!r.direct}>Recording {r.index+1}{r.direct?' — direct MP4':' — player link only'}</option>)}
+  </select></label><button disabled={!importIndex||busy}>Capture imported recording privately</button>
+ </form>}
  {!sources.length&&<p>No live input configured. Ask your Station administrator to configure the chamber feed.</p>}
  <p>Automatic stop after {Math.round(catalog.max_seconds/60*10)/10} minutes. Start another recording if the meeting continues.</p></section>}
  {connected&&catalog?.can_capture&&<section id="schedules"><div className="section-heading"><h2>Schedules</h2><button onClick={refresh}>Refresh</button></div>
  <p>A schedule is durable intent: Station starts it even across a restart, and only once. A schedule whose start time has passed beyond the grace window is marked missed, never aired late.</p>
  <form id="schedule-form" onSubmit={e=>{e.preventDefault();act('schedule','/v1/schedules',{meeting_id:meeting,agenda_ids:agenda,source_file:sourceFile||null,captions_file:captionsFile||null,start_at:new Date(startsAt).toISOString(),idempotency_key:scheduleKey.current},'Schedule accepted.').then(()=>{scheduleKey.current=crypto.randomUUID();});}}>
- <label>Meeting<select id="schedule-meeting" required value={meeting} onChange={e=>{setMeeting(e.target.value);setAgenda([]);}}><option value="">Choose a meeting</option>{catalog.meetings.map(m=><option key={m.id} value={m.id}>{m.title}</option>)}</select></label>
+ <label>Meeting<select id="schedule-meeting" required value={meeting} disabled={busy} onChange={e=>selectMeeting(e.target.value)}><option value="">Choose a meeting</option>{catalog.meetings.map(m=><option key={m.id} value={m.id}>{m.title}</option>)}</select></label>
  <label>Start<input id="schedule-start" type="datetime-local" required value={startsAt} onChange={e=>setStartsAt(e.target.value)}/></label>
  <label>Source file in managed ingest<input id="schedule-source" value={sourceFile} placeholder="synthetic-program.mp4" onChange={e=>setSourceFile(e.target.value)}/></label>
  <label>Caption sidecar<input id="schedule-captions" value={captionsFile} placeholder="synthetic-captions.srt" onChange={e=>setCaptionsFile(e.target.value)}/></label>
