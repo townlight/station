@@ -8,6 +8,7 @@ import httpx
 from fastapi import Header, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
+from .imported_recording import stage_recording
 
 
 class Ticket(BaseModel):
@@ -20,6 +21,11 @@ class Handoff(BaseModel):
     request_id: UUID
     recording_id: UUID
     expected_sha256: str = Field(pattern='^[0-9a-f]{64}$')
+
+
+class ImportedRecording(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    index: int = Field(ge=0, strict=True)
 
 
 def install_operator(app, settings, suite):
@@ -101,6 +107,23 @@ def install_operator(app, settings, suite):
     @app.get('/operator/meeting/{identity}')
     def meeting(identity: UUID, proof: str | None = Header(default=None, alias='X-Townlight-Session')):
         return suite.get(f'/desktop/v1/meetings/meetings/{identity}', proof)
+
+    @app.get('/operator/meeting/{identity}/imported-recordings')
+    def imported_recordings(identity: UUID, proof: str | None = Header(default=None, alias='X-Townlight-Session')):
+        suite.get('/desktop/v1/station/context?capability=capture', proof)
+        receipt = suite.get(f'/desktop/v1/meetings/imports/{identity}', proof)
+        return [
+            {'index': index, 'direct': bool(recording.get('video_url'))}
+            for index, recording in enumerate(receipt['payload'].get('recordings', []))
+        ]
+
+    @app.post('/operator/meeting/{identity}/imported-recordings')
+    def stage_imported_recording(
+        identity: UUID, data: ImportedRecording, proof: str | None = Header(default=None, alias='X-Townlight-Session'),
+    ):
+        suite.get('/desktop/v1/station/context?capability=capture', proof)
+        receipt = suite.get(f'/desktop/v1/meetings/imports/{identity}', proof)
+        return stage_recording(settings, identity, data.index, receipt)
 
     @app.post('/operator/handoff')
     def handoff(data: Handoff, proof: str | None = Header(default=None, alias='X-Townlight-Session')):

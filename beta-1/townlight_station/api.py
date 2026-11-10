@@ -14,6 +14,7 @@ import sqlalchemy as sa
 
 from .boundary import IDENTITY, Settings, private_path, sha256
 from . import VERSION
+from .imported_recording import read_provenance
 from .store import Store, recordings
 
 
@@ -109,6 +110,7 @@ def create_app(settings=None):
         if original and (not original.is_file() or original.stat().st_size > settings.max_bytes):
             raise HTTPException(422, 'Source file missing or exceeds configured limit')
         input_hash = sha256(original) if original else None
+        imported_source = read_provenance(private_path(settings.data, 'ingest'), data.source_file, data.meeting_id, input_hash)
         captions = private_path(settings.data, 'ingest', data.captions_file) if data.captions_file else None
         if captions and (not captions.is_file() or captions.stat().st_size > 5_000_000):
             raise HTTPException(422, 'Caption sidecar missing or too large')
@@ -145,6 +147,8 @@ def create_app(settings=None):
                 'caption_policy': 'replace-with-supplied-sidecar' if captions else 'preserve-embedded',
                 'encoding_profile': settings.encoding_profile(), 'visibility': 'private', 'attempts': [], 'live_source': live,
                 'capture_kind': 'live' if live else 'file', 'civiccast_feed': feed}
+            if imported_source:
+                details['imported_source'] = imported_source
             conn.execute(recordings.insert().values(id=identity, creator=principal['actor_id'],
                 idempotency_key=data.idempotency_key, request_hash=request_hash,
                 meeting_id=str(data.meeting_id), status='queued', details=details))
