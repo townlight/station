@@ -1,7 +1,7 @@
 Windows x64 Beta 1 · MSI 1.8.0.1
 
-The signed Windows x64 beta 1.8.0.1 updates installer metadata while
-preserving the accepted signed application/runtime cabinet.
+The signed Windows x64 beta 1.8.0.1 adds the three staff workspaces and
+automatically refreshes the bundled runtime when upgrading from 1.7.2.1.
 
 - Townlight Station Manual
   - Using this manual
@@ -28,9 +28,9 @@ preserving the accepted signed application/runtime cabinet.
 
 Townlight Station Manual
 
-The signed Windows x64 beta 1.8.0.1 updates installer metadata while
-preserving the accepted signed application/runtime cabinet. The Windows
-acceptance summary applies to this exact MSI.
+The signed Windows x64 beta 1.8.0.1 adds the three staff workspaces and
+automatically refreshes the bundled runtime when upgrading from 1.7.2.1.
+The Windows acceptance summary applies to this exact MSI.
 
 Using this manual
 
@@ -53,24 +53,32 @@ included with the same documentation companion.
 Beta identity
 
   Identity                      Value
-  ----------------------------- -----------------------------------------------------------------------
+  ----------------------------- -------------------------------------------------------------------------------------------------------------------
   Documentation                 Townlight naming, Access and Notice candidate
   Intended installer            1.8.0.1
   Desktop source                1.8.0-1
   Runtime distribution          townlight-runtime 0.2.0
   Station distribution/import   townlight-station 0.3.0 / townlight_station
-  Acceptance composition        Fresh Windows x64; inspections-preview; Station configured separately
+  Acceptance composition        Windows x64 fresh install and upgrade from 1.7.2.1. Select the full profile. Station uses separate configuration.
   Candidate hashes/signature    SHA-256 checksums and Windows acceptance summary
   Owned software license        AGPL-3.0-only
 
-This edition updates the paired-runtime instructions for the naming
-candidate. It does not rename historical Station artifacts or claim new
-Station software features. Use an empty database and fresh profile; no
-in-place legacy upgrade or old import shim is supported. Preserve
-existing city data and the prior release. The approved profile path
-remains %LOCALAPPDATA%\CivicSuite for that path only.
+Station continues to use its separately configured service. The Windows
+MSI upgrade below applies to the desktop suite.
 
 First run
+
+Upgrade from 1.7.2.1. For the tested upgrade from 1.7.2.1, back up city
+data and settings, close Townlight, run the signed Windows 1.8.0.1 MSI,
+and reopen Townlight under the same Windows account with its existing
+profile. Keep the existing %LOCALAPPDATA%\CivicSuite directory. Upgrade
+paths from versions older than 1.7.2.1 are unverified. Station uses its
+separately configured service.
+
+Fresh installation
+
+Run the signed Windows 1.8.0.1 MSI and use an empty database and a new
+Townlight profile for first run.
 
 1.  Download the signed MSI, matching source companion and checksums
     from the public Windows release.
@@ -350,16 +358,16 @@ Technical specifications
 
 Runtime and storage
 
-The accepted package targets Windows x64 fresh installation. Its native
-shell uses Rust 2021, Tauri 2 and Microsoft WebView2; browser assets are
-JavaScript built with Vite 8.1.6. This describes the native desktop
-frontend; Station has a separate React operator, specified below or in
-its product manual. Canonical business workflows use bundled CPython
-3.13.5, FastAPI, Pydantic, SQLAlchemy and Alembic, with PostgreSQL 17 /
-PostGIS and managed original files. The installed runtime tested here
-contains FastAPI 0.162.0. Package minimum Python requirements can differ
-from the bundled executable; the metadata reference preserves both. No
-stack rewrite is implied by the beta label.
+The accepted package supports Windows x64 fresh installation and upgrade
+from 1.7.2.1. Its native shell uses Rust 2021, Tauri 2 and Microsoft
+WebView2; browser assets are JavaScript built with Vite 8.1.6. This
+describes the native desktop frontend; Station has a separate React
+operator, specified below or in its product manual. Canonical business
+workflows use bundled CPython 3.13.5, FastAPI, Pydantic, SQLAlchemy and
+Alembic, with PostgreSQL 17 / PostGIS and managed original files. The
+installed runtime tested here contains FastAPI 0.162.0. Package minimum
+Python requirements can differ from the bundled executable; the metadata
+reference preserves both. No stack rewrite is implied by the beta label.
 
 The native transport is fixed to loopback 127.0.0.1:15480; PostgreSQL
 uses the configured local runtime port (default 15432). Optional local
@@ -914,20 +922,13 @@ Troubleshooting
 
 Verified workflows and limits
 
-The original accepted Station manual and its workflow claims are
-preserved byte for byte. Those results identify earlier artifacts; they
-are not installed signoff for this naming candidate. The current package
-retains the same Beta Python service and pinned CivicCast donor. Source
-presence and a successful wheel import do not establish the required
-Windows Meetings → Station → Records handoff.
-
-The new candidate must verify actual saved meeting/agenda context,
-authorized Station capture and stop, completed media/hash readback,
-private Records handoff, idempotency, authorization/logout, persistence
-and the agreed recovery path. Its ACCEPTANCE.md must distinguish new
-proof from justified reused evidence. This source documentation does not
-certify a signed MSI, live YouTube upload, physical PEG broadcast, city
-deployment or long-duration commissioning.
+The separately configured Station workflow was exercised on the original
+Windows 1.6.0.1 Beta 1. The follow-up Windows 1.6.0.1 Station delivery
+exercised encrypted live feed and recording delivery. The Windows
+1.8.0.1 acceptance summary records the current MSI checks. Station
+capture and its Meetings-to-Records handoff were outside that run. Field
+equipment, city credentials, and live YouTube commissioning require
+separate local verification.
 
 The separate provisioning/service boundary and existing external-service
 limits remain as described below. Staff remain responsible for official
@@ -997,12 +998,12 @@ amounts do not become a new authoritative calculation.
 
 Beta operation and recovery
 
-Use the identified candidate in its supported fresh-install scope.
-Preserve backups and original evidence. Test physical equipment and
-chosen network/service configuration before relying on them. The
-supplied acceptance describes selected synthetic workflows, not every
-screen, vendor, field condition or upgrade. Operators decide whether a
-particular deployment meets their own operational obligations.
+Windows 1.8.0.1 was tested for fresh installation and in-place upgrade
+from 1.7.2.1. Upgrade paths from versions older than 1.7.2.1 are
+unverified. Station uses its separately configured service. Keep backups
+and original evidence. Test your physical equipment and network and
+service configuration before relying on them. See the acceptance summary
+for the tested paths.
 
 Warranty and liability
 
