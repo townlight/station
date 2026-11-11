@@ -1,6 +1,6 @@
-Windows x64 Beta 1 · MSI 1.8.0.1
+Windows x64 Beta 1 · MSI 1.8.1.1
 
-The signed [Windows x64 beta 1.8.0.1](https://github.com/townlight/townlight/releases/tag/townlight-windows-v1.8.0.1) adds the three staff workspaces and automatically refreshes the bundled runtime when upgrading from 1.7.2.1.
+Windows 1.8.1.1 adds shared meeting imports for 31 source families, with 34 supported source/format pairs. Installed Windows Sandbox checks exercised preview, save and durable readback using public captures and fixtures, plus the documented Townlight handoffs. These checks do not establish automatic discovery on every live portal or a complete retest of every module.
 
 - <a href="https://townlight.github.io/manuals/station.html#townlight-station-manual" id="toc-townlight-station-manual">Townlight Station Manual</a>
   - <a href="https://townlight.github.io/manuals/station.html#using-this-manual" id="toc-using-this-manual">Using this manual</a>
@@ -27,7 +27,18 @@ The signed [Windows x64 beta 1.8.0.1](https://github.com/townlight/townlight/rel
 
 # Townlight Station Manual
 
-The signed [Windows x64 beta 1.8.0.1](https://github.com/townlight/townlight/releases/tag/townlight-windows-v1.8.0.1) adds the three staff workspaces and automatically refreshes the bundled runtime when upgrading from 1.7.2.1. The [Windows acceptance summary](https://github.com/townlight/townlight/releases/download/townlight-windows-v1.8.0.1/ACCEPTANCE-Windows-1.8.0.1.md) applies to this exact MSI.
+## Shared meeting imports · Windows 1.8.1.1
+
+Windows 1.8.1.1 adds shared meeting imports for 31 source families, with 34 supported source/format pairs. Installed Windows Sandbox checks exercised preview, save and durable readback using public captures and fixtures, plus the documented Townlight handoffs. These checks do not establish automatic discovery on every live portal or a complete retest of every module.
+
+[All 31 sources, formats and handoffs](https://townlight.github.io/manuals/meeting-imports.html) · [Installed acceptance](https://github.com/townlight/townlight/releases/download/townlight-windows-v1.8.1.1/ACCEPTANCE-Windows-1.8.1.1.md).
+
+Windows 1.8.1.1 has fresh-install acceptance. An in-place upgrade to 1.8.1.1 was not exercised. The previous Windows 1.8.0.1 release tested upgrade from 1.7.2.1; that result applies to 1.8.0.1. Before an existing-city evaluation, back up city data and settings, close Townlight, keep the existing %LOCALAPPDATA%\CivicSuite profile, and use the same Windows account. Keep the prior installer and a restore path. Station continues to use its separately configured service.
+
+The accepted MSI contains Townlight Runtime 0.3.1 and Meetings 1.0.6 distributions. Its health version strings still report Runtime 0.3.0 and Meetings 1.0.5. Default-branch source corrects those display strings; the signed MSI and its exact build source remain unchanged.
+
+
+Windows 1.8.1.1 adds shared meeting imports for 31 source families, with 34 supported source/format pairs. Installed Windows Sandbox checks exercised preview, save and durable readback using public captures and fixtures, plus the documented Townlight handoffs. These checks do not establish automatic discovery on every live portal or a complete retest of every module.
 
 ## Using this manual
 
@@ -40,26 +51,26 @@ Staff should begin with First run and Daily workflow. Administrators should also
 | Identity | Value |
 |----|----|
 | Documentation | Townlight naming, Access and Notice candidate |
-| Intended installer | 1.8.0.1 |
-| Desktop source | 1.8.0-1 |
+| Intended installer | 1.8.1.1 |
+| Desktop source | 1.8.1-1 |
 | Runtime distribution | townlight-runtime 0.2.0 |
 | Station distribution/import | townlight-station 0.3.0 / townlight_station |
 | Acceptance composition | Windows x64 fresh install and upgrade from 1.7.2.1. Select the full profile. Station uses separate configuration. |
-| Candidate hashes/signature | [SHA-256 checksums](https://github.com/townlight/townlight/releases/download/townlight-windows-v1.8.0.1/SHA256SUMS-Windows-1.8.0.1.txt) and [Windows acceptance summary](https://github.com/townlight/townlight/releases/download/townlight-windows-v1.8.0.1/ACCEPTANCE-Windows-1.8.0.1.md) |
+| Candidate hashes/signature | [SHA-256 checksums](https://github.com/townlight/townlight/releases/download/townlight-windows-v1.8.1.1/SHA256SUMS-Windows-1.8.1.1.txt) and [Windows acceptance summary](https://github.com/townlight/townlight/releases/download/townlight-windows-v1.8.1.1/ACCEPTANCE-Windows-1.8.1.1.md) |
 | Owned software license | AGPL-3.0-only |
 
 Station continues to use its separately configured service. The Windows MSI upgrade below applies to the desktop suite.
 
 ## First run
 
-**Upgrade from 1.7.2.1.** For the tested upgrade from 1.7.2.1, back up city data and settings, close Townlight, run the signed Windows 1.8.0.1 MSI, and reopen Townlight under the same Windows account with its existing profile. Keep the existing `%LOCALAPPDATA%\CivicSuite` directory. Upgrade paths from versions older than 1.7.2.1 are unverified. Station uses its separately configured service.
+Windows 1.8.1.1 has fresh-install acceptance. An in-place upgrade to 1.8.1.1 was not exercised. The previous Windows 1.8.0.1 release tested upgrade from 1.7.2.1; that result applies to 1.8.0.1. Before an existing-city evaluation, back up city data and settings, close Townlight, keep the existing %LOCALAPPDATA%\CivicSuite profile, and use the same Windows account. Keep the prior installer and a restore path. Station continues to use its separately configured service.
 
 ### Fresh installation
 
-Run the signed Windows 1.8.0.1 MSI and use an empty database and a new Townlight profile for first run.
+Run the signed Windows 1.8.1.1 MSI and use an empty database and a new Townlight profile for first run.
 
-1.  Download the signed MSI, matching source companion and checksums from the [public Windows release](https://github.com/townlight/townlight/releases/tag/townlight-windows-v1.8.0.1).
-2.  Verify the MSI hash and Authenticode publisher before installation. See the [Windows acceptance summary](https://github.com/townlight/townlight/releases/download/townlight-windows-v1.8.0.1/ACCEPTANCE-Windows-1.8.0.1.md) for the tested setup.
+1.  Download the signed MSI, matching source companion and checksums from the [public Windows release](https://github.com/townlight/townlight/releases/tag/townlight-windows-v1.8.1.1).
+2.  Verify the MSI hash and Authenticode publisher before installation. See the [Windows acceptance summary](https://github.com/townlight/townlight/releases/download/townlight-windows-v1.8.1.1/ACCEPTANCE-Windows-1.8.1.1.md) for the tested setup.
 3.  Launch Townlight under the intended named Windows account. Choose the storage folders. Select **Townlight Inspections candidate** (`inspections-preview`) for the bounded desktop composition, including Access and Notice. A narrower default selection will not expose all workspaces.
 4.  Enter the city profile, time zone and contacts. Create the first named local administrator, sign in and choose protected backup storage. **Continue without local AI** is valid for the deterministic workflows.
 5.  Run Health Check and wait for readiness. Open Townlight. In System Health select **Finish Records Migration** to activate the canonical Python/PostgreSQL runtime. Do not fabricate migration receipts or seed accounts.
@@ -537,7 +548,7 @@ On failure, record the time, selected composition, component/installer versions 
 
 ## Verified workflows and limits
 
-The separately configured Station workflow was exercised on the original [Windows 1.6.0.1 Beta 1](https://github.com/townlight/townlight/releases/tag/townlight-beta-1). The follow-up [Windows 1.6.0.1 Station delivery](https://github.com/townlight/townlight/releases/tag/townlight-beta-1-station-delivery) exercised encrypted live feed and recording delivery. The [Windows 1.8.0.1 acceptance summary](https://github.com/townlight/townlight/releases/download/townlight-windows-v1.8.0.1/ACCEPTANCE-Windows-1.8.0.1.md) records the current MSI checks. Station capture and its Meetings-to-Records handoff were outside that run. Field equipment, city credentials, and live YouTube commissioning require separate local verification.
+The separately configured Station workflow was exercised on the original [Windows 1.6.0.1 Beta 1](https://github.com/townlight/townlight/releases/tag/townlight-beta-1). The follow-up [Windows 1.6.0.1 Station delivery](https://github.com/townlight/townlight/releases/tag/townlight-beta-1-station-delivery) exercised encrypted live feed and recording delivery. The [Windows 1.8.0.1 acceptance summary](https://github.com/townlight/townlight/releases/download/townlight-windows-v1.8.0.1/ACCEPTANCE-Windows-1.8.0.1.md) records the previous 1.8.0.1 MSI checks. Station capture and its Meetings-to-Records handoff were outside that run. Field equipment, city credentials, and live YouTube commissioning require separate local verification.
 
 The separate provisioning/service boundary and existing external-service limits remain as described below. Staff remain responsible for official release and publication decisions. No additional provider or selected-model change is made.
 
@@ -639,7 +650,7 @@ When an organization ends testing, it controls retention/export and removes acce
 
 ## Source and document control
 
-This manual covers the Station service paired with Windows MSI 1.8.0.1. The [Windows acceptance summary](https://github.com/townlight/townlight/releases/download/townlight-windows-v1.8.0.1/ACCEPTANCE-Windows-1.8.0.1.md) records the tested Meetings, Station and Records handoff.
+This manual covers the Station service paired with Windows MSI 1.8.1.1. The [Windows acceptance summary](https://github.com/townlight/townlight/releases/download/townlight-windows-v1.8.1.1/ACCEPTANCE-Windows-1.8.1.1.md) records the tested Meetings, Station and Records handoff.
 
 ### Workflow subject index
 

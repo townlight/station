@@ -25,6 +25,32 @@
       "AGPL-3.0-only"
     ]
   },
+  "townlight_boards-0.2.0.dist-info": {
+    "Name": [
+      "townlight-boards"
+    ],
+    "Version": [
+      "0.2.0"
+    ],
+    "Requires-Python": [
+      ">=3.11"
+    ],
+    "Requires-Dist": [
+      "fastapi<1.0.0,>=0.115.0",
+      "sqlalchemy<3.0.0,>=2.0.0",
+      "townlight-core==1.3.0.dev2",
+      "uvicorn[standard]<1.0.0,>=0.30.0",
+      "build<2.0.0,>=1.2.0; extra == 'dev'",
+      "httpx<1.0.0,>=0.27.0; extra == 'dev'",
+      "psycopg2-binary<3.0.0,>=2.9.0; extra == 'dev'",
+      "pytest<9.0.0,>=8.0.0; extra == 'dev'",
+      "ruff==0.15.22; extra == 'dev'"
+    ],
+    "License": [
+      "AGPL-3.0-only"
+    ],
+    "License-Expression": []
+  },
   "townlight_code-1.0.9.dist-info": {
     "Name": [
       "townlight-code"
@@ -49,6 +75,32 @@
       "pytest-asyncio<1.0.0,>=0.23.0; extra == 'dev'",
       "pytest<9.0.0,>=8.0.0; extra == 'dev'",
       "ruff==0.15.21; extra == 'dev'"
+    ],
+    "License": [
+      "AGPL-3.0-only"
+    ],
+    "License-Expression": []
+  },
+  "townlight_contracts-0.2.0.dist-info": {
+    "Name": [
+      "townlight-contracts"
+    ],
+    "Version": [
+      "0.2.0"
+    ],
+    "Requires-Python": [
+      ">=3.11"
+    ],
+    "Requires-Dist": [
+      "fastapi<1.0.0,>=0.115.0",
+      "sqlalchemy<3.0.0,>=2.0.0",
+      "townlight-core==1.3.0.dev2",
+      "uvicorn[standard]<1.0.0,>=0.30.0",
+      "build<2.0.0,>=1.2.0; extra == 'dev'",
+      "httpx<1.0.0,>=0.27.0; extra == 'dev'",
+      "psycopg2-binary<3.0.0,>=2.9.0; extra == 'dev'",
+      "pytest<9.0.0,>=8.0.0; extra == 'dev'",
+      "ruff==0.15.22; extra == 'dev'"
     ],
     "License": [
       "AGPL-3.0-only"
@@ -108,6 +160,22 @@
       "AGPL-3.0-only"
     ]
   },
+  "townlight_inspection_transcriber-0.1.19.dist-info": {
+    "Name": [
+      "townlight-inspection-transcriber"
+    ],
+    "Version": [
+      "0.1.19"
+    ],
+    "Requires-Python": [
+      ">=3.11"
+    ],
+    "Requires-Dist": [],
+    "License": [],
+    "License-Expression": [
+      "AGPL-3.0-only"
+    ]
+  },
   "townlight_inspections-0.3.0+dev.2.dist-info": {
     "Name": [
       "townlight-inspections"
@@ -136,12 +204,12 @@
     ],
     "License-Expression": []
   },
-  "townlight_meetings-1.0.5.dist-info": {
+  "townlight_meetings-1.0.6.dist-info": {
     "Name": [
       "townlight-meetings"
     ],
     "Version": [
-      "1.0.5"
+      "1.0.6"
     ],
     "Requires-Python": [
       ">=3.11"
@@ -245,6 +313,32 @@
       "AGPL-3.0-only"
     ]
   },
+  "townlight_procurement-0.3.0.dist-info": {
+    "Name": [
+      "townlight-procurement"
+    ],
+    "Version": [
+      "0.3.0"
+    ],
+    "Requires-Python": [
+      ">=3.11"
+    ],
+    "Requires-Dist": [
+      "fastapi<1.0.0,>=0.115.0",
+      "sqlalchemy<3.0.0,>=2.0.0",
+      "townlight-core==1.3.0.dev2",
+      "uvicorn[standard]<1.0.0,>=0.30.0",
+      "build<2.0.0,>=1.2.0; extra == 'dev'",
+      "httpx<1.0.0,>=0.27.0; extra == 'dev'",
+      "psycopg2-binary<3.0.0,>=2.9.0; extra == 'dev'",
+      "pytest<9.0.0,>=8.0.0; extra == 'dev'",
+      "ruff==0.15.22; extra == 'dev'"
+    ],
+    "License": [
+      "Apache-2.0"
+    ],
+    "License-Expression": []
+  },
   "townlight_records-1.8.0.dev2.dist-info": {
     "Name": [
       "townlight-records"
@@ -291,12 +385,12 @@
       "AGPL-3.0-only"
     ]
   },
-  "townlight_runtime-0.2.0.dist-info": {
+  "townlight_runtime-0.3.1.dist-info": {
     "Name": [
       "townlight-runtime"
     ],
     "Version": [
-      "0.2.0"
+      "0.3.1"
     ],
     "Requires-Python": [
       ">=3.11"
@@ -304,7 +398,32 @@
     "Requires-Dist": [
       "sqlalchemy>=2.0",
       "fastapi>=0.135.0",
-      "uvicorn>=0.44.0"
+      "uvicorn>=0.44.0",
+      "pdfplumber<1,>=0.11.10"
+    ],
+    "License": [],
+    "License-Expression": [
+      "AGPL-3.0-only"
+    ]
+  },
+  "townlight_station-0.3.1.dist-info": {
+    "Name": [
+      "townlight-station"
+    ],
+    "Version": [
+      "0.3.1"
+    ],
+    "Requires-Python": [
+      ">=3.12"
+    ],
+    "Requires-Dist": [
+      "fastapi<1,>=0.115",
+      "uvicorn<1,>=0.30",
+      "httpx<1,>=0.27",
+      "sqlalchemy<3,>=2",
+      "psycopg2-binary<3,>=2.9",
+      "pydantic<3,>=2",
+      "pywin32>=311; sys_platform == \"win32\""
     ],
     "License": [],
     "License-Expression": [

@@ -1,1 +1,101 @@
-<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="description" content="Zoning combines local parcel geometry, cited zoning rules and staff review. It retains questions, corrections and snapshots with provenance so downstream staff can identify the precise evidence used."><title>Townlight Zoning | Townlight Beta 1</title><link rel="stylesheet" href="../../assets/site.css"></head><body><a class="skip" href="#main">Skip to content</a><aside aria-label="Windows release" style="padding:1rem">The signed <a href="https://github.com/townlight/townlight/releases/tag/townlight-windows-v1.8.0.1">Windows x64 beta 1.8.0.1</a> adds the three staff workspaces and automatically refreshes the bundled runtime when upgrading from 1.7.2.1. See the <a href="https://github.com/townlight/townlight/releases/download/townlight-windows-v1.8.0.1/ACCEPTANCE-Windows-1.8.0.1.md">Windows acceptance summary</a>.</aside><header><a class="brand" href="../../index.html">townlight<span aria-hidden="true"> ·</span></a><span class="edition">Townlight Beta 1</span><nav aria-label="Main"><a href="../../index.html#products">Products</a><a href="../../manuals/suite.html">Suite manual</a><a href="../../reference/index.html">Technical reference</a><a href="../../terms.html">Terms and license</a></nav></header><main id="main"><div class="wrap"><section class="hero" aria-labelledby="hero-title"><div class="edition">Townlight Zoning · Townlight Beta 1</div><h1 id="hero-title">Bring parcel context and cited rules into one review.</h1><p class="lead">Zoning combines local parcel geometry, cited zoning rules and staff review. It retains questions, corrections and snapshots with provenance so downstream staff can identify the precise evidence used.</p><div class="actions"><a class="button primary" href="../../manuals/zoning.html">Read the manual</a><a class="button" href="../../pdf/Townlight-Zoning-Manual-Beta-1.pdf">Printable manual</a><a class="button" href="../../docx/Townlight-Zoning-Manual-Beta-1.docx">Word manual</a><a class="button" href="../../api/zoning.html">Technical reference</a></div><div class="facts"><span>townlight-zoning 0.2.3</span><span>AGPL-3.0-only</span><span>Beta evaluation · Windows fresh install and tested 1.7.2.1 upgrade</span></div></section><section class="section"><div class="split"><div><div class="edition">For Planners, land-use staff and authorized reviewers</div><h2>What the workflow delivers</h2><ol><li><strong>Prepare parcel data.</strong> Use the complete supported bundle, including jurisdiction, dataset metadata and original hashes. The coordinates must be EPSG:4326. A loose geometry file is not the full source envelope.</li><li><strong>Import and inspect.</strong> Check the complete source envelope before selecting Import parcel dataset. That control submits directly; inspect the saved validation/provenance result afterward. Correct a refused source bundle and preserve the evidence. Do not force acceptance by editing SQL.</li><li><strong>Register cited rules.</strong> Associate the zone, rule kind/key and value with the relevant public Code section. Inspect overlays and effective context. Leave missing authority visible for planner review.</li><li><strong>Ask a parcel question.</strong> Look up the intended parcel and ask the supported question. Read the returned citation, applicability and disclaimer. Do not present an uncertain answer as an official decision.</li></ol></div><div><h3>Connected evidence</h3><p>Consumes Code authority and permitted Meetings evidence. Supplies permitted snapshots to Records and context to Planning and Permitting.</p><h3>Know the beta boundary</h3><p>The accepted path is local GeoJSON/PostGIS. It does not establish every ArcGIS, assessor or CKAN connector. Answers and process explanations are informational and do not issue an entitlement or an official zoning determination.</p></div></div></section><section class="section"><div class="edition">Architecture</div><h2>Where the evidence goes</h2><img class="flow" src="../../assets/zoning-architecture.svg" alt="Townlight Zoning architecture and evidence flow"><p class="caption">Consumes Code authority and permitted Meetings evidence. Supplies permitted snapshots to Records and context to Planning and Permitting.</p></section><section class="section"><div class="split"><div><div class="edition">Evidence rather than promises</div><h2>Windows Sandbox acceptance passed.</h2><p>The <a href="https://github.com/townlight/townlight/releases/download/townlight-windows-v1.8.0.1/ACCEPTANCE-Windows-1.8.0.1.md">Windows acceptance summary</a> describes the fresh Windows install, staff workflow, and 1.7.2.1 upgrade checks. See its scope for coverage of other workflows and equipment.</p><a href="../../manuals/zoning.html#verified-workflows-and-limits">Read the exact acceptance and limits →</a></div><div><h3>Ready to evaluate?</h3><p>Begin with the current manual and download the <a href="https://github.com/townlight/townlight/releases/tag/townlight-windows-v1.8.0.1">Windows x64 beta 1.8.0.1</a>. Configure the chosen test site and have its staff review source applicability and run the existing workflows.</p><div class="actions"><a class="button" href="../../readmes/zoning.html">Detailed README</a><a class="button" href="../../versions.html">Versions and provenance</a></div></div></div></section></div></main><footer><span>Townlight Beta 1 · Townlight Beta 1 documentation · AGPL-3.0-only</span><span><a href="../../versions.html">Exact versions and candidate</a> · CivicCast remains separate</span></footer></body></html>
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Townlight Zoning</title>
+  <meta name="description" content="Give planning staff a parcel-aware workspace for checking district rules and assembling the source context behind an answer.">
+  <link rel="canonical" href="https://townlight.github.io/products/zoning/">
+  <meta property="og:title" content="Townlight Zoning">
+  <meta property="og:description" content="Give planning staff a parcel-aware workspace for checking district rules and assembling the source context behind an answer.">
+  <meta property="og:image" content="https://townlight.github.io/brand/png/townlight-hall-social-preview.png">
+  <link rel="icon" href="/brand/favicon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/brand/png/townlight-hall-app-icon-180.png">
+  <link rel="stylesheet" href="/assets/site.css">
+  <link rel="stylesheet" href="/assets/landing.css">
+</head>
+<body class="landing">
+  <a class="skip" href="#main">Skip to content</a>
+  <header class="masthead">
+    <div class="landing-wrap masthead-inner">
+      <a href="/" aria-label="Townlight home">
+        <img src="/brand/svg/townlight-hall-lockup.svg" alt="Townlight" width="161" height="34">
+      </a>
+      <nav aria-label="Main navigation">
+        <a href="/#products">Products</a>
+        <a href="/manuals/zoning.html">Guide</a>
+        <a href="https://github.com/townlight/townlight/releases/tag/townlight-windows-v1.8.1.1">Download</a>
+        <a href="https://github.com/townlight/zone">Source</a>
+      </nav>
+    </div>
+  </header>
+  <main id="main">
+  <section class="landing-hero" aria-labelledby="title">
+    <div class="landing-wrap hero-layout">
+      <div>
+        <div class="eyebrow">Townlight Zoning / Land use</div>
+        <h1 id="title">Start with the parcel. Cite the rule.</h1>
+        <p class="hero-copy">Give planning staff a parcel-aware workspace for checking district rules and assembling the source context behind an answer.</p>
+        <div class="actions"><a href="/manuals/zoning.html" class="button primary">Read the operating guide</a><a href="https://github.com/townlight/townlight/releases/tag/townlight-windows-v1.8.1.1" class="button">View Windows release</a></div>
+        <p class="release-line">Windows public beta · Townlight 1.8.1.1 · AGPL-3.0-only</p>
+      </div>
+      <figure class="workflow-sheet">
+      <figcaption><span class="eyebrow">Workflow guide</span>A parcel inquiry</figcaption>
+      <ol>
+        <li><strong>Find the parcel</strong><span>Use imported parcel and zoning data to locate the property.</span></li>
+        <li><strong>Check cited rules</strong><span>Review use and dimensional standards with Code context.</span></li>
+        <li><strong>Save the workpaper</strong><span>Record staff review and link meeting or Records context where applicable.</span></li>
+      </ol>
+      <p class="sheet-note">Illustrated workflow · staff review at each decision</p>
+    </figure>
+    </div>
+  </section>
+  <section class="landing-section" aria-labelledby="capabilities">
+    <div class="landing-wrap">
+      <div class="eyebrow">Inside the workflow</div>
+      <h2 id="capabilities">What Zoning supports</h2>
+      <div class="capability-columns">
+        <article><h3>Use local parcel data</h3><p>Import the municipality’s supported GeoJSON sources and review the applicable district.</p></article>
+        <article><h3>Surface the source</h3><p>Keep relevant use and dimensional citations with the inquiry.</p></article>
+        <article><h3>Retain staff context</h3><p>Save the question and review history, and attach related Code or Meetings material.</p></article>
+      </div>
+    </div>
+  </section>
+  <section class="landing-section landing-band" aria-labelledby="getting-started">
+    <div class="landing-wrap landing-split">
+      <div>
+        <div class="eyebrow">Evaluate locally</div>
+        <h2 id="getting-started">Start with one real workflow.</h2>
+        <p>Enable Zoning and import supported parcel, district and rule data for the evaluation area. Test against a known parcel and authoritative source.</p>
+        <ul class="landing-link-list"><li><a href="/manuals/zoning.html">Operating guide</a></li><li><a href="https://github.com/townlight/townlight/releases/tag/townlight-windows-v1.8.1.1">Release and checksums</a></li></ul>
+      </div>
+      <div class="landing-panel">
+        <h3>Scope of this beta</h3>
+        <p>Source coverage drives results. Staff confirm the applicable rules and determine discretionary or site-specific outcomes.</p>
+        <a href="https://github.com/townlight/townlight/releases/download/townlight-windows-v1.8.1.1/ACCEPTANCE-Windows-1.8.1.1.md">Read the installed acceptance</a>
+      </div>
+    </div>
+  </section>
+  <section class="landing-section" aria-labelledby="technical">
+    <div class="landing-wrap">
+      <div class="eyebrow">For technical teams</div>
+      <h2 id="technical">Inspect the implementation.</h2>
+      <p class="section-intro">Trace the workflow to the component source pinned by the Windows release. Use the reference for integration details and the repository to report an issue or contribute a change.</p>
+      <ul class="landing-link-list"><li><a href="https://github.com/townlight/zone/tree/fb352955720db2e6e21caca816a8eb609a49f768">Released component source</a></li><li><a href="/api/zoning.html">API reference</a></li><li><a href="https://github.com/townlight/zone">Repository and contributions</a></li></ul>
+
+      <details>
+        <summary>View the Zoning architecture diagram</summary>
+        <img class="landing-diagram" loading="lazy" src="/assets/zoning-architecture.svg"
+          alt="Townlight Zoning architecture. The operating guide describes the services and workflow in text.">
+      </details>
+    </div>
+  </section>
+  <section id="meeting-imports"><h2>Shared meeting imports · Windows 1.8.1.1</h2><p>Windows 1.8.1.1 adds shared meeting imports for 31 source families, with 34 supported source/format pairs. Installed Windows Sandbox checks exercised preview, save and durable readback using public captures and fixtures, plus the documented Townlight handoffs. These checks do not establish automatic discovery on every live portal or a complete retest of every module.</p><p><a href="https://townlight.github.io/manuals/meeting-imports.html">All 31 sources, formats, operator steps and integration contracts</a> · <a href="https://github.com/townlight/townlight/releases/download/townlight-windows-v1.8.1.1/ACCEPTANCE-Windows-1.8.1.1.md">Installed acceptance and limits</a>.</p><p>Windows 1.8.1.1 has fresh-install acceptance. An in-place upgrade to 1.8.1.1 was not exercised. The previous Windows 1.8.0.1 release tested upgrade from 1.7.2.1; that result applies to 1.8.0.1. Before an existing-city evaluation, back up city data and settings, close Townlight, keep the existing %LOCALAPPDATA%\CivicSuite profile, and use the same Windows account. Keep the prior installer and a restore path. Station continues to use its separately configured service.</p><p>The accepted MSI contains Townlight Runtime 0.3.1 and Meetings 1.0.6 distributions. Its health version strings still report Runtime 0.3.0 and Meetings 1.0.5. Default-branch source corrects those display strings; the signed MSI and its exact build source remain unchanged.</p></section></main>
+  <footer class="landing-footer">
+    <div class="landing-wrap">
+      <span>Townlight · Open source municipal software</span>
+      <ul class="landing-link-list"><li><a href="/support.html">Support</a></li><li><a href="/versions.html">Versions</a></li><li><a href="/brand/">Brand</a></li><li><a href="/terms.html">Terms and license</a></li></ul>
+    </div>
+  </footer>
+</body>
+</html>
