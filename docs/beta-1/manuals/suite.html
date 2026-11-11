@@ -14,8 +14,8 @@ header .brand{display:inline-flex;align-items:center;max-width:100%;flex-shrink:
 <nav aria-label="Main"><a href="../manuals/suite.html">Suite manual</a>
 <a href="../versions.html">Versions and Windows release</a>
 <a href="../terms.html">Terms and license</a></nav></header>
-<main id="main" class="reading wrap"><aside aria-label="Windows 1.8.0.1 acceptance"><p>Windows 1.8.0.1 adds Boards &amp; Commissions, Contracts, and Procurement to the full Windows profile. The signed Windows Sandbox checks cover a fresh installation, the three staff workflows, role boundaries, record persistence, and upgrade from 1.7.2.1 with retained city data and settings. Station continues to use its separately configured local service. <a href="https://github.com/townlight/townlight/releases/download/townlight-windows-v1.8.0.1/ACCEPTANCE-Windows-1.8.0.1.md">Acceptance and limits</a>.</p></aside><p class="edition">Windows x64 Beta 1 · MSI 1.8.0.1</p>
-<p>The signed <a href="https://github.com/townlight/townlight/releases/tag/townlight-windows-v1.8.0.1">Windows x64 beta 1.8.0.1</a> adds the three staff workspaces and automatically refreshes the bundled runtime when upgrading from 1.7.2.1.</p>
+<main id="main" class="reading wrap"><p class="edition">Windows x64 Beta 1 · MSI 1.8.1.1</p>
+<p>Windows 1.8.1.1 adds shared meeting imports for 31 source families, with 34 supported source/format pairs. Installed Windows Sandbox checks exercised preview, save and durable readback using public captures and fixtures, plus the documented Townlight handoffs. These checks do not establish automatic discovery on every live portal or a complete retest of every module. <a href="https://github.com/townlight/townlight/releases/download/townlight-windows-v1.8.1.1/ACCEPTANCE-Windows-1.8.1.1.md">Acceptance and limits</a>.</p>
 
 <nav id="TOC" role="doc-toc">
 <ul>
@@ -75,7 +75,7 @@ id="toc-delivery-subject-index">Delivery subject index</a></li>
 </nav>
 <h1 id="townlight-suite-manual">Townlight Suite Manual</h1>
 <blockquote>
-<p>The signed <a href="https://github.com/townlight/townlight/releases/tag/townlight-windows-v1.8.0.1">Windows x64 beta 1.8.0.1</a> adds the three staff workspaces and automatically refreshes the bundled runtime when upgrading from 1.7.2.1. The <a href="https://github.com/townlight/townlight/releases/download/townlight-windows-v1.8.0.1/ACCEPTANCE-Windows-1.8.0.1.md">Windows acceptance summary</a> applies to this exact MSI.</p>
+<p>Windows 1.8.1.1 adds shared meeting imports for 31 source families, with 34 supported source/format pairs. Installed Windows Sandbox checks exercised preview, save and durable readback using public captures and fixtures, plus the documented Townlight handoffs. These checks do not establish automatic discovery on every live portal or a complete retest of every module. <a href="https://github.com/townlight/townlight/releases/download/townlight-windows-v1.8.1.1/ACCEPTANCE-Windows-1.8.1.1.md">Acceptance and limits</a>.</p>
 </blockquote>
 <h2 id="using-this-manual">Using this manual</h2>
 <p>Townlight connects municipal workflows around retained sources, named
@@ -107,15 +107,15 @@ identified by its receipt.</p>
 </tr>
 <tr>
 <td>Windows MSI version</td>
-<td>1.8.0.1</td>
+<td>1.8.1.1</td>
 </tr>
 <tr>
 <td>Native desktop source version</td>
-<td>1.8.0-1</td>
+<td>1.8.1-1</td>
 </tr>
 <tr>
 <td>Released artifact identity</td>
-<td><a href="https://github.com/townlight/townlight/releases/download/townlight-windows-v1.8.0.1/SHA256SUMS-Windows-1.8.0.1.txt">SHA-256 checksums</a> and <a href="https://github.com/townlight/townlight/releases/download/townlight-windows-v1.8.0.1/ACCEPTANCE-Windows-1.8.0.1.md">Windows acceptance summary</a></td>
+<td><a href="https://github.com/townlight/townlight/releases/download/townlight-windows-v1.8.1.1/SHA256SUMS-Windows-1.8.1.1.txt">SHA-256 checksums</a> and <a href="https://github.com/townlight/townlight/releases/download/townlight-windows-v1.8.1.1/ACCEPTANCE-Windows-1.8.1.1.md">Windows acceptance summary</a></td>
 </tr>
 <tr>
 <td>Corresponding source</td>
@@ -155,7 +155,7 @@ identified by its receipt.</p>
 <tr>
 <td>Meetings</td>
 <td>townlight-meetings</td>
-<td>1.0.5</td>
+<td>1.0.6</td>
 </tr>
 <tr>
 <td>Code</td>
@@ -185,7 +185,7 @@ identified by its receipt.</p>
 <tr>
 <td>Station</td>
 <td>townlight-station</td>
-<td>0.3.0</td>
+<td>0.3.1</td>
 </tr>
 <tr>
 <td>Access</td>
@@ -200,16 +200,16 @@ identified by its receipt.</p>
 <tr><td>Boards &amp; Commissions</td><td>townlight-boards</td><td>0.2.0</td></tr>
 <tr><td>Contracts</td><td>townlight-contracts</td><td>0.2.0</td></tr>
 <tr><td>Procurement</td><td>townlight-procurement</td><td>0.3.0</td></tr>
-<tr><td>Local runtime</td><td>townlight-runtime</td><td>0.3.0</td></tr>
+<tr><td>Local runtime</td><td>townlight-runtime</td><td>0.3.1</td></tr>
 </tbody>
 </table>
 <h2 id="first-run">First run</h2>
-<p><strong>Upgrade from 1.7.2.1.</strong> For the tested upgrade from 1.7.2.1, back up city data and settings, close Townlight, run the signed Windows 1.8.0.1 MSI, and reopen Townlight under the same Windows account with its existing profile. Keep the existing <code>%LOCALAPPDATA%\CivicSuite</code> directory. Upgrade paths from versions older than 1.7.2.1 are unverified. Station uses its separately configured service.</p>
+<p>Windows 1.8.1.1 has fresh-install acceptance. An in-place upgrade to 1.8.1.1 was not exercised. The previous Windows 1.8.0.1 release tested upgrade from 1.7.2.1; that result applies to 1.8.0.1. Before an existing-city evaluation, back up city data and settings, close Townlight, keep the existing %LOCALAPPDATA%\CivicSuite profile, and use the same Windows account. Keep the prior installer and a restore path. Station continues to use its separately configured service.</p>
 <h3>Fresh installation</h3>
-<p>Run the signed Windows 1.8.0.1 MSI and use an empty database and a new Townlight profile for first run.</p>
+<p>Run the signed Windows 1.8.1.1 MSI and use an empty database and a new Townlight profile for first run.</p>
 <ol type="1">
-<li>Download the signed MSI, matching source and checksums from the <a href="https://github.com/townlight/townlight/releases/tag/townlight-windows-v1.8.0.1">Windows x64 beta 1.8.0.1</a> release.</li>
-<li>Verify the MSI hash and Authenticode publisher before installation. See the <a href="https://github.com/townlight/townlight/releases/download/townlight-windows-v1.8.0.1/ACCEPTANCE-Windows-1.8.0.1.md">Windows acceptance summary</a> for the tested setup.</li>
+<li>Download the signed MSI, matching source and checksums from the <a href="https://github.com/townlight/townlight/releases/tag/townlight-windows-v1.8.1.1">Windows x64 beta 1.8.1.1</a> release.</li>
+<li>Verify the MSI hash and Authenticode publisher before installation. See the <a href="https://github.com/townlight/townlight/releases/download/townlight-windows-v1.8.1.1/ACCEPTANCE-Windows-1.8.1.1.md">Windows acceptance summary</a> for the tested setup.</li>
 <li>Launch Townlight under the intended named Windows account. Choose
 the storage folders. Select <strong>Townlight Inspections
 candidate</strong> (<code>inspections-preview</code>) for the bounded
@@ -723,7 +723,7 @@ repeat restore.</td>
 </table>
 <h2 id="verified-workflows-and-limits">Verified workflows and
 limits</h2>
-<p>The table records selected synthetic workflows from the original <a href="https://github.com/townlight/townlight/releases/tag/townlight-beta-1">Windows 1.6.0.1 Beta 1</a> Sandbox run. Station’s later delivery has <a href="https://github.com/townlight/townlight/releases/tag/townlight-beta-1-station-delivery">separate Windows 1.6.0.1 acceptance</a>. See the <a href="https://github.com/townlight/townlight/releases/download/townlight-windows-v1.8.0.1/ACCEPTANCE-Windows-1.8.0.1.md">Windows 1.8.0.1 acceptance summary</a> for the workflows and upgrade path exercised on the current MSI.</p>
+<p>The table records selected synthetic workflows from the original <a href="https://github.com/townlight/townlight/releases/tag/townlight-beta-1">Windows 1.6.0.1 Beta 1</a> Sandbox run. Station’s later delivery has <a href="https://github.com/townlight/townlight/releases/tag/townlight-beta-1-station-delivery">separate Windows 1.6.0.1 acceptance</a>. See the <a href="https://github.com/townlight/townlight/releases/download/townlight-windows-v1.8.0.1/ACCEPTANCE-Windows-1.8.0.1.md">Windows 1.8.0.1 acceptance summary</a> for the workflows and upgrade path exercised on the previous 1.8.0.1 MSI.</p>
 <table>
 <colgroup>
 <col style="width: 33%" />
@@ -1084,4 +1084,252 @@ live feed</a></li>
 and reconciliation.</li>
 <li>Schema4: durable upload intent; existing evidence retained.</li>
 </ul>
-<section aria-label="Resident portal"><p>The resident portal is deployed separately. See the <a href="../manuals/portal.html">Townlight Portal Guide</a> for its workflow and acceptance limits.</p></section></main><footer>Townlight · AGPL-3.0-only · Candidate evidence applies only to its identified artifacts.<span><a href="../brand/">Brand package</a></span><span><a href="../announcement.html">Announcement</a> · <a href="../support.html">Support and feedback</a></span></footer></body></html>
+<section aria-label="Resident portal"><p>The resident portal is deployed separately. See the <a href="../manuals/portal.html">Townlight Portal Guide</a> for its workflow and acceptance limits.</p></section><section id="meeting-imports"><h2>Shared meeting imports · Windows 1.8.1.1</h2><p>Windows 1.8.1.1 adds shared meeting imports for 31 source families, with 34 supported source/format pairs. Installed Windows Sandbox checks exercised preview, save and durable readback using public captures and fixtures, plus the documented Townlight handoffs. These checks do not establish automatic discovery on every live portal or a complete retest of every module.</p><p><a href="https://townlight.github.io/manuals/meeting-imports.html">All 31 sources, formats, operator steps and integration contracts</a> · <a href="https://github.com/townlight/townlight/releases/download/townlight-windows-v1.8.1.1/ACCEPTANCE-Windows-1.8.1.1.md">Installed acceptance and limits</a>.</p><p>Windows 1.8.1.1 has fresh-install acceptance. An in-place upgrade to 1.8.1.1 was not exercised. The previous Windows 1.8.0.1 release tested upgrade from 1.7.2.1; that result applies to 1.8.0.1. Before an existing-city evaluation, back up city data and settings, close Townlight, keep the existing %LOCALAPPDATA%\CivicSuite profile, and use the same Windows account. Keep the prior installer and a restore path. Station continues to use its separately configured service.</p><p>The accepted MSI contains Townlight Runtime 0.3.1 and Meetings 1.0.6 distributions. Its health version strings still report Runtime 0.3.0 and Meetings 1.0.5. Default-branch source corrects those display strings; the signed MSI and its exact build source remain unchanged.</p></section><section id="import-source-matrix"><h2 id="shared-meeting-imports">Shared meeting imports</h2>
+<p>Use <strong>Meetings → Import meeting records</strong> in Windows
+1.8.1.1. Select a source and format, enter the original public URL, then
+choose <strong>Preview import</strong>. For a saved response, select the
+file before previewing. Choose a meeting and use <strong>Save selected
+meeting</strong>. Townlight records the source URL, format, stable
+source ID and capture hash with the canonical meeting. Reopening the
+same capture returns the existing meeting. A changed capture for that
+identity is reported for staff review.</p>
+<p>The source and format selector lists the supported reader pairs
+below. A public URL must serve the chosen format directly. Use a saved
+public response for POST-only listings, portals that require a browser
+session and sources whose page does not return the required response.
+The importer reads what a municipality publishes in that response.
+Fields and attachments vary by municipality and by meeting.</p>
+<table>
+<thead>
+<tr>
+<th>Source</th>
+<th>Input to preview</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Legistar</td>
+<td>Core-format JSON export</td>
+</tr>
+<tr>
+<td>PrimeGov</td>
+<td>Core-format JSON export or public portal meeting list JSON</td>
+</tr>
+<tr>
+<td>Granicus</td>
+<td>Core-format JSON export or public ViewPublisher HTML</td>
+</tr>
+<tr>
+<td>NovusAGENDA</td>
+<td>Core-format JSON export</td>
+</tr>
+<tr>
+<td>CivicPlus Agenda and Meeting Management Select</td>
+<td>Public Events JSON</td>
+</tr>
+<tr>
+<td>CivicPlus Agenda Center</td>
+<td>Public listing HTML</td>
+</tr>
+<tr>
+<td>Municode Meetings</td>
+<td>Public meetings HTML</td>
+</tr>
+<tr>
+<td>BoardBook</td>
+<td>Public organization HTML</td>
+</tr>
+<tr>
+<td>eSCRIBE</td>
+<td>Public calendar JSON</td>
+</tr>
+<tr>
+<td>Simbli</td>
+<td>Public meeting listing HTML</td>
+</tr>
+<tr>
+<td>iCompass CivicWeb</td>
+<td>Public meeting-type listing HTML</td>
+</tr>
+<tr>
+<td>iQM2</td>
+<td>Public meeting list HTML</td>
+</tr>
+<tr>
+<td>Granicus Swagit</td>
+<td>Public video archive HTML</td>
+</tr>
+<tr>
+<td>SuiteOne Media</td>
+<td>Public meeting archive HTML</td>
+</tr>
+<tr>
+<td>Granicus Peak</td>
+<td>Public agenda center ViewPublisher HTML</td>
+</tr>
+<tr>
+<td>Utah Public Notice Website</td>
+<td>Public notice detail HTML</td>
+</tr>
+<tr>
+<td>Destiny AgendaQuick</td>
+<td>Public meeting list HTML</td>
+</tr>
+<tr>
+<td>Town Hall Streams</td>
+<td>Public archive HTML</td>
+</tr>
+<tr>
+<td>TelVue</td>
+<td>Public playlist HTML</td>
+</tr>
+<tr>
+<td>CHAMP</td>
+<td>Public event JSON</td>
+</tr>
+<tr>
+<td>Hyland OnBase</td>
+<td>Public Agenda Online HTML</td>
+</tr>
+<tr>
+<td>Laserfiche WebLink</td>
+<td>Saved public dated document folder HTML</td>
+</tr>
+<tr>
+<td>TownCloud</td>
+<td>Saved public agenda table JSON or public agenda detail HTML</td>
+</tr>
+<tr>
+<td>Digital Towpath</td>
+<td>Public meeting detail HTML</td>
+</tr>
+<tr>
+<td>ClerkBase</td>
+<td>Public meeting document HTML</td>
+</tr>
+<tr>
+<td>Municipality-published calendar</td>
+<td>Public iCalendar feed</td>
+</tr>
+<tr>
+<td>Wistia</td>
+<td>Public media JSON</td>
+</tr>
+<tr>
+<td>Boardable</td>
+<td>Public Site meeting detail HTML</td>
+</tr>
+<tr>
+<td>gWorks FrontDesk</td>
+<td>Public city meetings JSON</td>
+</tr>
+<tr>
+<td>Diligent BoardDocs</td>
+<td>Unencrypted printed agenda PDF with numbered items</td>
+</tr>
+<tr>
+<td>Tyler Meeting Manager</td>
+<td>Saved public calendar JSON. Meeting information and item titles when
+present.</td>
+</tr>
+</tbody>
+</table>
+<h2 id="staff-handoffs">Staff handoffs</h2>
+<ul>
+<li><strong>Core and Meetings.</strong> Core's existing vendor formats
+share the same preview and save path as the public readers. The saved
+meeting and any structured agenda items open in the regular Meetings
+workflow.</li>
+<li><strong>Records.</strong> In Meetings, load imported documents by
+meeting ID, choose a PDF and enter the destination Records request ID.
+The attachment retains the citation and file hash. An HTML viewer or a
+dead document link may need staff to obtain the PDF separately.</li>
+<li><strong>Notice and Access.</strong> Use <strong>Review imported
+text</strong> to start a Notice draft or accessibility review with the
+source citation. Use each workspace's normal review and save
+actions.</li>
+<li><strong>Station.</strong> In the configured Station operator page,
+select the saved meeting and stage a direct MP4. Use the private capture
+workflow to queue processing. Player-only references are visible without
+a staging action.</li>
+<li><strong>Code.</strong> Use the existing ordinance proposal and
+adoption workflow with the canonical imported meeting and agenda
+IDs.</li>
+<li><strong>Boards, Contracts, Procurement, Zoning, Planning, Permitting
+and Inspections.</strong> In the destination workspace use
+<strong>Imported meeting evidence</strong>. Select an existing staff
+record and the saved meeting, then save the citation. The destination's
+existing role and workflow apply.</li>
+</ul>
+<h2 id="shared-interface">Shared interface</h2>
+<p>The installed Townlight Python runtime exposes a read-only CLI.
+CivicCast and other local clients can consume its normalized JSON and
+apply their own access and persistence rules.</p>
+<div class="sourceCode" id="cb1"><pre
+class="sourceCode powershell"><code class="sourceCode powershell"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a>python <span class="op">-</span>m townlight_runtime<span class="op">.</span><span class="fu">meeting_imports</span> champ PUBLIC_EVENT_URL saved-event<span class="op">.</span><span class="fu">json</span> <span class="op">--</span>format champ-event-json</span></code></pre></div>
+<p>Use <code>--fetch</code> in place of the saved file to read a
+supported public response.</p>
+<h2 id="interfaces-and-other-products">Interfaces and other
+products</h2>
+<p>The version-1 normalized JSON contract is shared by the Python
+function
+<code>townlight_runtime.meeting_imports.preview_export(connector, source_url, content, input_format=...)</code>
+and the CLI above. A saved response can also be read from stdin using
+<code>-</code>. Inputs are limited to 16 MiB. Preview is read-only; the
+consuming application owns persistence, staff authorization and its own
+data.</p>
+<p>The installed native HTTP bridge exposes
+<code>GET /desktop/v1/meetings/imports/sources</code>,
+<code>POST /desktop/v1/meetings/imports/preview</code>,
+<code>POST /desktop/v1/meetings/imports/fetch</code>,
+<code>POST /desktop/v1/meetings/imports/commit</code>, and
+meeting/link/document handoff operations in the <a
+href="https://townlight.github.io/api/suite-openapi.json">native API
+schema</a>. Use the existing <code>X-Townlight-Session</code>
+authentication, mapped staff roles and configured local PostgreSQL
+service. This is a native application interface; there is no independent
+anonymous importer HTTP service or importer MCP server.</p>
+<p><strong>CivicCast:</strong> opt in through its Townlight shared
+importer source setting and <code>TOWNLIGHT_IMPORT_PYTHON</code> (the
+absolute Python executable), <code>TOWNLIGHT_IMPORT_CONNECTOR</code>,
+<code>TOWNLIGHT_IMPORT_FORMAT</code>, <code>TOWNLIGHT_IMPORT_URL</code>
+and optional <code>TOWNLIGHT_IMPORT_CAPTURE</code>. The adapter saves
+normalized items through the existing AgendaStore. Structured agenda
+availability depends on the source response; a video listing can contain
+meeting metadata without agenda items. Existing sources remain the
+default.</p>
+<p><strong>CivicCast Brief:</strong> its existing PrimeGov and Granicus
+discovery routes can opt into the shared reader using
+<code>TOWNLIGHT_IMPORT_PYTHON</code>. Brief does not expose all 31
+sources as a new selection menu. Its existing caption/media workflow
+remains the consuming path. See each project's shared-import client
+documentation.</p>
+<p><strong>TownReporter, Describer Workbench and Textflowkit:</strong>
+no shared-import adapter was added to these products. TownReporter
+retains its own PrimeGov path. Describer Workbench and Textflowkit
+expose their existing transcription APIs/MCP interfaces, which do not
+constitute meeting-import integration. The shared engine ships inside
+Townlight Runtime; a standalone library is outside this release.</p>
+<h2 id="windows-acceptance-and-limits">Windows acceptance and
+limits</h2>
+<p>Windows 1.8.1.1 adds shared meeting imports for 31 source families,
+with 34 supported source/format pairs. Installed Windows Sandbox checks
+exercised preview, save and durable readback using public captures and
+fixtures, plus the documented Townlight handoffs. These checks do not
+establish automatic discovery on every live portal or a complete retest
+of every module.</p>
+<p>Windows 1.8.1.1 has fresh-install acceptance. An in-place upgrade to
+1.8.1.1 was not exercised. The previous Windows 1.8.0.1 release tested
+upgrade from 1.7.2.1; that result applies to 1.8.0.1. Before an
+existing-city evaluation, back up city data and settings, close
+Townlight, keep the existing %LOCALAPPDATA%\CivicSuite profile, and use
+the same Windows account. Keep the prior installer and a restore path.
+Station continues to use its separately configured service.</p>
+<p>The accepted MSI contains Townlight Runtime 0.3.1 and Meetings 1.0.6
+distributions. Its health version strings still report Runtime 0.3.0 and
+Meetings 1.0.5. Default-branch source corrects those display strings;
+the signed MSI and its exact build source remain unchanged.</p>
+<p><a
+href="https://github.com/townlight/townlight/releases/download/townlight-windows-v1.8.1.1/ACCEPTANCE-Windows-1.8.1.1.md">Exact
+Windows 1.8.1.1 acceptance and limits</a>.</p>
+</section></main><footer>Townlight · AGPL-3.0-only · Candidate evidence applies only to its identified artifacts.<span><a href="../brand/">Brand package</a></span><span><a href="../announcement.html">Announcement</a> · <a href="../support.html">Support and feedback</a></span></footer></body></html>

@@ -2,8 +2,8 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Townlight Records",
-    "description": "AI-powered open records support for American cities",
-    "version": "1.8.0.dev1"
+    "description": "Source schema generated from the bundled Windows 1.8.1.1 native domain runtime without starting services.",
+    "version": "1.8.0.dev2"
   },
   "paths": {
     "/auth/jwt/login": {
@@ -2201,10 +2201,10 @@
             "required": true,
             "schema": {
               "type": "string",
-              "description": "Status to reset \u2014 required",
+              "description": "Status to reset — required",
               "title": "Status"
             },
-            "description": "Status to reset \u2014 required"
+            "description": "Status to reset — required"
           }
         ],
         "responses": {
@@ -2258,10 +2258,10 @@
             "required": true,
             "schema": {
               "type": "string",
-              "description": "Status to dismiss \u2014 required",
+              "description": "Status to dismiss — required",
               "title": "Status"
             },
-            "description": "Status to dismiss \u2014 required"
+            "description": "Status to dismiss — required"
           }
         ],
         "responses": {
@@ -3620,7 +3620,7 @@
           "requests"
         ],
         "summary": "Estimate Fees",
-        "description": "Estimate fees based on staff-entered page count and fee schedule.\n\nPage count is a manual staff estimate \u2014 not inferred from ingested docs.",
+        "description": "Estimate fees based on staff-entered page count and fee schedule.\n\nPage count is a manual staff estimate — not inferred from ingested docs.",
         "operationId": "estimate_fees_requests__request_id__estimate_fees_post",
         "security": [
           {
@@ -5734,7 +5734,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/Selection"
+                "$ref": "#/components/schemas/townlight_records__desktop_bridge__station__Selection"
               }
             }
           }
@@ -8068,6 +8068,63 @@
         }
       }
     },
+    "/desktop/v1/access/drafts/{draft_id}/export": {
+      "post": {
+        "tags": [
+          "native-access"
+        ],
+        "summary": "Export Draft",
+        "operationId": "export_draft_desktop_v1_access_drafts__draft_id__export_post",
+        "parameters": [
+          {
+            "name": "draft_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Draft Id"
+            }
+          },
+          {
+            "name": "X-Townlight-Session",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Townlight-Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/desktop/v1/access/exports/{artifact_id}/complete": {
       "post": {
         "tags": [
@@ -8109,6 +8166,624 @@
             "application/json": {
               "schema": {
                 "$ref": "#/components/schemas/ExportReceipt"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/desktop/v1/notice/notices": {
+      "get": {
+        "tags": [
+          "native-notice"
+        ],
+        "summary": "Inventory",
+        "operationId": "inventory_desktop_v1_notice_notices_get",
+        "parameters": [
+          {
+            "name": "X-Townlight-Session",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Townlight-Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "native-notice"
+        ],
+        "summary": "Create",
+        "operationId": "create_desktop_v1_notice_notices_post",
+        "parameters": [
+          {
+            "name": "X-Townlight-Session",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Townlight-Session"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NoticeDraft"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/desktop/v1/notice/notices/{notice_id}": {
+      "get": {
+        "tags": [
+          "native-notice"
+        ],
+        "summary": "Read",
+        "operationId": "read_desktop_v1_notice_notices__notice_id__get",
+        "parameters": [
+          {
+            "name": "notice_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Notice Id"
+            }
+          },
+          {
+            "name": "X-Townlight-Session",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Townlight-Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/desktop/v1/notice/notices/{notice_id}/revisions": {
+      "post": {
+        "tags": [
+          "native-notice"
+        ],
+        "summary": "Edit",
+        "operationId": "edit_desktop_v1_notice_notices__notice_id__revisions_post",
+        "parameters": [
+          {
+            "name": "notice_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Notice Id"
+            }
+          },
+          {
+            "name": "X-Townlight-Session",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Townlight-Session"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Revision"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/desktop/v1/notice/notices/{notice_id}/review": {
+      "post": {
+        "tags": [
+          "native-notice"
+        ],
+        "summary": "Review",
+        "operationId": "review_desktop_v1_notice_notices__notice_id__review_post",
+        "parameters": [
+          {
+            "name": "notice_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Notice Id"
+            }
+          },
+          {
+            "name": "X-Townlight-Session",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Townlight-Session"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/townlight_runtime__notice_bridge__Review"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/desktop/v1/notice/notices/{notice_id}/approval": {
+      "post": {
+        "tags": [
+          "native-notice"
+        ],
+        "summary": "Approve",
+        "operationId": "approve_desktop_v1_notice_notices__notice_id__approval_post",
+        "parameters": [
+          {
+            "name": "notice_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Notice Id"
+            }
+          },
+          {
+            "name": "X-Townlight-Session",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Townlight-Session"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Version"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/desktop/v1/notice/notices/{notice_id}/proof": {
+      "post": {
+        "tags": [
+          "native-notice"
+        ],
+        "summary": "Proof",
+        "operationId": "proof_desktop_v1_notice_notices__notice_id__proof_post",
+        "parameters": [
+          {
+            "name": "notice_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Notice Id"
+            }
+          },
+          {
+            "name": "X-Townlight-Session",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Townlight-Session"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Proof"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/desktop/v1/notice/notices/{notice_id}/archive": {
+      "post": {
+        "tags": [
+          "native-notice"
+        ],
+        "summary": "Archive",
+        "operationId": "archive_desktop_v1_notice_notices__notice_id__archive_post",
+        "parameters": [
+          {
+            "name": "notice_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Notice Id"
+            }
+          },
+          {
+            "name": "X-Townlight-Session",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Townlight-Session"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Version"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/desktop/v1/notice/archives/{archive_id}": {
+      "get": {
+        "tags": [
+          "native-notice"
+        ],
+        "summary": "Export",
+        "operationId": "export_desktop_v1_notice_archives__archive_id__get",
+        "parameters": [
+          {
+            "name": "archive_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Archive Id"
+            }
+          },
+          {
+            "name": "X-Townlight-Session",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Townlight-Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/desktop/v1/notice/archives/{archive_id}/records": {
+      "post": {
+        "tags": [
+          "native-notice"
+        ],
+        "summary": "Handoff",
+        "operationId": "handoff_desktop_v1_notice_archives__archive_id__records_post",
+        "parameters": [
+          {
+            "name": "archive_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Archive Id"
+            }
+          },
+          {
+            "name": "X-Townlight-Session",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Townlight-Session"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Handoff"
               }
             }
           }
@@ -8213,6 +8888,581 @@
             "application/json": {
               "schema": {
                 "$ref": "#/components/schemas/SearchInput"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/desktop/v1/meetings/imports/preview": {
+      "post": {
+        "tags": [
+          "native-meetings"
+        ],
+        "summary": "Preview Meeting Import",
+        "operationId": "preview_meeting_import_desktop_v1_meetings_imports_preview_post",
+        "parameters": [
+          {
+            "name": "X-Townlight-Session",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Townlight-Session"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ImportPreviewInput"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/desktop/v1/meetings/imports/sources": {
+      "get": {
+        "tags": [
+          "native-meetings"
+        ],
+        "summary": "Meeting Import Sources",
+        "operationId": "meeting_import_sources_desktop_v1_meetings_imports_sources_get",
+        "parameters": [
+          {
+            "name": "X-Townlight-Session",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Townlight-Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/desktop/v1/meetings/imports/fetch": {
+      "post": {
+        "tags": [
+          "native-meetings"
+        ],
+        "summary": "Fetch Meeting Import",
+        "operationId": "fetch_meeting_import_desktop_v1_meetings_imports_fetch_post",
+        "parameters": [
+          {
+            "name": "X-Townlight-Session",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Townlight-Session"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ImportSourceInput"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/desktop/v1/meetings/imports/commit": {
+      "post": {
+        "tags": [
+          "native-meetings"
+        ],
+        "summary": "Commit Meeting Import",
+        "operationId": "commit_meeting_import_desktop_v1_meetings_imports_commit_post",
+        "parameters": [
+          {
+            "name": "X-Townlight-Session",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Townlight-Session"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ImportCommitInput"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/desktop/v1/meetings/imports/{meeting_id}": {
+      "get": {
+        "tags": [
+          "native-meetings"
+        ],
+        "summary": "Get Meeting Import",
+        "operationId": "get_meeting_import_desktop_v1_meetings_imports__meeting_id__get",
+        "parameters": [
+          {
+            "name": "meeting_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Meeting Id"
+            }
+          },
+          {
+            "name": "X-Townlight-Session",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Townlight-Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/desktop/v1/meetings/imports/links/{destination}": {
+      "post": {
+        "tags": [
+          "native-meetings"
+        ],
+        "summary": "Import Link Choices",
+        "operationId": "import_link_choices_desktop_v1_meetings_imports_links__destination__post",
+        "parameters": [
+          {
+            "name": "destination",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "enum": [
+                "boards",
+                "contracts",
+                "procurement",
+                "zoning",
+                "planning",
+                "permitting",
+                "inspections"
+              ],
+              "type": "string",
+              "title": "Destination"
+            }
+          },
+          {
+            "name": "X-Townlight-Session",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Townlight-Session"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ImportLinkSearch"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/desktop/v1/meetings/imports/links/{destination}/{target_id}": {
+      "get": {
+        "tags": [
+          "native-meetings"
+        ],
+        "summary": "List Import Links",
+        "operationId": "list_import_links_desktop_v1_meetings_imports_links__destination___target_id__get",
+        "parameters": [
+          {
+            "name": "destination",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "enum": [
+                "boards",
+                "contracts",
+                "procurement",
+                "zoning",
+                "planning",
+                "permitting",
+                "inspections"
+              ],
+              "type": "string",
+              "title": "Destination"
+            }
+          },
+          {
+            "name": "target_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Target Id"
+            }
+          },
+          {
+            "name": "X-Townlight-Session",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Townlight-Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "native-meetings"
+        ],
+        "summary": "Create Import Link",
+        "operationId": "create_import_link_desktop_v1_meetings_imports_links__destination___target_id__post",
+        "parameters": [
+          {
+            "name": "destination",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "enum": [
+                "boards",
+                "contracts",
+                "procurement",
+                "zoning",
+                "planning",
+                "permitting",
+                "inspections"
+              ],
+              "type": "string",
+              "title": "Destination"
+            }
+          },
+          {
+            "name": "target_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Target Id"
+            }
+          },
+          {
+            "name": "X-Townlight-Session",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Townlight-Session"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ImportLinkInput"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/desktop/v1/meetings/imports/{meeting_id}/records": {
+      "post": {
+        "tags": [
+          "native-meetings"
+        ],
+        "summary": "Attach Import Document",
+        "operationId": "attach_import_document_desktop_v1_meetings_imports__meeting_id__records_post",
+        "parameters": [
+          {
+            "name": "meeting_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Meeting Id"
+            }
+          },
+          {
+            "name": "X-Townlight-Session",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Townlight-Session"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RecordsImportDocument"
               }
             }
           }
@@ -9758,6 +11008,88 @@
         }
       }
     },
+    "/public/meetings/data/index": {
+      "get": {
+        "tags": [
+          "public-meetings"
+        ],
+        "summary": "Public Archive Data",
+        "operationId": "public_archive_data_public_meetings_data_index_get",
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Q"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/public/meetings/data/{record_id}": {
+      "get": {
+        "tags": [
+          "public-meetings"
+        ],
+        "summary": "Public Archive Record Data",
+        "operationId": "public_archive_record_data_public_meetings_data__record_id__get",
+        "parameters": [
+          {
+            "name": "record_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Record Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/public/meetings": {
       "get": {
         "tags": [
@@ -9877,6 +11209,121 @@
             }
           }
         ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/desktop/v1/portal/selections": {
+      "get": {
+        "tags": [
+          "portal-publication"
+        ],
+        "summary": "Selections",
+        "description": "Find reviewed choices without exposing SQL, private text or file paths.",
+        "operationId": "selections_desktop_v1_portal_selections_get",
+        "parameters": [
+          {
+            "name": "request_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Request Id"
+            }
+          },
+          {
+            "name": "X-Townlight-Session",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Townlight-Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/desktop/v1/portal/bundle": {
+      "post": {
+        "tags": [
+          "portal-publication"
+        ],
+        "summary": "Bundle",
+        "operationId": "bundle_desktop_v1_portal_bundle_post",
+        "parameters": [
+          {
+            "name": "X-Townlight-Session",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Townlight-Session"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/townlight_runtime__portal_publication__Selection"
+              }
+            }
+          }
+        },
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -11267,6 +12714,222 @@
         }
       }
     },
+    "/townlight_code/public-data/search": {
+      "get": {
+        "summary": "Search Data",
+        "operationId": "search_data_townlight_code_public_data_search_get",
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Q"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/townlight_code/public-data/section": {
+      "get": {
+        "summary": "Section Data",
+        "operationId": "section_data_townlight_code_public_data_section_get",
+        "parameters": [
+          {
+            "name": "section_number",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Section Number"
+            }
+          },
+          {
+            "name": "as_of",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "date"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "As Of"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/townlight_code/public-data/export": {
+      "get": {
+        "summary": "Export Data",
+        "operationId": "export_data_townlight_code_public_data_export_get",
+        "parameters": [
+          {
+            "name": "section_number",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Section Number"
+            }
+          },
+          {
+            "name": "as_of",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "date"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "As Of"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/townlight_code/public-data/answer": {
+      "get": {
+        "summary": "Answer Data",
+        "operationId": "answer_data_townlight_code_public_data_answer_get",
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Q"
+            }
+          },
+          {
+            "name": "section_number",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Section Number"
+            }
+          },
+          {
+            "name": "as_of",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "date"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "As Of"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/townlight_code": {
       "get": {
         "summary": "Home",
@@ -12075,7 +13738,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/Review"
+                "$ref": "#/components/schemas/townlight_runtime__zoning_bridge__Review"
               }
             }
           }
@@ -15583,6 +17246,741 @@
           }
         }
       }
+    },
+    "/desktop/v1/municipal-staff/boards": {
+      "get": {
+        "tags": [
+          "native-municipal-staff"
+        ],
+        "summary": "List Boards",
+        "operationId": "list_boards_desktop_v1_municipal_staff_boards_get",
+        "parameters": [
+          {
+            "name": "X-Townlight-Session",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Townlight-Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "native-municipal-staff"
+        ],
+        "summary": "Create Board",
+        "operationId": "create_board_desktop_v1_municipal_staff_boards_post",
+        "parameters": [
+          {
+            "name": "X-Townlight-Session",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Townlight-Session"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BoardInput"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/desktop/v1/municipal-staff/boards/seat": {
+      "post": {
+        "tags": [
+          "native-municipal-staff"
+        ],
+        "summary": "Save Seat",
+        "operationId": "save_seat_desktop_v1_municipal_staff_boards_seat_post",
+        "parameters": [
+          {
+            "name": "X-Townlight-Session",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Townlight-Session"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SeatInput"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/desktop/v1/municipal-staff/boards/attendance": {
+      "post": {
+        "tags": [
+          "native-municipal-staff"
+        ],
+        "summary": "Save Attendance",
+        "operationId": "save_attendance_desktop_v1_municipal_staff_boards_attendance_post",
+        "parameters": [
+          {
+            "name": "X-Townlight-Session",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Townlight-Session"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AttendanceInput"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/desktop/v1/municipal-staff/contracts": {
+      "get": {
+        "tags": [
+          "native-municipal-staff"
+        ],
+        "summary": "List Contracts",
+        "operationId": "list_contracts_desktop_v1_municipal_staff_contracts_get",
+        "parameters": [
+          {
+            "name": "X-Townlight-Session",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Townlight-Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "native-municipal-staff"
+        ],
+        "summary": "Register Contract",
+        "operationId": "register_contract_desktop_v1_municipal_staff_contracts_post",
+        "parameters": [
+          {
+            "name": "X-Townlight-Session",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Townlight-Session"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SignedAgreement"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/desktop/v1/municipal-staff/contracts/{identity}/signed": {
+      "post": {
+        "tags": [
+          "native-municipal-staff"
+        ],
+        "summary": "Record Signed",
+        "operationId": "record_signed_desktop_v1_municipal_staff_contracts__identity__signed_post",
+        "parameters": [
+          {
+            "name": "identity",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Identity"
+            }
+          },
+          {
+            "name": "X-Townlight-Session",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Townlight-Session"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SignedAgreement"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/desktop/v1/municipal-staff/contracts/{identity}/document": {
+      "get": {
+        "tags": [
+          "native-municipal-staff"
+        ],
+        "summary": "Retrieve Contract",
+        "operationId": "retrieve_contract_desktop_v1_municipal_staff_contracts__identity__document_get",
+        "parameters": [
+          {
+            "name": "identity",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Identity"
+            }
+          },
+          {
+            "name": "X-Townlight-Session",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Townlight-Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/desktop/v1/municipal-staff/procurement": {
+      "get": {
+        "tags": [
+          "native-municipal-staff"
+        ],
+        "summary": "List Procurement",
+        "operationId": "list_procurement_desktop_v1_municipal_staff_procurement_get",
+        "parameters": [
+          {
+            "name": "X-Townlight-Session",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Townlight-Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "native-municipal-staff"
+        ],
+        "summary": "Save Rfp",
+        "operationId": "save_rfp_desktop_v1_municipal_staff_procurement_post",
+        "parameters": [
+          {
+            "name": "X-Townlight-Session",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Townlight-Session"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RfpInput"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/desktop/v1/municipal-staff/procurement/{identity}/proposal": {
+      "post": {
+        "tags": [
+          "native-municipal-staff"
+        ],
+        "summary": "Save Proposal",
+        "operationId": "save_proposal_desktop_v1_municipal_staff_procurement__identity__proposal_post",
+        "parameters": [
+          {
+            "name": "identity",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Identity"
+            }
+          },
+          {
+            "name": "X-Townlight-Session",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Townlight-Session"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProposalInput"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/desktop/v1/municipal-staff/procurement/{identity}/award": {
+      "post": {
+        "tags": [
+          "native-municipal-staff"
+        ],
+        "summary": "Record Award",
+        "operationId": "record_award_desktop_v1_municipal_staff_procurement__identity__award_post",
+        "parameters": [
+          {
+            "name": "identity",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Identity"
+            }
+          },
+          {
+            "name": "X-Townlight-Session",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Townlight-Session"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AwardInput"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/desktop/v1/municipal-staff/procurement/{identity}/contract": {
+      "post": {
+        "tags": [
+          "native-municipal-staff"
+        ],
+        "summary": "Create Draft Contract",
+        "operationId": "create_draft_contract_desktop_v1_municipal_staff_procurement__identity__contract_post",
+        "parameters": [
+          {
+            "name": "identity",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Identity"
+            }
+          },
+          {
+            "name": "X-Townlight-Session",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Townlight-Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -16155,6 +18553,32 @@
         ],
         "title": "AttachReleaseCopy"
       },
+      "AttendanceInput": {
+        "properties": {
+          "seat_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Seat Id"
+          },
+          "meeting_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Meeting Id"
+          },
+          "present": {
+            "type": "boolean",
+            "title": "Present"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "seat_id",
+          "meeting_id",
+          "present"
+        ],
+        "title": "AttendanceInput"
+      },
       "AuditChainVerification": {
         "properties": {
           "is_valid": {
@@ -16304,6 +18728,35 @@
         ],
         "title": "AuditView"
       },
+      "AwardInput": {
+        "properties": {
+          "proposal_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Proposal Id"
+          },
+          "decision_reference": {
+            "type": "string",
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Decision Reference"
+          },
+          "decision_note": {
+            "type": "string",
+            "maxLength": 8000,
+            "minLength": 1,
+            "title": "Decision Note"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "proposal_id",
+          "decision_reference",
+          "decision_note"
+        ],
+        "title": "AwardInput"
+      },
       "BearerResponse": {
         "properties": {
           "access_token": {
@@ -16321,6 +18774,29 @@
           "token_type"
         ],
         "title": "BearerResponse"
+      },
+      "BoardInput": {
+        "properties": {
+          "board_name": {
+            "type": "string",
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Board Name"
+          },
+          "liaison": {
+            "type": "string",
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Liaison"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "board_name",
+          "liaison"
+        ],
+        "title": "BoardInput"
       },
       "Body_auth_jwt_login_auth_jwt_login_post": {
         "properties": {
@@ -17527,7 +20003,7 @@
           "last_ingestion_at"
         ],
         "title": "DataSourceRead",
-        "description": "Redacted datasource shape \u2014 safe for non-admin roles. connection_config omitted."
+        "description": "Redacted datasource shape — safe for non-admin roles. connection_config omitted."
       },
       "DataSourceUpdate": {
         "properties": {
@@ -19498,6 +21974,21 @@
         "type": "object",
         "title": "HTTPValidationError"
       },
+      "Handoff": {
+        "properties": {
+          "request_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Request Id"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "request_id"
+        ],
+        "title": "Handoff"
+      },
       "ImportBundleCreate": {
         "properties": {
           "job_id": {
@@ -19568,6 +22059,157 @@
         ],
         "title": "ImportBundleCreate",
         "description": "Request body for local fixture/file-drop import jobs."
+      },
+      "ImportCommitInput": {
+        "properties": {
+          "connector": {
+            "type": "string",
+            "maxLength": 60,
+            "minLength": 1,
+            "title": "Connector"
+          },
+          "source_url": {
+            "type": "string",
+            "maxLength": 2048,
+            "minLength": 1,
+            "title": "Source Url"
+          },
+          "input_format": {
+            "type": "string",
+            "maxLength": 60,
+            "minLength": 1,
+            "title": "Input Format"
+          },
+          "content_base64": {
+            "type": "string",
+            "maxLength": 22369624,
+            "minLength": 1,
+            "title": "Content Base64"
+          },
+          "external_id": {
+            "type": "string",
+            "maxLength": 2048,
+            "minLength": 1,
+            "title": "External Id"
+          },
+          "expected_sha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$",
+            "title": "Expected Sha256"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "connector",
+          "source_url",
+          "input_format",
+          "content_base64",
+          "external_id",
+          "expected_sha256"
+        ],
+        "title": "ImportCommitInput"
+      },
+      "ImportLinkInput": {
+        "properties": {
+          "meeting_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Meeting Id"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "meeting_id"
+        ],
+        "title": "ImportLinkInput"
+      },
+      "ImportLinkSearch": {
+        "properties": {
+          "target_query": {
+            "type": "string",
+            "maxLength": 255,
+            "title": "Target Query",
+            "default": ""
+          },
+          "meeting_query": {
+            "type": "string",
+            "maxLength": 255,
+            "title": "Meeting Query",
+            "default": ""
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "ImportLinkSearch"
+      },
+      "ImportPreviewInput": {
+        "properties": {
+          "connector": {
+            "type": "string",
+            "maxLength": 60,
+            "minLength": 1,
+            "title": "Connector"
+          },
+          "source_url": {
+            "type": "string",
+            "maxLength": 2048,
+            "minLength": 1,
+            "title": "Source Url"
+          },
+          "input_format": {
+            "type": "string",
+            "maxLength": 60,
+            "minLength": 1,
+            "title": "Input Format"
+          },
+          "content_base64": {
+            "type": "string",
+            "maxLength": 22369624,
+            "minLength": 1,
+            "title": "Content Base64"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "connector",
+          "source_url",
+          "input_format",
+          "content_base64"
+        ],
+        "title": "ImportPreviewInput"
+      },
+      "ImportSourceInput": {
+        "properties": {
+          "connector": {
+            "type": "string",
+            "maxLength": 60,
+            "minLength": 1,
+            "title": "Connector"
+          },
+          "source_url": {
+            "type": "string",
+            "maxLength": 2048,
+            "minLength": 1,
+            "title": "Source Url"
+          },
+          "input_format": {
+            "type": "string",
+            "maxLength": 60,
+            "minLength": 1,
+            "title": "Input Format"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "connector",
+          "source_url",
+          "input_format"
+        ],
+        "title": "ImportSourceInput"
       },
       "InclusionStatus": {
         "type": "string",
@@ -21301,6 +23943,56 @@
         ],
         "title": "NoticeDocumentInput"
       },
+      "NoticeDraft": {
+        "properties": {
+          "title": {
+            "type": "string",
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Title"
+          },
+          "body": {
+            "type": "string",
+            "maxLength": 100000,
+            "minLength": 1,
+            "title": "Body"
+          },
+          "notice_type": {
+            "type": "string",
+            "maxLength": 160,
+            "minLength": 1,
+            "title": "Notice Type"
+          },
+          "statutory_basis": {
+            "type": "string",
+            "maxLength": 5000,
+            "minLength": 1,
+            "title": "Statutory Basis"
+          },
+          "event_date": {
+            "type": "string",
+            "format": "date",
+            "title": "Event Date"
+          },
+          "lead_days": {
+            "type": "integer",
+            "maximum": 365.0,
+            "minimum": 0.0,
+            "title": "Lead Days"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "title",
+          "body",
+          "notice_type",
+          "statutory_basis",
+          "event_date",
+          "lead_days"
+        ],
+        "title": "NoticeDraft"
+      },
       "NoticeInput": {
         "properties": {
           "notice_type": {
@@ -22039,7 +24731,7 @@
           "mode"
         ],
         "title": "PortalModeResponse",
-        "description": "T5D \u2014 schema for ``GET /config/portal-mode``.\n\nExposed to the frontend on boot so it can branch routing without a\nuser-identity lookup. The payload is intentionally the single field\nbelow \u2014 no staff config, no user state, no schema version."
+        "description": "T5D — schema for ``GET /config/portal-mode``.\n\nExposed to the frontend on boot so it can branch routing without a\nuser-identity lookup. The payload is intentionally the single field\nbelow — no staff config, no user state, no schema version."
       },
       "PrepareArtifact": {
         "properties": {
@@ -22058,6 +24750,49 @@
           "kind"
         ],
         "title": "PrepareArtifact"
+      },
+      "Proof": {
+        "properties": {
+          "sequence": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Sequence"
+          },
+          "filename": {
+            "type": "string",
+            "maxLength": 150,
+            "minLength": 1,
+            "title": "Filename"
+          },
+          "content_base64": {
+            "type": "string",
+            "maxLength": 7000000,
+            "minLength": 1,
+            "title": "Content Base64"
+          },
+          "location": {
+            "type": "string",
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Location"
+          },
+          "published_at": {
+            "type": "string",
+            "maxLength": 80,
+            "minLength": 1,
+            "title": "Published At"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "sequence",
+          "filename",
+          "content_base64",
+          "location",
+          "published_at"
+        ],
+        "title": "Proof"
       },
       "Proposal": {
         "properties": {
@@ -22130,6 +24865,42 @@
           "proposed_text"
         ],
         "title": "Proposal"
+      },
+      "ProposalInput": {
+        "properties": {
+          "vendor_name": {
+            "type": "string",
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Vendor Name"
+          },
+          "summary": {
+            "type": "string",
+            "maxLength": 8000,
+            "minLength": 1,
+            "title": "Summary"
+          },
+          "staff_score": {
+            "type": "integer",
+            "maximum": 100.0,
+            "minimum": 0.0,
+            "title": "Staff Score"
+          },
+          "staff_exceptions": {
+            "type": "string",
+            "maxLength": 8000,
+            "title": "Staff Exceptions",
+            "default": ""
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "vendor_name",
+          "summary",
+          "staff_score"
+        ],
+        "title": "ProposalInput"
       },
       "PublicExplore": {
         "properties": {
@@ -22580,6 +25351,27 @@
           "created_at_unix_seconds"
         ],
         "title": "RecordsDocumentView"
+      },
+      "RecordsImportDocument": {
+        "properties": {
+          "request_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Request Id"
+          },
+          "document_index": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Document Index"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "request_id",
+          "document_index"
+        ],
+        "title": "RecordsImportDocument"
       },
       "RecordsOperationRead": {
         "properties": {
@@ -23765,36 +26557,6 @@
         "type": "object",
         "title": "ResponseLetterUpdate"
       },
-      "Review": {
-        "properties": {
-          "answer": {
-            "type": "string",
-            "maxLength": 10000,
-            "title": "Answer",
-            "default": ""
-          },
-          "notes": {
-            "type": "string",
-            "maxLength": 10000,
-            "title": "Notes",
-            "default": ""
-          },
-          "queue_status": {
-            "type": "string",
-            "enum": [
-              "open",
-              "in_review",
-              "resolved",
-              "closed"
-            ],
-            "title": "Queue Status",
-            "default": "resolved"
-          }
-        },
-        "additionalProperties": false,
-        "type": "object",
-        "title": "Review"
-      },
       "ReviewInput": {
         "properties": {
           "title": {
@@ -23824,6 +26586,25 @@
         "additionalProperties": false,
         "type": "object",
         "title": "ReviewInput"
+      },
+      "Revision": {
+        "properties": {
+          "sequence": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Sequence"
+          },
+          "document": {
+            "$ref": "#/components/schemas/NoticeDraft"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "sequence",
+          "document"
+        ],
+        "title": "Revision"
       },
       "RewriteInput": {
         "properties": {
@@ -23919,6 +26700,36 @@
           "outcome"
         ],
         "title": "RewriteResult"
+      },
+      "RfpInput": {
+        "properties": {
+          "title": {
+            "type": "string",
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Title"
+          },
+          "procurement_type": {
+            "type": "string",
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Procurement Type"
+          },
+          "city_need": {
+            "type": "string",
+            "maxLength": 8000,
+            "minLength": 1,
+            "title": "City Need"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "title",
+          "procurement_type",
+          "city_need"
+        ],
+        "title": "RfpInput"
       },
       "Rule": {
         "properties": {
@@ -24571,6 +27382,65 @@
         ],
         "title": "SearchSessionRead"
       },
+      "SeatInput": {
+        "properties": {
+          "board_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Board Id"
+          },
+          "seat_name": {
+            "type": "string",
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Seat Name"
+          },
+          "member_name": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 255,
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Member Name"
+          },
+          "term_start": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Term Start"
+          },
+          "term_end": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Term End"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "board_id",
+          "seat_name"
+        ],
+        "title": "SeatInput"
+      },
       "SectionCreate": {
         "properties": {
           "section_id": {
@@ -24771,27 +27641,6 @@
         "title": "SectionVersionCreate",
         "description": "Request body for adding an immutable section version."
       },
-      "Selection": {
-        "properties": {
-          "recording_id": {
-            "type": "string",
-            "format": "uuid",
-            "title": "Recording Id"
-          },
-          "expected_sha256": {
-            "type": "string",
-            "pattern": "^[0-9a-f]{64}$",
-            "title": "Expected Sha256"
-          }
-        },
-        "additionalProperties": false,
-        "type": "object",
-        "required": [
-          "recording_id",
-          "expected_sha256"
-        ],
-        "title": "Selection"
-      },
       "SentenceInput": {
         "properties": {
           "text": {
@@ -24875,7 +27724,7 @@
           "api_key"
         ],
         "title": "ServiceAccountCreated",
-        "description": "Returned only on creation \u2014 includes the plaintext API key (shown once)."
+        "description": "Returned only on creation — includes the plaintext API key (shown once)."
       },
       "ServiceAccountRead": {
         "properties": {
@@ -24943,6 +27792,69 @@
         },
         "type": "object",
         "title": "ServiceAccountUpdate"
+      },
+      "SignedAgreement": {
+        "properties": {
+          "title": {
+            "type": "string",
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Title"
+          },
+          "vendor_name": {
+            "type": "string",
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Vendor Name"
+          },
+          "owner": {
+            "type": "string",
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Owner"
+          },
+          "start_date": {
+            "type": "string",
+            "format": "date",
+            "title": "Start Date"
+          },
+          "expiration_date": {
+            "type": "string",
+            "format": "date",
+            "title": "Expiration Date"
+          },
+          "renewal_due": {
+            "type": "string",
+            "format": "date",
+            "title": "Renewal Due"
+          },
+          "document_name": {
+            "type": "string",
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Document Name"
+          },
+          "document_content": {
+            "type": "string",
+            "maxLength": 8388608,
+            "format": "base64",
+            "contentMediaType": "application/octet-stream",
+            "title": "Document Content"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "title",
+          "vendor_name",
+          "owner",
+          "start_date",
+          "expiration_date",
+          "renewal_due",
+          "document_name",
+          "document_content"
+        ],
+        "title": "SignedAgreement"
       },
       "Snapshot": {
         "properties": {
@@ -26142,6 +29054,21 @@
         ],
         "title": "ValidationError"
       },
+      "Version": {
+        "properties": {
+          "sequence": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Sequence"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "sequence"
+        ],
+        "title": "Version"
+      },
       "VoteCorrection": {
         "properties": {
           "vote": {
@@ -26266,6 +29193,27 @@
         ],
         "title": "SourceLink"
       },
+      "townlight_records__desktop_bridge__station__Selection": {
+        "properties": {
+          "recording_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Recording Id"
+          },
+          "expected_sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Expected Sha256"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "recording_id",
+          "expected_sha256"
+        ],
+        "title": "Selection"
+      },
       "townlight_runtime__inspections_bridge__Search": {
         "properties": {
           "provider": {
@@ -26287,6 +29235,28 @@
           "query"
         ],
         "title": "Search"
+      },
+      "townlight_runtime__notice_bridge__Review": {
+        "properties": {
+          "sequence": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Sequence"
+          },
+          "note": {
+            "type": "string",
+            "maxLength": 5000,
+            "minLength": 1,
+            "title": "Note"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "sequence",
+          "note"
+        ],
+        "title": "Review"
       },
       "townlight_runtime__permitting_bridge__Import": {
         "properties": {
@@ -26393,6 +29363,95 @@
           "query"
         ],
         "title": "Search"
+      },
+      "townlight_runtime__portal_publication__Selection": {
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "publish",
+              "withdraw"
+            ],
+            "title": "Action"
+          },
+          "approve_publication": {
+            "type": "boolean",
+            "title": "Approve Publication"
+          },
+          "archive_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Archive Id"
+          },
+          "meeting_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Meeting Id"
+          },
+          "recording_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Recording Id"
+          },
+          "request_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Request Id"
+          },
+          "release_copy_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Release Copy Id"
+          },
+          "expected_release_sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Expected Release Sha256"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "action",
+          "approve_publication",
+          "archive_id",
+          "meeting_id",
+          "recording_id",
+          "request_id",
+          "release_copy_id",
+          "expected_release_sha256"
+        ],
+        "title": "Selection"
+      },
+      "townlight_runtime__zoning_bridge__Review": {
+        "properties": {
+          "answer": {
+            "type": "string",
+            "maxLength": 10000,
+            "title": "Answer",
+            "default": ""
+          },
+          "notes": {
+            "type": "string",
+            "maxLength": 10000,
+            "title": "Notes",
+            "default": ""
+          },
+          "queue_status": {
+            "type": "string",
+            "enum": [
+              "open",
+              "in_review",
+              "resolved",
+              "closed"
+            ],
+            "title": "Queue Status",
+            "default": "resolved"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "Review"
       }
     },
     "securitySchemes": {
@@ -26406,5 +29465,7 @@
         }
       }
     }
-  }
+  },
+  "x-townlight-source-commit": "0afd59de52cb7ecb317188a89bcd1fec8c578a24",
+  "x-townlight-health-version-discrepancy": "Distribution Runtime 0.3.1 and Meetings 1.0.6; health strings Runtime 0.3.0 and Meetings 1.0.5 in the accepted MSI."
 }

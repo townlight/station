@@ -1,6 +1,17 @@
-Windows x64 Beta 1 · MSI 1.8.0.1
 
-The signed Windows x64 beta 1.8.0.1 adds the three staff workspaces and
+## Shared meeting imports · Windows 1.8.1.1
+
+Windows 1.8.1.1 adds shared meeting imports for 31 source families, with 34 supported source/format pairs. Installed Windows Sandbox checks exercised preview, save and durable readback using public captures and fixtures, plus the documented Townlight handoffs. These checks do not establish automatic discovery on every live portal or a complete retest of every module.
+
+[All 31 sources, formats and handoffs](https://townlight.github.io/manuals/meeting-imports.html) · [Installed acceptance](https://github.com/townlight/townlight/releases/download/townlight-windows-v1.8.1.1/ACCEPTANCE-Windows-1.8.1.1.md).
+
+Windows 1.8.1.1 has fresh-install acceptance. An in-place upgrade to 1.8.1.1 was not exercised. The previous Windows 1.8.0.1 release tested upgrade from 1.7.2.1; that result applies to 1.8.0.1. Before an existing-city evaluation, back up city data and settings, close Townlight, keep the existing %LOCALAPPDATA%\CivicSuite profile, and use the same Windows account. Keep the prior installer and a restore path. Station continues to use its separately configured service.
+
+The accepted MSI contains Townlight Runtime 0.3.1 and Meetings 1.0.6 distributions. Its health version strings still report Runtime 0.3.0 and Meetings 1.0.5. Default-branch source corrects those display strings; the signed MSI and its exact build source remain unchanged.
+
+Windows x64 Beta 1 · MSI 1.8.1.1
+
+The signed Windows x64 beta 1.8.1.1 adds the three staff workspaces and
 automatically refreshes the bundled runtime when upgrading from 1.7.2.1.
 
 - Townlight Station Manual
@@ -28,7 +39,7 @@ automatically refreshes the bundled runtime when upgrading from 1.7.2.1.
 
 Townlight Station Manual
 
-The signed Windows x64 beta 1.8.0.1 adds the three staff workspaces and
+The signed Windows x64 beta 1.8.1.1 adds the three staff workspaces and
 automatically refreshes the bundled runtime when upgrading from 1.7.2.1.
 The Windows acceptance summary applies to this exact MSI.
 
@@ -55,8 +66,8 @@ Beta identity
   Identity                      Value
   ----------------------------- -------------------------------------------------------------------------------------------------------------------
   Documentation                 Townlight naming, Access and Notice candidate
-  Intended installer            1.8.0.1
-  Desktop source                1.8.0-1
+  Intended installer            1.8.1.1
+  Desktop source                1.8.1-1
   Runtime distribution          townlight-runtime 0.2.0
   Station distribution/import   townlight-station 0.3.0 / townlight_station
   Acceptance composition        Windows x64 fresh install and upgrade from 1.7.2.1. Select the full profile. Station uses separate configuration.
@@ -69,7 +80,7 @@ MSI upgrade below applies to the desktop suite.
 First run
 
 Upgrade from 1.7.2.1. For the tested upgrade from 1.7.2.1, back up city
-data and settings, close Townlight, run the signed Windows 1.8.0.1 MSI,
+data and settings, close Townlight, run the signed Windows 1.8.1.1 MSI,
 and reopen Townlight under the same Windows account with its existing
 profile. Keep the existing %LOCALAPPDATA%\CivicSuite directory. Upgrade
 paths from versions older than 1.7.2.1 are unverified. Station uses its
@@ -77,7 +88,7 @@ separately configured service.
 
 Fresh installation
 
-Run the signed Windows 1.8.0.1 MSI and use an empty database and a new
+Run the signed Windows 1.8.1.1 MSI and use an empty database and a new
 Townlight profile for first run.
 
 1.  Download the signed MSI, matching source companion and checksums
@@ -925,7 +936,7 @@ Verified workflows and limits
 The separately configured Station workflow was exercised on the original
 Windows 1.6.0.1 Beta 1. The follow-up Windows 1.6.0.1 Station delivery
 exercised encrypted live feed and recording delivery. The Windows
-1.8.0.1 acceptance summary records the current MSI checks. Station
+1.8.0.1 acceptance summary records the previous 1.8.0.1 MSI checks. Station
 capture and its Meetings-to-Records handoff were outside that run. Field
 equipment, city credentials, and live YouTube commissioning require
 separate local verification.
@@ -1100,7 +1111,7 @@ Operating subject links
 
 Source and document control
 
-This manual covers the Station service paired with Windows MSI 1.8.0.1.
+This manual covers the Station service paired with Windows MSI 1.8.1.1.
 The Windows acceptance summary records the tested Meetings, Station and
 Records handoff.
 

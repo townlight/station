@@ -1,1 +1,101 @@
-<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="description" content="Core provides the shared contracts, ingestion, identity helpers, task infrastructure and recovery foundation used by Townlight. Staff encounter these capabilities through Setup, Settings and System Health. Business decisions stay with their owning product."><title>Townlight Core | Townlight Beta 1</title><link rel="stylesheet" href="../../assets/site.css"></head><body><a class="skip" href="#main">Skip to content</a><aside aria-label="Windows release" style="padding:1rem">The signed <a href="https://github.com/townlight/townlight/releases/tag/townlight-windows-v1.8.0.1">Windows x64 beta 1.8.0.1</a> adds the three staff workspaces and automatically refreshes the bundled runtime when upgrading from 1.7.2.1. See the <a href="https://github.com/townlight/townlight/releases/download/townlight-windows-v1.8.0.1/ACCEPTANCE-Windows-1.8.0.1.md">Windows acceptance summary</a>.</aside><header><a class="brand" href="../../index.html">townlight<span aria-hidden="true"> ·</span></a><span class="edition">Townlight Beta 1</span><nav aria-label="Main"><a href="../../index.html#products">Products</a><a href="../../manuals/suite.html">Suite manual</a><a href="../../reference/index.html">Technical reference</a><a href="../../terms.html">Terms and license</a></nav></header><main id="main"><div class="wrap"><section class="hero" aria-labelledby="hero-title"><div class="edition">Townlight Core · Townlight Beta 1</div><h1 id="hero-title">A shared foundation for accountable municipal work.</h1><p class="lead">Core provides the shared contracts, ingestion, identity helpers, task infrastructure and recovery foundation used by Townlight. Staff encounter these capabilities through Setup, Settings and System Health. Business decisions stay with their owning product.</p><div class="actions"><a class="button primary" href="../../manuals/core.html">Read the manual</a><a class="button" href="../../pdf/Townlight-Core-Manual-Beta-1.pdf">Printable manual</a><a class="button" href="../../docx/Townlight-Core-Manual-Beta-1.docx">Word manual</a><a class="button" href="../../api/core.html">Technical reference</a></div><div class="facts"><span>townlight-core 1.3.0.dev2</span><span>AGPL-3.0-only</span><span>Beta evaluation · Windows fresh install and tested 1.7.2.1 upgrade</span></div></section><section class="section"><div class="split"><div><div class="edition">For IT administrators and platform maintainers</div><h2>What the workflow delivers</h2><ol><li><strong>Complete setup.</strong> Choose folders and the full product composition. Create the city profile and the first named administrator. Choose a protected backup location. Defer optional local AI if it is not needed.</li><li><strong>Activate the runtime.</strong> Run the first-run health check, wait for readiness and open Townlight. In System Health select Finish Records Migration to activate the canonical Python and PostgreSQL services. A running process alone is not a ready database.</li><li><strong>Create staff access.</strong> Use Settings to create named staff. Sign out and confirm that staff can sign in with their own account. Keep administrator privileges with people responsible for setup; ordinary staff cannot administer users.</li><li><strong>Import through the right product.</strong> Use the source library of Code, Zoning, Planning or Permitting. Inspect provenance and permissions there. Core ingestion helpers do not bypass the owning product’s source review.</li></ol></div><div><h3>Connected evidence</h3><p>All products use selected Core contracts. Core does not create unrestricted access between products. Access and Notice provide the bounded staff workflows described in their current manuals and acceptance summary.</p><h3>Know the beta boundary</h3><p>Shared catalog, exemption and module-generator code exists in the released Windows beta. It is not a centrally hosted federation service. A business product still owns its decisions, identity mapping and permission checks. Historical placeholder ADRs are retained as history, rather than descriptions of the current implementation.</p></div></div></section><section class="section"><div class="edition">Architecture</div><h2>Where the evidence goes</h2><img class="flow" src="../../assets/core-architecture.svg" alt="Townlight Core architecture and evidence flow"><p class="caption">All products use selected Core contracts. Core does not create unrestricted access between products. Access and Notice provide the bounded staff workflows described in their current manuals and acceptance summary.</p></section><section class="section"><div class="split"><div><div class="edition">Evidence rather than promises</div><h2>Windows Sandbox acceptance passed.</h2><p>The <a href="https://github.com/townlight/townlight/releases/download/townlight-windows-v1.8.0.1/ACCEPTANCE-Windows-1.8.0.1.md">Windows acceptance summary</a> describes the fresh Windows install, staff workflow, and 1.7.2.1 upgrade checks. See its scope for coverage of other workflows and equipment.</p><a href="../../manuals/core.html#verified-workflows-and-limits">Read the exact acceptance and limits →</a></div><div><h3>Ready to evaluate?</h3><p>Begin with the current manual and download the <a href="https://github.com/townlight/townlight/releases/tag/townlight-windows-v1.8.0.1">Windows x64 beta 1.8.0.1</a>. Configure the chosen test site and have its staff review source applicability and run the existing workflows.</p><div class="actions"><a class="button" href="../../readmes/core.html">Detailed README</a><a class="button" href="../../versions.html">Versions and provenance</a></div></div></div></section></div></main><footer><span>Townlight Beta 1 · Townlight Beta 1 documentation · AGPL-3.0-only</span><span><a href="../../versions.html">Exact versions and candidate</a> · CivicCast remains separate</span></footer></body></html>
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Townlight Core</title>
+  <meta name="description" content="Core gives Townlight components common services for staff identity, audit events, source ingestion and document discovery.">
+  <link rel="canonical" href="https://townlight.github.io/products/core/">
+  <meta property="og:title" content="Townlight Core">
+  <meta property="og:description" content="Core gives Townlight components common services for staff identity, audit events, source ingestion and document discovery.">
+  <meta property="og:image" content="https://townlight.github.io/brand/png/townlight-hall-social-preview.png">
+  <link rel="icon" href="/brand/favicon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/brand/png/townlight-hall-app-icon-180.png">
+  <link rel="stylesheet" href="/assets/site.css">
+  <link rel="stylesheet" href="/assets/landing.css">
+</head>
+<body class="landing">
+  <a class="skip" href="#main">Skip to content</a>
+  <header class="masthead">
+    <div class="landing-wrap masthead-inner">
+      <a href="/" aria-label="Townlight home">
+        <img src="/brand/svg/townlight-hall-lockup.svg" alt="Townlight" width="161" height="34">
+      </a>
+      <nav aria-label="Main navigation">
+        <a href="/#products">Products</a>
+        <a href="/manuals/core.html">Guide</a>
+        <a href="https://github.com/townlight/townlight/releases/tag/townlight-windows-v1.8.1.1">Download</a>
+        <a href="https://github.com/townlight/core">Source</a>
+      </nav>
+    </div>
+  </header>
+  <main id="main">
+  <section class="landing-hero" aria-labelledby="title">
+    <div class="landing-wrap hero-layout">
+      <div>
+        <div class="eyebrow">Townlight Core / Shared platform</div>
+        <h1 id="title">One foundation for municipal workflows.</h1>
+        <p class="hero-copy">Core gives Townlight components common services for staff identity, audit events, source ingestion and document discovery.</p>
+        <div class="actions"><a href="/manuals/core.html" class="button primary">Read the operating guide</a><a href="https://github.com/townlight/townlight/releases/tag/townlight-windows-v1.8.1.1" class="button">View Windows release</a></div>
+        <p class="release-line">Windows public beta · Townlight 1.8.1.1 · AGPL-3.0-only</p>
+      </div>
+      <figure class="workflow-sheet">
+      <figcaption><span class="eyebrow">Workflow guide</span>How a shared source becomes usable</figcaption>
+      <ol>
+        <li><strong>Identify the actor</strong><span>Named staff and module permissions give actions context.</span></li>
+        <li><strong>Ingest the source</strong><span>Parse supported files and retain the source record for retrieval.</span></li>
+        <li><strong>Record the action</strong><span>Modules use shared audit and catalog services to support review.</span></li>
+      </ol>
+      <p class="sheet-note">Illustrated workflow · staff review at each decision</p>
+    </figure>
+    </div>
+  </section>
+  <section class="landing-section" aria-labelledby="capabilities">
+    <div class="landing-wrap">
+      <div class="eyebrow">Inside the workflow</div>
+      <h2 id="capabilities">What Core supports</h2>
+      <div class="capability-columns">
+        <article><h3>Shared staff authority</h3><p>Use the same identity and authorization foundation across connected workspaces.</p></article>
+        <article><h3>Reusable ingestion</h3><p>Parse supported office, web and text formats for downstream citation and search.</p></article>
+        <article><h3>Audit and catalog primitives</h3><p>Record attributable actions and discover supported sources through shared services.</p></article>
+      </div>
+    </div>
+  </section>
+  <section class="landing-section landing-band" aria-labelledby="getting-started">
+    <div class="landing-wrap landing-split">
+      <div>
+        <div class="eyebrow">Evaluate locally</div>
+        <h2 id="getting-started">Start with one real workflow.</h2>
+        <p>Core ships with the Windows suite. Use the technical guide for service configuration, schema migrations and module integration.</p>
+        <ul class="landing-link-list"><li><a href="/manuals/core.html">Operating guide</a></li><li><a href="https://github.com/townlight/townlight/releases/tag/townlight-windows-v1.8.1.1">Release and checksums</a></li></ul>
+      </div>
+      <div class="landing-panel">
+        <h3>Scope of this beta</h3>
+        <p>Core is a platform component. Staff use the product workspaces for case handling and official decisions.</p>
+        <a href="https://github.com/townlight/townlight/releases/download/townlight-windows-v1.8.1.1/ACCEPTANCE-Windows-1.8.1.1.md">Read the installed acceptance</a>
+      </div>
+    </div>
+  </section>
+  <section class="landing-section" aria-labelledby="technical">
+    <div class="landing-wrap">
+      <div class="eyebrow">For technical teams</div>
+      <h2 id="technical">Inspect the implementation.</h2>
+      <p class="section-intro">Trace the workflow to the component source pinned by the Windows release. Use the reference for integration details and the repository to report an issue or contribute a change.</p>
+      <ul class="landing-link-list"><li><a href="https://github.com/townlight/core/tree/3021821bf9a92c790a399ad12aed821d65b09105">Released component source</a></li><li><a href="/api/core.html">API reference</a></li><li><a href="https://github.com/townlight/core">Repository and contributions</a></li></ul>
+
+      <details>
+        <summary>View the Core architecture diagram</summary>
+        <img class="landing-diagram" loading="lazy" src="/assets/core-architecture.svg"
+          alt="Townlight Core architecture. The operating guide describes the services and workflow in text.">
+      </details>
+    </div>
+  </section>
+  <section id="meeting-imports"><h2>Shared meeting imports · Windows 1.8.1.1</h2><p>Windows 1.8.1.1 adds shared meeting imports for 31 source families, with 34 supported source/format pairs. Installed Windows Sandbox checks exercised preview, save and durable readback using public captures and fixtures, plus the documented Townlight handoffs. These checks do not establish automatic discovery on every live portal or a complete retest of every module.</p><p><a href="https://townlight.github.io/manuals/meeting-imports.html">All 31 sources, formats, operator steps and integration contracts</a> · <a href="https://github.com/townlight/townlight/releases/download/townlight-windows-v1.8.1.1/ACCEPTANCE-Windows-1.8.1.1.md">Installed acceptance and limits</a>.</p><p>Windows 1.8.1.1 has fresh-install acceptance. An in-place upgrade to 1.8.1.1 was not exercised. The previous Windows 1.8.0.1 release tested upgrade from 1.7.2.1; that result applies to 1.8.0.1. Before an existing-city evaluation, back up city data and settings, close Townlight, keep the existing %LOCALAPPDATA%\CivicSuite profile, and use the same Windows account. Keep the prior installer and a restore path. Station continues to use its separately configured service.</p><p>The accepted MSI contains Townlight Runtime 0.3.1 and Meetings 1.0.6 distributions. Its health version strings still report Runtime 0.3.0 and Meetings 1.0.5. Default-branch source corrects those display strings; the signed MSI and its exact build source remain unchanged.</p></section></main>
+  <footer class="landing-footer">
+    <div class="landing-wrap">
+      <span>Townlight · Open source municipal software</span>
+      <ul class="landing-link-list"><li><a href="/support.html">Support</a></li><li><a href="/versions.html">Versions</a></li><li><a href="/brand/">Brand</a></li><li><a href="/terms.html">Terms and license</a></li></ul>
+    </div>
+  </footer>
+</body>
+</html>
