@@ -70,7 +70,7 @@ Beta identity
   Desktop source                1.8.1-1
   Runtime distribution          townlight-runtime 0.2.0
   Station distribution/import   townlight-station 0.3.0 / townlight_station
-  Acceptance composition        Windows x64 fresh install and upgrade from 1.7.2.1. Select the full profile. Station uses separate configuration.
+  Acceptance composition        Windows 1.8.1.1: fresh-install acceptance; upgrade to this version unverified. Select the full profile. Station uses separate configuration.
   Candidate hashes/signature    SHA-256 checksums and Windows acceptance summary
   Owned software license        AGPL-3.0-only
 

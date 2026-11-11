@@ -55,7 +55,7 @@ Staff should begin with First run and Daily workflow. Administrators should also
 | Desktop source | 1.8.1-1 |
 | Runtime distribution | townlight-runtime 0.2.0 |
 | Station distribution/import | townlight-station 0.3.0 / townlight_station |
-| Acceptance composition | Windows x64 fresh install and upgrade from 1.7.2.1. Select the full profile. Station uses separate configuration. |
+| Acceptance composition | Windows 1.8.1.1: fresh-install acceptance; upgrade to this version unverified. Select the full profile. Station uses separate configuration. |
 | Candidate hashes/signature | [SHA-256 checksums](https://github.com/townlight/townlight/releases/download/townlight-windows-v1.8.1.1/SHA256SUMS-Windows-1.8.1.1.txt) and [Windows acceptance summary](https://github.com/townlight/townlight/releases/download/townlight-windows-v1.8.1.1/ACCEPTANCE-Windows-1.8.1.1.md) |
 | Owned software license | AGPL-3.0-only |
 
@@ -202,7 +202,7 @@ Source contracts: `townlight_station/operations.py`, `worker.py`, `airplay.py`, 
 
 ### Runtime and storage
 
-The accepted package supports Windows x64 fresh installation and upgrade from 1.7.2.1. Its native shell uses **Rust 2021, Tauri 2 and Microsoft WebView2**; browser assets are JavaScript built with **Vite 8.1.6**. This describes the native desktop frontend; Station has a separate React operator, specified below or in its product manual. Canonical business workflows use bundled **CPython 3.13.5, FastAPI, Pydantic, SQLAlchemy and Alembic**, with **PostgreSQL 17 / PostGIS** and managed original files. The installed runtime tested here contains FastAPI 0.162.0. Package minimum Python requirements can differ from the bundled executable; the metadata reference preserves both. No stack rewrite is implied by the beta label.
+The Windows 1.8.1.1 package has fresh-install acceptance; an in-place upgrade to this version was not exercised. Its native shell uses **Rust 2021, Tauri 2 and Microsoft WebView2**; browser assets are JavaScript built with **Vite 8.1.6**. This describes the native desktop frontend; Station has a separate React operator, specified below or in its product manual. Canonical business workflows use bundled **CPython 3.13.5, FastAPI, Pydantic, SQLAlchemy and Alembic**, with **PostgreSQL 17 / PostGIS** and managed original files. The installed runtime tested here contains FastAPI 0.162.0. Package minimum Python requirements can differ from the bundled executable; the metadata reference preserves both. No stack rewrite is implied by the beta label.
 
 The native transport is fixed to loopback `127.0.0.1:15480`; PostgreSQL uses the configured local runtime port (default `15432`). Optional local model service defaults to `127.0.0.1:15434`. Those are deployment defaults, not internet endpoints. The runtime has health, module and readiness endpoints; readiness is stronger than process existence. The task queue is the existing local Core task infrastructure, not an assertion that a separate Redis service is required for this desktop composition.
 
