@@ -8,11 +8,11 @@
     "check": "tsc --noEmit --jsx react --esModuleInterop --lib ES2022,DOM --moduleResolution node --skipLibCheck src/operator.tsx"
   },
   "dependencies": {
-    "react": "19.1.1",
+    "react": "19.3.1",
     "react-dom": "19.1.1"
   },
   "devDependencies": {
-    "@types/react": "19.1.12",
+    "@types/react": "19.3.0",
     "@types/react-dom": "19.1.9",
     "@vitejs/plugin-react": "5.0.2",
     "typescript": "5.9.2",
