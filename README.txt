@@ -1,3 +1,5 @@
+> **Repository scope:** the lightweight Python meeting recorder remains in `beta-1/`. The experimental Rust broadcast engine moved to private CivicCast Lab. See `docs/RUST-SEPARATION.md`. Historical release evidence is unchanged.
+
 Windows 1.8.2.1 maintenance release
 
 Windows 1.8.2.1 packages the staff authorization, explicit database configuration and component metadata corrections. Its exact signed installed checks cover setup, the 1.8.1.1 upgrade, saved staff records, procurement/Contracts handoffs, backup/restore and uninstall retention. Unchanged module and 31-source/34-format import evidence remains attributed to the earlier build that produced it; this is not a new exhaustive test of every module or live provider.

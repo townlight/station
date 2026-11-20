@@ -1,0 +1,9 @@
+{
+  "source_commit": "85774af3505ac9947e10d7b5e484ed25293ef671",
+  "rust_and_support_files_unchanged_in_lab": 509,
+  "recorder_files_unchanged_in_townlight": 776,
+  "townlight_current_tree_has_no_rust_sources_or_workspace": true,
+  "historical_receipts_and_tags_preserved": true,
+  "runtime_tests_run": false,
+  "reason": "No retained application bytes changed; source relocation only."
+}

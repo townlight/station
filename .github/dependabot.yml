@@ -6,7 +6,7 @@ updates:
     interval: weekly
   open-pull-requests-limit: 5
 - package-ecosystem: npm
-  directory: /web/operator
+  directory: /beta-1/operator-ui
   schedule:
     interval: weekly
   open-pull-requests-limit: 5
