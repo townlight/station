@@ -14,67 +14,16 @@ header .brand{display:inline-flex;align-items:center;max-width:100%;flex-shrink:
 <nav aria-label="Main"><a href="../manuals/suite.html">Suite manual</a>
 <a href="../versions.html">Versions and Windows release</a>
 <a href="../terms.html">Terms and license</a></nav></header>
-<main id="main" class="reading wrap"><section id="windows-maintenance"><h2>Windows 1.8.2.1 maintenance release</h2><p>Windows 1.8.2.1 packages the staff authorization, explicit database configuration and component metadata corrections. Its exact signed installed checks cover setup, the 1.8.1.1 upgrade, saved staff records, procurement/Contracts handoffs, backup/restore and uninstall retention. Unchanged module and 31-source/34-format import evidence remains attributed to the earlier build that produced it; this is not a new exhaustive test of every module or live provider.</p><p>Windows 1.8.2.1 has signed installed acceptance for fresh setup and an in-place upgrade from Windows 1.8.1.1. Before upgrading, back up city data and settings, close Townlight, run the signed MSI, and reopen it under the same Windows account with the existing %LOCALAPPDATA%\CivicSuite profile. Keep the prior installer and a restore path. Other upgrade paths are unverified. Station uses its separately configured service. The acceptance summary distinguishes new maintenance checks from reused workflow evidence.</p><p><a href="https://github.com/townlight/townlight/releases/tag/townlight-windows-v1.8.2.1">Release and downloads</a> · <a href="https://github.com/townlight/townlight/releases/download/townlight-windows-v1.8.2.1/ACCEPTANCE-Windows-1.8.2.1.md">Acceptance and limits</a></p></section>
-<nav id="TOC" role="doc-toc">
-<ul>
-<li><a href="#windows-1.8.2.1-maintenance-release"
-id="toc-windows-1.8.2.1-maintenance-release">Windows 1.8.2.1 maintenance
-release</a></li>
-<li><a href="#townlight-records-manual"
-id="toc-townlight-records-manual">Townlight Records Manual</a>
-<ul>
-<li><a href="#shared-meeting-imports-windows-1.8.1.1"
-id="toc-shared-meeting-imports-windows-1.8.1.1">Shared meeting imports ·
-Windows 1.8.1.1</a></li>
-<li><a href="#contents" id="toc-contents">Contents</a></li>
-<li><a href="#using-this-manual" id="toc-using-this-manual">Using this
-manual</a></li>
-<li><a href="#beta-identity" id="toc-beta-identity">Beta
-identity</a></li>
-<li><a href="#first-run" id="toc-first-run">First run</a></li>
-<li><a href="#daily-workflow" id="toc-daily-workflow">Daily
-workflow</a></li>
-<li><a href="#connected-workflows"
-id="toc-connected-workflows">Connected workflows</a></li>
-<li><a href="#architecture" id="toc-architecture">Architecture</a></li>
-<li><a href="#fees-messages-notifications-and-local-intake"
-id="toc-fees-messages-notifications-and-local-intake">Fees messages
-notifications and local intake</a></li>
-<li><a href="#technical-specifications"
-id="toc-technical-specifications">Technical specifications</a></li>
-<li><a href="#configuration-and-administration"
-id="toc-configuration-and-administration">Configuration and
-administration</a></li>
-<li><a href="#api-and-integration-examples"
-id="toc-api-and-integration-examples">API and integration
-examples</a></li>
-<li><a href="#mcp-and-automation-boundary"
-id="toc-mcp-and-automation-boundary">MCP and automation
-boundary</a></li>
-<li><a href="#security-and-permissions"
-id="toc-security-and-permissions">Security and permissions</a></li>
-<li><a href="#backup-recovery-and-maintenance"
-id="toc-backup-recovery-and-maintenance">Backup recovery and
-maintenance</a></li>
-<li><a href="#troubleshooting"
-id="toc-troubleshooting">Troubleshooting</a></li>
-<li><a href="#verified-workflows-and-limits"
-id="toc-verified-workflows-and-limits">Verified workflows and
-limits</a></li>
-<li><a href="#terms-of-service-and-license"
-id="toc-terms-of-service-and-license">Terms of service and
-license</a></li>
-<li><a href="#glossary" id="toc-glossary">Glossary</a></li>
-<li><a href="#alphabetical-subject-index"
-id="toc-alphabetical-subject-index">Alphabetical subject index</a></li>
-<li><a href="#source-and-document-control"
-id="toc-source-and-document-control">Source and document
-control</a></li>
-</ul></li>
-</ul>
-</nav>
-<h2 id="windows-1.8.2.1-maintenance-release">Windows 1.8.2.1 maintenance
+<main id="main" class="reading wrap"><h2 id="windows-1.8.2.1-maintenance-release">Windows 1.8.2.1 maintenance
 release</h2>
+<h2 id="station-recorder-candidate">Station recorder candidate</h2>
+<p>Windows 1.9.0.1 / Station 0.4.0 is in development and has not been
+published. It adds integrated recorder setup/recovery, camera and
+microphone selection with a test clip, eight-hour/64 GiB recording
+limits and streamed Records attachment, and renewable authorized
+operator sessions. Existing released MSI and historical acceptance
+remain unchanged. Installed candidate acceptance and merge are pending;
+tagging/publication require Scott approval.</p>
 <p>Windows 1.8.2.1 packages the staff authorization, explicit database
 configuration and component metadata corrections. Its exact signed
 installed checks cover setup, the 1.8.1.1 upgrade, saved staff records,
@@ -316,7 +265,7 @@ new Townlight profile for first run.</p>
 <ol type="1">
 <li>Download the signed MSI, matching source companion and checksums
 from the <a
-href="https://github.com/townlight/townlight/releases/tag/townlight-windows-v1.8.2.1">public
+href="https://github.com/townlight/townlight/releases/tag/townlight-windows-v1.8.1.1">public
 Windows release</a>.</li>
 <li>Verify the MSI hash and Authenticode publisher before installation.
 See the <a
@@ -1184,4 +1133,55 @@ AGPL text</a></p></li>
 href="https://townlight.github.io/manuals/portal.html">Townlight Portal
 Guide</a> for its workflow and acceptance limits.</p>
 </section>
+<h2 id="source-package-installation">Source package installation</h2>
+<p>Use locally built wheels from the exact component sources in the
+corresponding-source companion and verify their hashes. Do not relabel
+historical release assets. Installation of these Python packages is a
+developer/package check; the signed Windows MSI and its installed
+acceptance remain separate.</p>
+<p>In a new Windows virtual environment, replace the example
+wheel-directory path with your locally built wheel directory from the
+matching pinned source and verify its SHA256 manifest:</p>
+<div class="sourceCode" id="cb8"><pre
+class="sourceCode powershell"><code class="sourceCode powershell"><span id="cb8-1"><a href="#cb8-1" aria-hidden="true" tabindex="-1"></a>python <span class="op">-</span>m venv <span class="op">.</span><span class="fu">venv</span></span>
+<span id="cb8-2"><a href="#cb8-2" aria-hidden="true" tabindex="-1"></a><span class="op">.</span>\<span class="op">.</span><span class="fu">venv</span>\Scripts\Activate<span class="op">.</span><span class="fu">ps1</span></span>
+<span id="cb8-3"><a href="#cb8-3" aria-hidden="true" tabindex="-1"></a><span class="va">$candidateWheels</span> <span class="op">=</span> <span class="op">(</span><span class="fu">Resolve-Path</span> <span class="st">&#39;C:\path\to\candidate-wheels&#39;</span><span class="op">).</span><span class="fu">Path</span></span>
+<span id="cb8-4"><a href="#cb8-4" aria-hidden="true" tabindex="-1"></a>python <span class="op">-</span>m pip install <span class="op">(</span><span class="fu">Join-Path</span> <span class="va">$candidateWheels</span> <span class="st">&#39;townlight_core-1.3.0.dev2-py3-none-any.whl&#39;</span><span class="op">)</span></span>
+<span id="cb8-5"><a href="#cb8-5" aria-hidden="true" tabindex="-1"></a>python <span class="op">-</span>m pip install <span class="op">(</span><span class="fu">Join-Path</span> <span class="va">$candidateWheels</span> <span class="st">&#39;townlight_records-1.8.0.dev2-py3-none-any.whl&#39;</span><span class="op">)</span></span>
+<span id="cb8-6"><a href="#cb8-6" aria-hidden="true" tabindex="-1"></a>python <span class="op">-</span>c <span class="st">&quot;import townlight_records; from importlib.metadata import version; print(version(&#39;townlight-records&#39;))&quot;</span></span></code></pre></div>
+<p>Expected principal import: <code>townlight_records</code>; expected
+distribution version: <code>1.8.0.dev2</code>. For standalone component
+workflow testing, use a fresh empty database and profile. These
+component commands do not perform a Windows MSI upgrade. See First run
+for the supported Windows upgrade.</p>
+<h2 id="license-and-responsible-use">License and responsible use</h2>
+<p>Current owned code is AGPL-3.0-only. Preserve full license, matching
+corresponding source, dependency notices and historical grants. Terms of
+use do not remove license rights. Source imports do not confer
+permission to publish third-party material. Review all automatic drafts
+and use the separate owning-product decision before official action.
+CivicCast remains independent.</p>
+<h2 id="earlier-documentation">Earlier documentation</h2>
+<p>Previous editions are retained under
+<code>docs/history/pre-townlight-beta-1/</code>. They describe their
+original software and license grants. Use the current Townlight Beta 1
+manual for this candidate.</p>
+<h2 id="public-meeting-portal-separately-deployed-beta">Public meeting
+portal (separately deployed beta)</h2>
+<p>Townlight’s separately deployed portal can publish a reviewed
+Meetings archive with an explicitly selected, verified Records release
+copy of the matching completed Station recording. Staff must separately
+approve publication; fulfilling a Records request does not make the copy
+public. Review public text and the selected file, then use the Wagtail
+superuser publication form. Explicit withdrawal hides the published
+meeting and file. An unsuccessful sync preserves the previous
+publication. Keep the private original and never expose the native
+session proof. See the <a
+href="https://github.com/townlight/townlight/blob/main/docs/portal/guide.md">portal
+guide</a> for staff steps, setup, API, recovery and source
+obligations.</p>
+<p>This portal beta is distributed separately from the desktop
+installer. The existing signed Beta 1 installer and historical Sandbox
+results do not establish that it contains or deploys this portal.
+CivicCast remains separate.</p>
 </main><footer>Townlight · AGPL-3.0-only · Candidate evidence applies only to its identified artifacts.<span><a href="../brand/">Brand package</a></span><span><a href="../announcement.html">Announcement</a> · <a href="../support.html">Support and feedback</a></span></footer></body></html>

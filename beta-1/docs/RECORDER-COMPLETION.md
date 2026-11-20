@@ -29,3 +29,4 @@ flowchart LR
     Records --> Review[Separate review and release decision]
 ```
 
+Persistent recorder settings use current-user Windows DPAPI. The background task runs as that same account. PostgreSQL initialization receives its bootstrap credential through an account-private local memory pipe; no plaintext password file is created. Station backups exclude credentials.
