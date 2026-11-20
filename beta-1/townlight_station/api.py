@@ -80,7 +80,16 @@ def create_app(settings=None):
     @app.get('/health')
     def health():
         store.ready()
-        return {'product': IDENTITY['product'], 'ready': True}
+        if (settings.data/'settings.json').exists():
+            import time
+            try:
+                pulse = json.loads((settings.data/'background-health.json').read_text(encoding='utf-8'))
+                if not 0 <= time.time()-pulse['updated_at'] <= 10:
+                    raise ValueError('stale')
+            except (OSError, ValueError, KeyError):
+                raise HTTPException(503, 'Recorder background supervisor is not ready') from None
+        from .setup_windows import task_name
+        return {'product': IDENTITY['product'], 'ready': True, 'instance': task_name(settings.data)}
 
     @app.get('/v1/identity')
     def identity(proof: str | None = Header(default=None, alias='X-Townlight-Session')):
@@ -109,6 +118,11 @@ def create_app(settings=None):
         original = private_path(settings.data, 'ingest', data.source_file) if data.source_file else None
         if original and (not original.is_file() or original.stat().st_size > settings.max_bytes):
             raise HTTPException(422, 'Source file missing or exceeds configured limit')
+        from .storage_policy import require_capacity
+        try:
+            require_capacity(settings, source_bytes=original.stat().st_size if original else 0)
+        except ValueError as exc:
+            raise HTTPException(507, str(exc)) from None
         input_hash = sha256(original) if original else None
         imported_source = read_provenance(private_path(settings.data, 'ingest'), data.source_file, data.meeting_id, input_hash)
         captions = private_path(settings.data, 'ingest', data.captions_file) if data.captions_file else None
@@ -121,6 +135,8 @@ def create_app(settings=None):
         with store.engine.begin() as conn:
             # Serialize idempotency checks including bytes and captured meeting version.
             conn.execute(sa.text('SELECT pg_advisory_xact_lock(1953721717)'))
+            if (settings.data/'background.stop').exists():
+                raise HTTPException(503, 'Recorder is stopping; retry setup before starting another recording')
             prior = conn.execute(sa.select(recordings).where(recordings.c.creator == principal['actor_id'],
                 recordings.c.idempotency_key == data.idempotency_key)).mappings().first()
             if prior:

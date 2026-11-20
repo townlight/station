@@ -14,12 +14,15 @@ header .brand{display:inline-flex;align-items:center;max-width:100%;flex-shrink:
 <nav aria-label="Main"><a href="../manuals/suite.html">Suite manual</a>
 <a href="../versions.html">Versions and Windows release</a>
 <a href="../terms.html">Terms and license</a></nav></header>
-<main id="main" class="reading wrap"><section id="windows-maintenance"><h2>Windows 1.8.2.1 maintenance release</h2><p>Windows 1.8.2.1 packages the staff authorization, explicit database configuration and component metadata corrections. Its exact signed installed checks cover setup, the 1.8.1.1 upgrade, saved staff records, procurement/Contracts handoffs, backup/restore and uninstall retention. Unchanged module and 31-source/34-format import evidence remains attributed to the earlier build that produced it; this is not a new exhaustive test of every module or live provider.</p><p>Windows 1.8.2.1 has signed installed acceptance for fresh setup and an in-place upgrade from Windows 1.8.1.1. Before upgrading, back up city data and settings, close Townlight, run the signed MSI, and reopen it under the same Windows account with the existing %LOCALAPPDATA%\CivicSuite profile. Keep the prior installer and a restore path. Other upgrade paths are unverified. Station uses its separately configured service. The acceptance summary distinguishes new maintenance checks from reused workflow evidence.</p><p><a href="https://github.com/townlight/townlight/releases/tag/townlight-windows-v1.8.2.1">Release and downloads</a> · <a href="https://github.com/townlight/townlight/releases/download/townlight-windows-v1.8.2.1/ACCEPTANCE-Windows-1.8.2.1.md">Acceptance and limits</a></p></section>
+<main id="main" class="reading wrap">
 <nav id="TOC" role="doc-toc">
 <ul>
 <li><a href="#windows-1.8.2.1-maintenance-release"
 id="toc-windows-1.8.2.1-maintenance-release">Windows 1.8.2.1 maintenance
 release</a></li>
+<li><a href="#windows-recorder-update-1.9.0.1-candidate-not-published"
+id="toc-windows-recorder-update-1.9.0.1-candidate-not-published">Windows
+recorder update — 1.9.0.1 candidate (not published)</a></li>
 <li><a href="#townlight-station-manual"
 id="toc-townlight-station-manual">Townlight Station Manual</a>
 <ul>
@@ -80,6 +83,85 @@ id="toc-delivery-subject-index">Delivery subject index</a></li>
 </nav>
 <h2 id="windows-1.8.2.1-maintenance-release">Windows 1.8.2.1 maintenance
 release</h2>
+<h2 id="windows-recorder-update-1.9.0.1-candidate-not-published">Windows
+recorder update — 1.9.0.1 candidate (not published)</h2>
+<p>This section describes the new candidate. The public 1.8.2.1 MSI does
+not acquire these capabilities until a new release is approved and
+published. Installed acceptance of this candidate is still pending.</p>
+<h3 id="clerk-and-operator">Clerk and operator</h3>
+<ol type="1">
+<li>Install Townlight and complete normal first-run setup with the full
+Windows profile or a custom selection that includes Meetings and Records
+(Station is bundled). Finishing setup provisions the bundled recorder, a
+private database and Windows sign-in task. No PostgreSQL, Python or
+media-runtime installation commands are needed. Existing installations
+use Settings → Modules → Townlight Station → <strong>Set up meeting
+recording</strong>.</li>
+<li>Keep Windows signed in and the computer awake while recording. The
+recorder runs in that user’s device-access session, independently of the
+Townlight window. It is not a multi-user server or a full PEG station.
+Closing the recorder tab does not stop a recording.</li>
+<li>Sign in with an existing authorized staff account. From Meetings
+choose <strong>Open / reconnect to meeting recorder</strong>. Select a
+meeting and its agenda items. In input setup, find devices, choose one
+camera/capture device and one microphone, and save. Record a ten-second
+input test, then play it to check the picture and sound; the meter
+responds during playback. This test clip is temporary and is not a
+canonical meeting record. Windows camera/microphone privacy settings and
+exclusive device use still apply. Configured UDP MPEG-TS input remains
+supported.</li>
+<li>Start the meeting recording. The default duration limit is eight
+hours, with a 64 GiB file limit and at least 1 GiB reserved disk space.
+Admission estimates the configured duration and bitrate. Free space is
+monitored while recording; low space or a limit requests a graceful stop
+and displays the reason. These are configured limits, not a claim that
+every eight-hour meeting has been tested. Plan space for the recording,
+its Records copy and backups. Sleep, sign-out, power failure and
+unavailable hardware can interrupt capture.</li>
+<li>An open operator page renews its fifteen-minute session against the
+current Townlight staff authority. Sign-out, revoked permissions and the
+underlying staff-session expiry still take effect. Reopen from Townlight
+to reconnect to an existing recording; reconnect never starts a second
+recording. Select <strong>Stop recording</strong> to drain and finalize
+the file.</li>
+<li>After completion, an authorized Records user selects a request and
+explicitly attaches the recording. Records streams a separate managed
+copy and verifies SHA-256, size and provenance; files up to 64 GiB are
+accepted subject to available space. Attachment is not public release.
+Review, redaction and publication remain separate Records
+decisions.</li>
+</ol>
+<h3 id="administrator-and-recovery">Administrator and recovery</h3>
+<p>Station setup uses bundled native dependencies and its existing
+pinned CivicCast media implementation; it never starts or changes
+CivicCast or CivicCast Lab. The per-user logon task owns a separate
+PostgreSQL instance on loopback port 15435; Station’s API listens only
+on 127.0.0.1:8756. Townlight’s existing staff authority remains on its
+configured Suite origin. Protected settings and database credentials
+remain in the recorder data directory, under the selected city data
+location. Setup refuses unrelated nonempty storage or an unrelated task
+with the same name. Retry setup after correcting readiness errors;
+inspect the private background, PostgreSQL, API and worker logs when
+needed.</p>
+<p>Use <strong>Check recorder readiness</strong>, <strong>Back up
+Station</strong>, and <strong>Restore Station backup</strong> in
+Settings → Modules. Finish queued and active recordings before backup or
+restore. Backups contain a PostgreSQL dump, recording/ingest files,
+saved source choices and a SHA-256 member manifest; they omit
+credentials and native executables. Restore verifies the members,
+creates a pre-restore recovery copy, and restores into this
+installation’s separately protected database. Recheck input selection
+afterward. A Suite backup includes a coherent Station backup when
+paired; it does not copy the running Station database or its secrets.
+Suite restore preserves that live private directory and applies the
+included Station backup separately.</p>
+<pre class="mermaid"><code>flowchart LR
+    Staff[Existing Townlight staff authority] --&gt; Operator[Station operator]
+    Camera[Camera and microphone or UDP feed] --&gt; Recorder[Per-user background recorder]
+    Operator --&gt; Recorder
+    Recorder --&gt; Private[Private Station database and recording]
+    Private --&gt;|Explicit hash-verified attachment| Records[Records managed copy]
+    Records --&gt; Review[Separate review and release decision]</code></pre>
 <p>Windows 1.8.2.1 packages the staff authorization, explicit database
 configuration and component metadata corrections. Its exact signed
 installed checks cover setup, the 1.8.1.1 upgrade, saved staff records,
@@ -267,7 +349,7 @@ new Townlight profile for first run.</p>
 <ol type="1">
 <li>Download the signed MSI, matching source companion and checksums
 from the <a
-href="https://github.com/townlight/townlight/releases/tag/townlight-windows-v1.8.2.1">public
+href="https://github.com/townlight/townlight/releases/tag/townlight-windows-v1.8.1.1">public
 Windows release</a>.</li>
 <li>Verify the MSI hash and Authenticode publisher before installation.
 See the <a
@@ -416,8 +498,8 @@ that computer’s timezone before entering a city meeting time. A direct
 API client should send an explicit timezone offset or <code>Z</code>; a
 timezone-less API datetime is interpreted as UTC. A synthetic
 <code>POST /v1/schedules</code> body is:</p>
-<div class="sourceCode" id="cb1"><pre
-class="sourceCode json"><code class="sourceCode json"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a><span class="fu">{</span><span class="dt">&quot;meeting_id&quot;</span><span class="fu">:</span><span class="st">&quot;11111111-1111-4111-8111-111111111111&quot;</span><span class="fu">,</span><span class="dt">&quot;agenda_ids&quot;</span><span class="fu">:</span><span class="ot">[]</span><span class="fu">,</span><span class="dt">&quot;source_file&quot;</span><span class="fu">:</span><span class="st">&quot;synthetic-program.mp4&quot;</span><span class="fu">,</span><span class="dt">&quot;captions_file&quot;</span><span class="fu">:</span><span class="st">&quot;synthetic-captions.srt&quot;</span><span class="fu">,</span><span class="dt">&quot;start_at&quot;</span><span class="fu">:</span><span class="st">&quot;2026-11-05T18:00:00-07:00&quot;</span><span class="fu">,</span><span class="dt">&quot;idempotency_key&quot;</span><span class="fu">:</span><span class="st">&quot;synthetic-schedule-001&quot;</span><span class="fu">}</span></span></code></pre></div>
+<div class="sourceCode" id="cb2"><pre
+class="sourceCode json"><code class="sourceCode json"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a><span class="fu">{</span><span class="dt">&quot;meeting_id&quot;</span><span class="fu">:</span><span class="st">&quot;11111111-1111-4111-8111-111111111111&quot;</span><span class="fu">,</span><span class="dt">&quot;agenda_ids&quot;</span><span class="fu">:</span><span class="ot">[]</span><span class="fu">,</span><span class="dt">&quot;source_file&quot;</span><span class="fu">:</span><span class="st">&quot;synthetic-program.mp4&quot;</span><span class="fu">,</span><span class="dt">&quot;captions_file&quot;</span><span class="fu">:</span><span class="st">&quot;synthetic-captions.srt&quot;</span><span class="fu">,</span><span class="dt">&quot;start_at&quot;</span><span class="fu">:</span><span class="st">&quot;2026-11-05T18:00:00-07:00&quot;</span><span class="fu">,</span><span class="dt">&quot;idempotency_key&quot;</span><span class="fu">:</span><span class="st">&quot;synthetic-schedule-001&quot;</span><span class="fu">}</span></span></code></pre></div>
 <p>Use a real synthetic meeting ID and intended future exercise time,
 with files already in managed ingest. The body selects exactly one file
 or configured live source; a live source cannot use a sidecar. Reusing
@@ -454,8 +536,8 @@ select <strong>Commit to air</strong>, which uses
 <code>mode: commit</code>. Wait for the playout to be
 <code>complete</code>; failed rendering is not a successful switch.</p>
 <p>Equivalent <code>POST /v1/playouts</code> input is:</p>
-<div class="sourceCode" id="cb2"><pre
-class="sourceCode json"><code class="sourceCode json"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a><span class="fu">{</span><span class="dt">&quot;recording_id&quot;</span><span class="fu">:</span><span class="st">&quot;22222222-2222-4222-8222-222222222222&quot;</span><span class="fu">,</span><span class="dt">&quot;mode&quot;</span><span class="fu">:</span><span class="st">&quot;dry-run&quot;</span><span class="fu">,</span><span class="dt">&quot;idempotency_key&quot;</span><span class="fu">:</span><span class="st">&quot;synthetic-playout-check-001&quot;</span><span class="fu">}</span></span></code></pre></div>
+<div class="sourceCode" id="cb3"><pre
+class="sourceCode json"><code class="sourceCode json"><span id="cb3-1"><a href="#cb3-1" aria-hidden="true" tabindex="-1"></a><span class="fu">{</span><span class="dt">&quot;recording_id&quot;</span><span class="fu">:</span><span class="st">&quot;22222222-2222-4222-8222-222222222222&quot;</span><span class="fu">,</span><span class="dt">&quot;mode&quot;</span><span class="fu">:</span><span class="st">&quot;dry-run&quot;</span><span class="fu">,</span><span class="dt">&quot;idempotency_key&quot;</span><span class="fu">:</span><span class="st">&quot;synthetic-playout-check-001&quot;</span><span class="fu">}</span></span></code></pre></div>
 <p>Replace the recording ID with completed synthetic evidence. A
 separate deliberate commit uses <code>mode: commit</code> and a new key;
 do not reuse the check’s key with a changed mode. Inspect the returned
@@ -672,26 +754,26 @@ test configuration</h3>
 Windows user. Keep this session for startup and shutdown. The dedicated
 parent holds configuration/logs; its <code>data</code> child is
 Station’s initially empty managed store.</p>
-<div class="sourceCode" id="cb3"><pre
-class="sourceCode powershell"><code class="sourceCode powershell"><span id="cb3-1"><a href="#cb3-1" aria-hidden="true" tabindex="-1"></a><span class="va">$profilePath</span> <span class="op">=</span> <span class="fu">Join-Path</span> <span class="va">$env</span><span class="op">:</span><span class="va">LOCALAPPDATA</span> <span class="st">&#39;CivicSuite&#39;</span></span>
-<span id="cb3-2"><a href="#cb3-2" aria-hidden="true" tabindex="-1"></a><span class="va">$control</span> <span class="op">=</span> <span class="fu">Join-Path</span> <span class="va">$profilePath</span> <span class="st">&#39;runtime\python\python.exe&#39;</span></span>
-<span id="cb3-3"><a href="#cb3-3" aria-hidden="true" tabindex="-1"></a><span class="va">$payload</span> <span class="op">=</span> <span class="st">&#39;C:\Program Files\Townlight\_up_\runtime\payload\station&#39;</span></span>
-<span id="cb3-4"><a href="#cb3-4" aria-hidden="true" tabindex="-1"></a><span class="va">$stationRoot</span> <span class="op">=</span> <span class="fu">Join-Path</span> <span class="va">$env</span><span class="op">:</span><span class="va">LOCALAPPDATA</span> <span class="st">&#39;TownlightStation-Synthetic&#39;</span></span>
-<span id="cb3-5"><a href="#cb3-5" aria-hidden="true" tabindex="-1"></a><span class="cf">if</span> <span class="op">(-not</span> <span class="op">(</span><span class="fu">Test-Path</span> <span class="op">-</span>LiteralPath <span class="va">$control</span><span class="op">))</span> <span class="op">{</span> <span class="cf">throw</span> <span class="st">&#39;Complete normal Townlight setup first.&#39;</span> <span class="op">}</span></span>
-<span id="cb3-6"><a href="#cb3-6" aria-hidden="true" tabindex="-1"></a><span class="cf">if</span> <span class="op">(</span><span class="fu">Test-Path</span> <span class="op">-</span>LiteralPath <span class="va">$stationRoot</span><span class="op">)</span> <span class="op">{</span> <span class="cf">throw</span> <span class="st">&#39;Existing Station directory: inspect it; do not overwrite.&#39;</span> <span class="op">}</span></span>
-<span id="cb3-7"><a href="#cb3-7" aria-hidden="true" tabindex="-1"></a><span class="fu">New-Item</span> <span class="op">-</span>ItemType Directory <span class="op">-</span>Path <span class="va">$stationRoot</span> <span class="op">|</span> <span class="fu">Out-Null</span></span>
-<span id="cb3-8"><a href="#cb3-8" aria-hidden="true" tabindex="-1"></a><span class="va">$account</span> <span class="op">=</span> <span class="op">[</span>System<span class="op">.</span><span class="fu">Security</span><span class="op">.</span><span class="fu">Principal</span><span class="op">.</span><span class="fu">WindowsIdentity</span><span class="op">]::</span>GetCurrent<span class="op">().</span><span class="fu">Name</span></span>
-<span id="cb3-9"><a href="#cb3-9" aria-hidden="true" tabindex="-1"></a><span class="op">&amp;</span> icacls<span class="op">.</span><span class="fu">exe</span> <span class="va">$stationRoot</span> <span class="op">/</span>inheritance<span class="op">:</span>r <span class="op">/</span>grant<span class="op">:</span>r <span class="st">&quot;</span><span class="pp">${</span><span class="va">account</span><span class="pp">}</span><span class="st">:(OI)(CI)F&quot;</span> <span class="st">&#39;*S-1-5-18:(OI)(CI)F&#39;</span> <span class="op">|</span> <span class="fu">Out-Null</span></span>
-<span id="cb3-10"><a href="#cb3-10" aria-hidden="true" tabindex="-1"></a><span class="cf">if</span> <span class="op">(</span><span class="va">$LASTEXITCODE</span> <span class="op">-ne</span> <span class="dv">0</span><span class="op">)</span> <span class="op">{</span> <span class="cf">throw</span> <span class="st">&#39;Cannot protect Station configuration directory.&#39;</span> <span class="op">}</span></span>
-<span id="cb3-11"><a href="#cb3-11" aria-hidden="true" tabindex="-1"></a><span class="fu">New-Item</span> <span class="op">-</span>ItemType Directory <span class="op">-</span>Path <span class="op">(</span><span class="fu">Join-Path</span> <span class="va">$stationRoot</span> <span class="st">&#39;data&#39;</span><span class="op">),(</span><span class="fu">Join-Path</span> <span class="va">$stationRoot</span> <span class="st">&#39;logs&#39;</span><span class="op">)</span> <span class="op">|</span> <span class="fu">Out-Null</span></span>
-<span id="cb3-12"><a href="#cb3-12" aria-hidden="true" tabindex="-1"></a><span class="va">$rng</span> <span class="op">=</span> <span class="op">[</span>System<span class="op">.</span><span class="fu">Security</span><span class="op">.</span><span class="fu">Cryptography</span><span class="op">.</span><span class="fu">RandomNumberGenerator</span><span class="op">]::</span>Create<span class="op">()</span></span>
-<span id="cb3-13"><a href="#cb3-13" aria-hidden="true" tabindex="-1"></a><span class="va">$randomBytes</span> <span class="op">=</span> <span class="fu">New-Object</span> byte<span class="op">[]</span> <span class="dv">32</span></span>
-<span id="cb3-14"><a href="#cb3-14" aria-hidden="true" tabindex="-1"></a><span class="va">$rng</span><span class="op">.</span><span class="fu">GetBytes</span><span class="op">(</span><span class="va">$randomBytes</span><span class="op">)</span></span>
-<span id="cb3-15"><a href="#cb3-15" aria-hidden="true" tabindex="-1"></a><span class="va">$rng</span><span class="op">.</span><span class="fu">Dispose</span><span class="op">()</span></span>
-<span id="cb3-16"><a href="#cb3-16" aria-hidden="true" tabindex="-1"></a><span class="va">$stationPassword</span> <span class="op">=</span> <span class="op">-join</span> <span class="op">(</span><span class="va">$randomBytes</span> <span class="op">|</span> <span class="fu">ForEach-Object</span> <span class="op">{</span> <span class="va">$_</span><span class="op">.</span><span class="fu">ToString</span><span class="op">(</span><span class="st">&#39;x2&#39;</span><span class="op">)</span> <span class="op">})</span></span>
-<span id="cb3-17"><a href="#cb3-17" aria-hidden="true" tabindex="-1"></a><span class="va">$stationPassword</span> <span class="op">|</span> <span class="fu">ConvertTo-SecureString</span> <span class="op">-</span>AsPlainText <span class="op">-</span>Force <span class="op">|</span> <span class="fu">ConvertFrom-SecureString</span> <span class="op">|</span></span>
-<span id="cb3-18"><a href="#cb3-18" aria-hidden="true" tabindex="-1"></a>  <span class="fu">Set-Content</span> <span class="op">-</span>LiteralPath <span class="op">(</span><span class="fu">Join-Path</span> <span class="va">$stationRoot</span> <span class="st">&#39;station-password.dpapi&#39;</span><span class="op">)</span></span>
-<span id="cb3-19"><a href="#cb3-19" aria-hidden="true" tabindex="-1"></a><span class="fu">Remove-Variable</span> stationPassword<span class="op">,</span>randomBytes</span></code></pre></div>
+<div class="sourceCode" id="cb4"><pre
+class="sourceCode powershell"><code class="sourceCode powershell"><span id="cb4-1"><a href="#cb4-1" aria-hidden="true" tabindex="-1"></a><span class="va">$profilePath</span> <span class="op">=</span> <span class="fu">Join-Path</span> <span class="va">$env</span><span class="op">:</span><span class="va">LOCALAPPDATA</span> <span class="st">&#39;CivicSuite&#39;</span></span>
+<span id="cb4-2"><a href="#cb4-2" aria-hidden="true" tabindex="-1"></a><span class="va">$control</span> <span class="op">=</span> <span class="fu">Join-Path</span> <span class="va">$profilePath</span> <span class="st">&#39;runtime\python\python.exe&#39;</span></span>
+<span id="cb4-3"><a href="#cb4-3" aria-hidden="true" tabindex="-1"></a><span class="va">$payload</span> <span class="op">=</span> <span class="st">&#39;C:\Program Files\Townlight\_up_\runtime\payload\station&#39;</span></span>
+<span id="cb4-4"><a href="#cb4-4" aria-hidden="true" tabindex="-1"></a><span class="va">$stationRoot</span> <span class="op">=</span> <span class="fu">Join-Path</span> <span class="va">$env</span><span class="op">:</span><span class="va">LOCALAPPDATA</span> <span class="st">&#39;TownlightStation-Synthetic&#39;</span></span>
+<span id="cb4-5"><a href="#cb4-5" aria-hidden="true" tabindex="-1"></a><span class="cf">if</span> <span class="op">(-not</span> <span class="op">(</span><span class="fu">Test-Path</span> <span class="op">-</span>LiteralPath <span class="va">$control</span><span class="op">))</span> <span class="op">{</span> <span class="cf">throw</span> <span class="st">&#39;Complete normal Townlight setup first.&#39;</span> <span class="op">}</span></span>
+<span id="cb4-6"><a href="#cb4-6" aria-hidden="true" tabindex="-1"></a><span class="cf">if</span> <span class="op">(</span><span class="fu">Test-Path</span> <span class="op">-</span>LiteralPath <span class="va">$stationRoot</span><span class="op">)</span> <span class="op">{</span> <span class="cf">throw</span> <span class="st">&#39;Existing Station directory: inspect it; do not overwrite.&#39;</span> <span class="op">}</span></span>
+<span id="cb4-7"><a href="#cb4-7" aria-hidden="true" tabindex="-1"></a><span class="fu">New-Item</span> <span class="op">-</span>ItemType Directory <span class="op">-</span>Path <span class="va">$stationRoot</span> <span class="op">|</span> <span class="fu">Out-Null</span></span>
+<span id="cb4-8"><a href="#cb4-8" aria-hidden="true" tabindex="-1"></a><span class="va">$account</span> <span class="op">=</span> <span class="op">[</span>System<span class="op">.</span><span class="fu">Security</span><span class="op">.</span><span class="fu">Principal</span><span class="op">.</span><span class="fu">WindowsIdentity</span><span class="op">]::</span>GetCurrent<span class="op">().</span><span class="fu">Name</span></span>
+<span id="cb4-9"><a href="#cb4-9" aria-hidden="true" tabindex="-1"></a><span class="op">&amp;</span> icacls<span class="op">.</span><span class="fu">exe</span> <span class="va">$stationRoot</span> <span class="op">/</span>inheritance<span class="op">:</span>r <span class="op">/</span>grant<span class="op">:</span>r <span class="st">&quot;</span><span class="pp">${</span><span class="va">account</span><span class="pp">}</span><span class="st">:(OI)(CI)F&quot;</span> <span class="st">&#39;*S-1-5-18:(OI)(CI)F&#39;</span> <span class="op">|</span> <span class="fu">Out-Null</span></span>
+<span id="cb4-10"><a href="#cb4-10" aria-hidden="true" tabindex="-1"></a><span class="cf">if</span> <span class="op">(</span><span class="va">$LASTEXITCODE</span> <span class="op">-ne</span> <span class="dv">0</span><span class="op">)</span> <span class="op">{</span> <span class="cf">throw</span> <span class="st">&#39;Cannot protect Station configuration directory.&#39;</span> <span class="op">}</span></span>
+<span id="cb4-11"><a href="#cb4-11" aria-hidden="true" tabindex="-1"></a><span class="fu">New-Item</span> <span class="op">-</span>ItemType Directory <span class="op">-</span>Path <span class="op">(</span><span class="fu">Join-Path</span> <span class="va">$stationRoot</span> <span class="st">&#39;data&#39;</span><span class="op">),(</span><span class="fu">Join-Path</span> <span class="va">$stationRoot</span> <span class="st">&#39;logs&#39;</span><span class="op">)</span> <span class="op">|</span> <span class="fu">Out-Null</span></span>
+<span id="cb4-12"><a href="#cb4-12" aria-hidden="true" tabindex="-1"></a><span class="va">$rng</span> <span class="op">=</span> <span class="op">[</span>System<span class="op">.</span><span class="fu">Security</span><span class="op">.</span><span class="fu">Cryptography</span><span class="op">.</span><span class="fu">RandomNumberGenerator</span><span class="op">]::</span>Create<span class="op">()</span></span>
+<span id="cb4-13"><a href="#cb4-13" aria-hidden="true" tabindex="-1"></a><span class="va">$randomBytes</span> <span class="op">=</span> <span class="fu">New-Object</span> byte<span class="op">[]</span> <span class="dv">32</span></span>
+<span id="cb4-14"><a href="#cb4-14" aria-hidden="true" tabindex="-1"></a><span class="va">$rng</span><span class="op">.</span><span class="fu">GetBytes</span><span class="op">(</span><span class="va">$randomBytes</span><span class="op">)</span></span>
+<span id="cb4-15"><a href="#cb4-15" aria-hidden="true" tabindex="-1"></a><span class="va">$rng</span><span class="op">.</span><span class="fu">Dispose</span><span class="op">()</span></span>
+<span id="cb4-16"><a href="#cb4-16" aria-hidden="true" tabindex="-1"></a><span class="va">$stationPassword</span> <span class="op">=</span> <span class="op">-join</span> <span class="op">(</span><span class="va">$randomBytes</span> <span class="op">|</span> <span class="fu">ForEach-Object</span> <span class="op">{</span> <span class="va">$_</span><span class="op">.</span><span class="fu">ToString</span><span class="op">(</span><span class="st">&#39;x2&#39;</span><span class="op">)</span> <span class="op">})</span></span>
+<span id="cb4-17"><a href="#cb4-17" aria-hidden="true" tabindex="-1"></a><span class="va">$stationPassword</span> <span class="op">|</span> <span class="fu">ConvertTo-SecureString</span> <span class="op">-</span>AsPlainText <span class="op">-</span>Force <span class="op">|</span> <span class="fu">ConvertFrom-SecureString</span> <span class="op">|</span></span>
+<span id="cb4-18"><a href="#cb4-18" aria-hidden="true" tabindex="-1"></a>  <span class="fu">Set-Content</span> <span class="op">-</span>LiteralPath <span class="op">(</span><span class="fu">Join-Path</span> <span class="va">$stationRoot</span> <span class="st">&#39;station-password.dpapi&#39;</span><span class="op">)</span></span>
+<span id="cb4-19"><a href="#cb4-19" aria-hidden="true" tabindex="-1"></a><span class="fu">Remove-Variable</span> stationPassword<span class="op">,</span>randomBytes</span></code></pre></div>
 <p>The password file uses the current Windows user’s DPAPI protection.
 It is not portable to a different user or machine without an explicit
 credential/recovery decision. Keep it out of source control, support
@@ -702,32 +784,32 @@ later restart, set <code>$profilePath</code>, <code>$control</code>,
 <code>$payload</code> and <code>$stationRoot</code> to these same
 existing locations, then repeat this environment/start section,
 <strong>not</strong> the first-time provisioning section.</p>
-<div class="sourceCode" id="cb4"><pre
-class="sourceCode powershell"><code class="sourceCode powershell"><span id="cb4-1"><a href="#cb4-1" aria-hidden="true" tabindex="-1"></a><span class="va">$secret</span> <span class="op">=</span> <span class="fu">Get-Content</span> <span class="op">-</span>LiteralPath <span class="op">(</span><span class="fu">Join-Path</span> <span class="va">$stationRoot</span> <span class="st">&#39;station-password.dpapi&#39;</span><span class="op">)</span> <span class="op">-</span>Raw <span class="op">|</span></span>
-<span id="cb4-2"><a href="#cb4-2" aria-hidden="true" tabindex="-1"></a>  <span class="fu">ConvertTo-SecureString</span></span>
-<span id="cb4-3"><a href="#cb4-3" aria-hidden="true" tabindex="-1"></a><span class="va">$stationPassword</span> <span class="op">=</span> <span class="op">[</span>System<span class="op">.</span><span class="fu">Net</span><span class="op">.</span><span class="fu">NetworkCredential</span><span class="op">]::</span>new<span class="op">(</span><span class="st">&#39;&#39;</span><span class="op">,</span> <span class="va">$secret</span><span class="op">).</span><span class="fu">Password</span></span>
-<span id="cb4-4"><a href="#cb4-4" aria-hidden="true" tabindex="-1"></a><span class="va">$nativePassword</span> <span class="op">=</span> <span class="op">(</span><span class="fu">Get-Content</span> <span class="op">-</span>LiteralPath <span class="op">(</span><span class="fu">Join-Path</span> <span class="va">$profilePath</span> <span class="st">&#39;config\secrets\postgres-password.txt&#39;</span><span class="op">)</span> <span class="op">-</span>Raw<span class="op">).</span><span class="fu">Trim</span><span class="op">()</span></span>
-<span id="cb4-5"><a href="#cb4-5" aria-hidden="true" tabindex="-1"></a><span class="va">$encodedNative</span> <span class="op">=</span> <span class="op">[</span>uri<span class="op">]::</span>EscapeDataString<span class="op">(</span><span class="va">$nativePassword</span><span class="op">)</span></span>
-<span id="cb4-6"><a href="#cb4-6" aria-hidden="true" tabindex="-1"></a><span class="va">$env</span><span class="op">:</span><span class="va">TOWNLIGHT_PROFILE_ROOT</span> <span class="op">=</span> <span class="va">$profilePath</span></span>
-<span id="cb4-7"><a href="#cb4-7" aria-hidden="true" tabindex="-1"></a><span class="va">$env</span><span class="op">:</span><span class="va">TOWNLIGHT_DATA_DIR</span> <span class="op">=</span> <span class="fu">Join-Path</span> <span class="va">$profilePath</span> <span class="st">&#39;Data&#39;</span></span>
-<span id="cb4-8"><a href="#cb4-8" aria-hidden="true" tabindex="-1"></a><span class="va">$env</span><span class="op">:</span><span class="va">TOWNLIGHT_FILE_STORAGE_DIR</span> <span class="op">=</span> <span class="fu">Join-Path</span> <span class="va">$profilePath</span> <span class="st">&#39;Data\files&#39;</span></span>
-<span id="cb4-9"><a href="#cb4-9" aria-hidden="true" tabindex="-1"></a><span class="va">$env</span><span class="op">:</span><span class="va">DATABASE_URL</span> <span class="op">=</span> <span class="st">&quot;postgresql+asyncpg://townlight:</span><span class="pp">${</span><span class="va">encodedNative</span><span class="pp">}</span><span class="st">@127.0.0.1:15432/townlight&quot;</span></span>
-<span id="cb4-10"><a href="#cb4-10" aria-hidden="true" tabindex="-1"></a><span class="va">$env</span><span class="op">:</span><span class="va">TOWNLIGHT_PRODUCT_PROFILE</span> <span class="op">=</span> <span class="st">&#39;inspections-preview&#39;</span></span>
-<span id="cb4-11"><a href="#cb4-11" aria-hidden="true" tabindex="-1"></a><span class="va">$env</span><span class="op">:</span><span class="va">PORTAL_MODE</span> <span class="op">=</span> <span class="st">&#39;private&#39;</span></span>
-<span id="cb4-12"><a href="#cb4-12" aria-hidden="true" tabindex="-1"></a><span class="va">$env</span><span class="op">:</span><span class="va">TOWNLIGHT_RUNTIME_HOST</span> <span class="op">=</span> <span class="st">&#39;127.0.0.1&#39;</span></span>
-<span id="cb4-13"><a href="#cb4-13" aria-hidden="true" tabindex="-1"></a><span class="va">$env</span><span class="op">:</span><span class="va">TOWNLIGHT_RUNTIME_PORT</span> <span class="op">=</span> <span class="st">&#39;15481&#39;</span></span>
-<span id="cb4-14"><a href="#cb4-14" aria-hidden="true" tabindex="-1"></a><span class="va">$env</span><span class="op">:</span><span class="va">TOWNLIGHT_STATION_URL</span> <span class="op">=</span> <span class="st">&#39;http://127.0.0.1:8756&#39;</span></span>
-<span id="cb4-15"><a href="#cb4-15" aria-hidden="true" tabindex="-1"></a><span class="va">$env</span><span class="op">:</span><span class="va">TOWNLIGHT_STATION_SUITE_URL</span> <span class="op">=</span> <span class="st">&#39;http://127.0.0.1:15481&#39;</span></span>
-<span id="cb4-16"><a href="#cb4-16" aria-hidden="true" tabindex="-1"></a><span class="va">$env</span><span class="op">:</span><span class="va">TOWNLIGHT_STATION_DATA_ROOT</span> <span class="op">=</span> <span class="fu">Join-Path</span> <span class="va">$stationRoot</span> <span class="st">&#39;data&#39;</span></span>
-<span id="cb4-17"><a href="#cb4-17" aria-hidden="true" tabindex="-1"></a><span class="va">$env</span><span class="op">:</span><span class="va">TOWNLIGHT_STATION_DATABASE_URL</span> <span class="op">=</span> <span class="st">&quot;postgresql+psycopg2://townlight_beta_station_app:</span><span class="pp">${</span><span class="va">stationPassword</span><span class="pp">}</span><span class="st">@127.0.0.1:15432/townlight_beta_station&quot;</span></span>
-<span id="cb4-18"><a href="#cb4-18" aria-hidden="true" tabindex="-1"></a><span class="va">$env</span><span class="op">:</span><span class="va">TOWNLIGHT_STATION_MEDIA_SOURCE</span> <span class="op">=</span> <span class="fu">Join-Path</span> <span class="va">$payload</span> <span class="st">&#39;media-source&#39;</span></span>
-<span id="cb4-19"><a href="#cb4-19" aria-hidden="true" tabindex="-1"></a><span class="va">$env</span><span class="op">:</span><span class="va">TOWNLIGHT_STATION_MEDIA_PYTHON</span> <span class="op">=</span> <span class="fu">Join-Path</span> <span class="va">$payload</span> <span class="st">&#39;runtime\python.exe&#39;</span></span>
-<span id="cb4-20"><a href="#cb4-20" aria-hidden="true" tabindex="-1"></a><span class="va">$env</span><span class="op">:</span><span class="va">TOWNLIGHT_STATION_MEDIA_RUNTIME</span> <span class="op">=</span> <span class="fu">Join-Path</span> <span class="va">$payload</span> <span class="st">&#39;runtime&#39;</span></span>
-<span id="cb4-21"><a href="#cb4-21" aria-hidden="true" tabindex="-1"></a><span class="va">$env</span><span class="op">:</span><span class="va">TOWNLIGHT_STATION_FFPROBE</span> <span class="op">=</span> <span class="fu">Join-Path</span> <span class="va">$payload</span> <span class="st">&#39;bin\ffprobe.exe&#39;</span></span>
-<span id="cb4-22"><a href="#cb4-22" aria-hidden="true" tabindex="-1"></a><span class="va">$env</span><span class="op">:</span><span class="va">PYTHONNOUSERSITE</span> <span class="op">=</span> <span class="st">&#39;1&#39;</span></span>
-<span id="cb4-23"><a href="#cb4-23" aria-hidden="true" tabindex="-1"></a><span class="va">$env</span><span class="op">:</span><span class="va">PYTHONDONTWRITEBYTECODE</span> <span class="op">=</span> <span class="st">&#39;1&#39;</span></span>
-<span id="cb4-24"><a href="#cb4-24" aria-hidden="true" tabindex="-1"></a><span class="fu">Remove-Item</span> Env<span class="op">:</span>PYTHONPATH <span class="op">-</span>ErrorAction SilentlyContinue</span>
-<span id="cb4-25"><a href="#cb4-25" aria-hidden="true" tabindex="-1"></a><span class="fu">Remove-Variable</span> nativePassword<span class="op">,</span>encodedNative<span class="op">,</span>stationPassword<span class="op">,</span>secret</span></code></pre></div>
+<div class="sourceCode" id="cb5"><pre
+class="sourceCode powershell"><code class="sourceCode powershell"><span id="cb5-1"><a href="#cb5-1" aria-hidden="true" tabindex="-1"></a><span class="va">$secret</span> <span class="op">=</span> <span class="fu">Get-Content</span> <span class="op">-</span>LiteralPath <span class="op">(</span><span class="fu">Join-Path</span> <span class="va">$stationRoot</span> <span class="st">&#39;station-password.dpapi&#39;</span><span class="op">)</span> <span class="op">-</span>Raw <span class="op">|</span></span>
+<span id="cb5-2"><a href="#cb5-2" aria-hidden="true" tabindex="-1"></a>  <span class="fu">ConvertTo-SecureString</span></span>
+<span id="cb5-3"><a href="#cb5-3" aria-hidden="true" tabindex="-1"></a><span class="va">$stationPassword</span> <span class="op">=</span> <span class="op">[</span>System<span class="op">.</span><span class="fu">Net</span><span class="op">.</span><span class="fu">NetworkCredential</span><span class="op">]::</span>new<span class="op">(</span><span class="st">&#39;&#39;</span><span class="op">,</span> <span class="va">$secret</span><span class="op">).</span><span class="fu">Password</span></span>
+<span id="cb5-4"><a href="#cb5-4" aria-hidden="true" tabindex="-1"></a><span class="va">$nativePassword</span> <span class="op">=</span> <span class="op">(</span><span class="fu">Get-Content</span> <span class="op">-</span>LiteralPath <span class="op">(</span><span class="fu">Join-Path</span> <span class="va">$profilePath</span> <span class="st">&#39;config\secrets\postgres-password.txt&#39;</span><span class="op">)</span> <span class="op">-</span>Raw<span class="op">).</span><span class="fu">Trim</span><span class="op">()</span></span>
+<span id="cb5-5"><a href="#cb5-5" aria-hidden="true" tabindex="-1"></a><span class="va">$encodedNative</span> <span class="op">=</span> <span class="op">[</span>uri<span class="op">]::</span>EscapeDataString<span class="op">(</span><span class="va">$nativePassword</span><span class="op">)</span></span>
+<span id="cb5-6"><a href="#cb5-6" aria-hidden="true" tabindex="-1"></a><span class="va">$env</span><span class="op">:</span><span class="va">TOWNLIGHT_PROFILE_ROOT</span> <span class="op">=</span> <span class="va">$profilePath</span></span>
+<span id="cb5-7"><a href="#cb5-7" aria-hidden="true" tabindex="-1"></a><span class="va">$env</span><span class="op">:</span><span class="va">TOWNLIGHT_DATA_DIR</span> <span class="op">=</span> <span class="fu">Join-Path</span> <span class="va">$profilePath</span> <span class="st">&#39;Data&#39;</span></span>
+<span id="cb5-8"><a href="#cb5-8" aria-hidden="true" tabindex="-1"></a><span class="va">$env</span><span class="op">:</span><span class="va">TOWNLIGHT_FILE_STORAGE_DIR</span> <span class="op">=</span> <span class="fu">Join-Path</span> <span class="va">$profilePath</span> <span class="st">&#39;Data\files&#39;</span></span>
+<span id="cb5-9"><a href="#cb5-9" aria-hidden="true" tabindex="-1"></a><span class="va">$env</span><span class="op">:</span><span class="va">DATABASE_URL</span> <span class="op">=</span> <span class="st">&quot;postgresql+asyncpg://townlight:</span><span class="pp">${</span><span class="va">encodedNative</span><span class="pp">}</span><span class="st">@127.0.0.1:15432/townlight&quot;</span></span>
+<span id="cb5-10"><a href="#cb5-10" aria-hidden="true" tabindex="-1"></a><span class="va">$env</span><span class="op">:</span><span class="va">TOWNLIGHT_PRODUCT_PROFILE</span> <span class="op">=</span> <span class="st">&#39;inspections-preview&#39;</span></span>
+<span id="cb5-11"><a href="#cb5-11" aria-hidden="true" tabindex="-1"></a><span class="va">$env</span><span class="op">:</span><span class="va">PORTAL_MODE</span> <span class="op">=</span> <span class="st">&#39;private&#39;</span></span>
+<span id="cb5-12"><a href="#cb5-12" aria-hidden="true" tabindex="-1"></a><span class="va">$env</span><span class="op">:</span><span class="va">TOWNLIGHT_RUNTIME_HOST</span> <span class="op">=</span> <span class="st">&#39;127.0.0.1&#39;</span></span>
+<span id="cb5-13"><a href="#cb5-13" aria-hidden="true" tabindex="-1"></a><span class="va">$env</span><span class="op">:</span><span class="va">TOWNLIGHT_RUNTIME_PORT</span> <span class="op">=</span> <span class="st">&#39;15481&#39;</span></span>
+<span id="cb5-14"><a href="#cb5-14" aria-hidden="true" tabindex="-1"></a><span class="va">$env</span><span class="op">:</span><span class="va">TOWNLIGHT_STATION_URL</span> <span class="op">=</span> <span class="st">&#39;http://127.0.0.1:8756&#39;</span></span>
+<span id="cb5-15"><a href="#cb5-15" aria-hidden="true" tabindex="-1"></a><span class="va">$env</span><span class="op">:</span><span class="va">TOWNLIGHT_STATION_SUITE_URL</span> <span class="op">=</span> <span class="st">&#39;http://127.0.0.1:15481&#39;</span></span>
+<span id="cb5-16"><a href="#cb5-16" aria-hidden="true" tabindex="-1"></a><span class="va">$env</span><span class="op">:</span><span class="va">TOWNLIGHT_STATION_DATA_ROOT</span> <span class="op">=</span> <span class="fu">Join-Path</span> <span class="va">$stationRoot</span> <span class="st">&#39;data&#39;</span></span>
+<span id="cb5-17"><a href="#cb5-17" aria-hidden="true" tabindex="-1"></a><span class="va">$env</span><span class="op">:</span><span class="va">TOWNLIGHT_STATION_DATABASE_URL</span> <span class="op">=</span> <span class="st">&quot;postgresql+psycopg2://townlight_beta_station_app:</span><span class="pp">${</span><span class="va">stationPassword</span><span class="pp">}</span><span class="st">@127.0.0.1:15432/townlight_beta_station&quot;</span></span>
+<span id="cb5-18"><a href="#cb5-18" aria-hidden="true" tabindex="-1"></a><span class="va">$env</span><span class="op">:</span><span class="va">TOWNLIGHT_STATION_MEDIA_SOURCE</span> <span class="op">=</span> <span class="fu">Join-Path</span> <span class="va">$payload</span> <span class="st">&#39;media-source&#39;</span></span>
+<span id="cb5-19"><a href="#cb5-19" aria-hidden="true" tabindex="-1"></a><span class="va">$env</span><span class="op">:</span><span class="va">TOWNLIGHT_STATION_MEDIA_PYTHON</span> <span class="op">=</span> <span class="fu">Join-Path</span> <span class="va">$payload</span> <span class="st">&#39;runtime\python.exe&#39;</span></span>
+<span id="cb5-20"><a href="#cb5-20" aria-hidden="true" tabindex="-1"></a><span class="va">$env</span><span class="op">:</span><span class="va">TOWNLIGHT_STATION_MEDIA_RUNTIME</span> <span class="op">=</span> <span class="fu">Join-Path</span> <span class="va">$payload</span> <span class="st">&#39;runtime&#39;</span></span>
+<span id="cb5-21"><a href="#cb5-21" aria-hidden="true" tabindex="-1"></a><span class="va">$env</span><span class="op">:</span><span class="va">TOWNLIGHT_STATION_FFPROBE</span> <span class="op">=</span> <span class="fu">Join-Path</span> <span class="va">$payload</span> <span class="st">&#39;bin\ffprobe.exe&#39;</span></span>
+<span id="cb5-22"><a href="#cb5-22" aria-hidden="true" tabindex="-1"></a><span class="va">$env</span><span class="op">:</span><span class="va">PYTHONNOUSERSITE</span> <span class="op">=</span> <span class="st">&#39;1&#39;</span></span>
+<span id="cb5-23"><a href="#cb5-23" aria-hidden="true" tabindex="-1"></a><span class="va">$env</span><span class="op">:</span><span class="va">PYTHONDONTWRITEBYTECODE</span> <span class="op">=</span> <span class="st">&#39;1&#39;</span></span>
+<span id="cb5-24"><a href="#cb5-24" aria-hidden="true" tabindex="-1"></a><span class="fu">Remove-Item</span> Env<span class="op">:</span>PYTHONPATH <span class="op">-</span>ErrorAction SilentlyContinue</span>
+<span id="cb5-25"><a href="#cb5-25" aria-hidden="true" tabindex="-1"></a><span class="fu">Remove-Variable</span> nativePassword<span class="op">,</span>encodedNative<span class="op">,</span>stationPassword<span class="op">,</span>secret</span></code></pre></div>
 <p>Use the actual native PostgreSQL port/database/user if the deployment
 differs from the accepted defaults. Environment changes here apply to
 children of this shell, not the already running native supervisor. Keep
@@ -742,37 +824,37 @@ no superuser/global administration grant. It connects to the normally
 provisioned local database using the current profile’s protected
 credential. Existing role/database names cause a refusal before
 creation; do not drop or repurpose them automatically.</p>
-<div class="sourceCode" id="cb5"><pre
-class="sourceCode powershell"><code class="sourceCode powershell"><span id="cb5-1"><a href="#cb5-1" aria-hidden="true" tabindex="-1"></a><span class="vs">@&#39;</span></span>
-<span id="cb5-2"><a href="#cb5-2" aria-hidden="true" tabindex="-1"></a><span class="vs">import os</span></span>
-<span id="cb5-3"><a href="#cb5-3" aria-hidden="true" tabindex="-1"></a><span class="vs">from pathlib import Path</span></span>
-<span id="cb5-4"><a href="#cb5-4" aria-hidden="true" tabindex="-1"></a><span class="vs">import psycopg2</span></span>
-<span id="cb5-5"><a href="#cb5-5" aria-hidden="true" tabindex="-1"></a><span class="vs">from psycopg2 import sql</span></span>
-<span id="cb5-6"><a href="#cb5-6" aria-hidden="true" tabindex="-1"></a><span class="vs">from sqlalchemy.engine import make_url</span></span>
-<span id="cb5-7"><a href="#cb5-7" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb5-8"><a href="#cb5-8" aria-hidden="true" tabindex="-1"></a><span class="vs">url = make_url(os.environ[&#39;TOWNLIGHT_STATION_DATABASE_URL&#39;])</span></span>
-<span id="cb5-9"><a href="#cb5-9" aria-hidden="true" tabindex="-1"></a><span class="vs">profile = Path(os.environ[&#39;TOWNLIGHT_PROFILE_ROOT&#39;])</span></span>
-<span id="cb5-10"><a href="#cb5-10" aria-hidden="true" tabindex="-1"></a><span class="vs">password = (profile/&#39;config/secrets/postgres-password.txt&#39;).read_text().strip()</span></span>
-<span id="cb5-11"><a href="#cb5-11" aria-hidden="true" tabindex="-1"></a><span class="vs">conn = psycopg2.connect(host=&#39;127.0.0.1&#39;, port=15432, user=&#39;townlight&#39;,</span></span>
-<span id="cb5-12"><a href="#cb5-12" aria-hidden="true" tabindex="-1"></a><span class="vs">                        password=password, dbname=&#39;postgres&#39;)</span></span>
-<span id="cb5-13"><a href="#cb5-13" aria-hidden="true" tabindex="-1"></a><span class="vs">conn.autocommit = True</span></span>
-<span id="cb5-14"><a href="#cb5-14" aria-hidden="true" tabindex="-1"></a><span class="vs">try:</span></span>
-<span id="cb5-15"><a href="#cb5-15" aria-hidden="true" tabindex="-1"></a><span class="vs">    with conn.cursor() as cur:</span></span>
-<span id="cb5-16"><a href="#cb5-16" aria-hidden="true" tabindex="-1"></a><span class="vs">        cur.execute(&#39;SELECT 1 FROM pg_roles WHERE rolname=%s&#39;, (url.username,))</span></span>
-<span id="cb5-17"><a href="#cb5-17" aria-hidden="true" tabindex="-1"></a><span class="vs">        role_exists = cur.fetchone() is not None</span></span>
-<span id="cb5-18"><a href="#cb5-18" aria-hidden="true" tabindex="-1"></a><span class="vs">        cur.execute(&#39;SELECT 1 FROM pg_database WHERE datname=%s&#39;, (url.database,))</span></span>
-<span id="cb5-19"><a href="#cb5-19" aria-hidden="true" tabindex="-1"></a><span class="vs">        if role_exists or cur.fetchone() is not None:</span></span>
-<span id="cb5-20"><a href="#cb5-20" aria-hidden="true" tabindex="-1"></a><span class="vs">            raise RuntimeError(&#39;Dedicated role/database already exists; inspect before continuing&#39;)</span></span>
-<span id="cb5-21"><a href="#cb5-21" aria-hidden="true" tabindex="-1"></a><span class="vs">        cur.execute(sql.SQL(&#39;CREATE ROLE {} LOGIN PASSWORD %s&#39;).format(</span></span>
-<span id="cb5-22"><a href="#cb5-22" aria-hidden="true" tabindex="-1"></a><span class="vs">            sql.Identifier(url.username)), (url.password,))</span></span>
-<span id="cb5-23"><a href="#cb5-23" aria-hidden="true" tabindex="-1"></a><span class="vs">        cur.execute(sql.SQL(&#39;CREATE DATABASE {} OWNER {}&#39;).format(</span></span>
-<span id="cb5-24"><a href="#cb5-24" aria-hidden="true" tabindex="-1"></a><span class="vs">            sql.Identifier(url.database), sql.Identifier(url.username)))</span></span>
-<span id="cb5-25"><a href="#cb5-25" aria-hidden="true" tabindex="-1"></a><span class="vs">finally:</span></span>
-<span id="cb5-26"><a href="#cb5-26" aria-hidden="true" tabindex="-1"></a><span class="vs">    conn.close()</span></span>
-<span id="cb5-27"><a href="#cb5-27" aria-hidden="true" tabindex="-1"></a><span class="vs">&#39;@</span> <span class="op">|</span> <span class="op">&amp;</span> <span class="va">$control</span> <span class="op">-</span>B <span class="op">-</span></span>
-<span id="cb5-28"><a href="#cb5-28" aria-hidden="true" tabindex="-1"></a><span class="cf">if</span> <span class="op">(</span><span class="va">$LASTEXITCODE</span> <span class="op">-ne</span> <span class="dv">0</span><span class="op">)</span> <span class="op">{</span> <span class="cf">throw</span> <span class="st">&#39;Station database provisioning did not complete; inspect before retrying.&#39;</span> <span class="op">}</span></span>
-<span id="cb5-29"><a href="#cb5-29" aria-hidden="true" tabindex="-1"></a><span class="op">&amp;</span> <span class="va">$control</span> <span class="op">-</span>B <span class="op">-</span>m townlight_station<span class="op">.</span><span class="fu">cli</span> migrate</span>
-<span id="cb5-30"><a href="#cb5-30" aria-hidden="true" tabindex="-1"></a><span class="cf">if</span> <span class="op">(</span><span class="va">$LASTEXITCODE</span> <span class="op">-ne</span> <span class="dv">0</span><span class="op">)</span> <span class="op">{</span> <span class="cf">throw</span> <span class="st">&#39;Station migration failed; retain logs and inspect the dedicated schema.&#39;</span> <span class="op">}</span></span></code></pre></div>
+<div class="sourceCode" id="cb6"><pre
+class="sourceCode powershell"><code class="sourceCode powershell"><span id="cb6-1"><a href="#cb6-1" aria-hidden="true" tabindex="-1"></a><span class="vs">@&#39;</span></span>
+<span id="cb6-2"><a href="#cb6-2" aria-hidden="true" tabindex="-1"></a><span class="vs">import os</span></span>
+<span id="cb6-3"><a href="#cb6-3" aria-hidden="true" tabindex="-1"></a><span class="vs">from pathlib import Path</span></span>
+<span id="cb6-4"><a href="#cb6-4" aria-hidden="true" tabindex="-1"></a><span class="vs">import psycopg2</span></span>
+<span id="cb6-5"><a href="#cb6-5" aria-hidden="true" tabindex="-1"></a><span class="vs">from psycopg2 import sql</span></span>
+<span id="cb6-6"><a href="#cb6-6" aria-hidden="true" tabindex="-1"></a><span class="vs">from sqlalchemy.engine import make_url</span></span>
+<span id="cb6-7"><a href="#cb6-7" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb6-8"><a href="#cb6-8" aria-hidden="true" tabindex="-1"></a><span class="vs">url = make_url(os.environ[&#39;TOWNLIGHT_STATION_DATABASE_URL&#39;])</span></span>
+<span id="cb6-9"><a href="#cb6-9" aria-hidden="true" tabindex="-1"></a><span class="vs">profile = Path(os.environ[&#39;TOWNLIGHT_PROFILE_ROOT&#39;])</span></span>
+<span id="cb6-10"><a href="#cb6-10" aria-hidden="true" tabindex="-1"></a><span class="vs">password = (profile/&#39;config/secrets/postgres-password.txt&#39;).read_text().strip()</span></span>
+<span id="cb6-11"><a href="#cb6-11" aria-hidden="true" tabindex="-1"></a><span class="vs">conn = psycopg2.connect(host=&#39;127.0.0.1&#39;, port=15432, user=&#39;townlight&#39;,</span></span>
+<span id="cb6-12"><a href="#cb6-12" aria-hidden="true" tabindex="-1"></a><span class="vs">                        password=password, dbname=&#39;postgres&#39;)</span></span>
+<span id="cb6-13"><a href="#cb6-13" aria-hidden="true" tabindex="-1"></a><span class="vs">conn.autocommit = True</span></span>
+<span id="cb6-14"><a href="#cb6-14" aria-hidden="true" tabindex="-1"></a><span class="vs">try:</span></span>
+<span id="cb6-15"><a href="#cb6-15" aria-hidden="true" tabindex="-1"></a><span class="vs">    with conn.cursor() as cur:</span></span>
+<span id="cb6-16"><a href="#cb6-16" aria-hidden="true" tabindex="-1"></a><span class="vs">        cur.execute(&#39;SELECT 1 FROM pg_roles WHERE rolname=%s&#39;, (url.username,))</span></span>
+<span id="cb6-17"><a href="#cb6-17" aria-hidden="true" tabindex="-1"></a><span class="vs">        role_exists = cur.fetchone() is not None</span></span>
+<span id="cb6-18"><a href="#cb6-18" aria-hidden="true" tabindex="-1"></a><span class="vs">        cur.execute(&#39;SELECT 1 FROM pg_database WHERE datname=%s&#39;, (url.database,))</span></span>
+<span id="cb6-19"><a href="#cb6-19" aria-hidden="true" tabindex="-1"></a><span class="vs">        if role_exists or cur.fetchone() is not None:</span></span>
+<span id="cb6-20"><a href="#cb6-20" aria-hidden="true" tabindex="-1"></a><span class="vs">            raise RuntimeError(&#39;Dedicated role/database already exists; inspect before continuing&#39;)</span></span>
+<span id="cb6-21"><a href="#cb6-21" aria-hidden="true" tabindex="-1"></a><span class="vs">        cur.execute(sql.SQL(&#39;CREATE ROLE {} LOGIN PASSWORD %s&#39;).format(</span></span>
+<span id="cb6-22"><a href="#cb6-22" aria-hidden="true" tabindex="-1"></a><span class="vs">            sql.Identifier(url.username)), (url.password,))</span></span>
+<span id="cb6-23"><a href="#cb6-23" aria-hidden="true" tabindex="-1"></a><span class="vs">        cur.execute(sql.SQL(&#39;CREATE DATABASE {} OWNER {}&#39;).format(</span></span>
+<span id="cb6-24"><a href="#cb6-24" aria-hidden="true" tabindex="-1"></a><span class="vs">            sql.Identifier(url.database), sql.Identifier(url.username)))</span></span>
+<span id="cb6-25"><a href="#cb6-25" aria-hidden="true" tabindex="-1"></a><span class="vs">finally:</span></span>
+<span id="cb6-26"><a href="#cb6-26" aria-hidden="true" tabindex="-1"></a><span class="vs">    conn.close()</span></span>
+<span id="cb6-27"><a href="#cb6-27" aria-hidden="true" tabindex="-1"></a><span class="vs">&#39;@</span> <span class="op">|</span> <span class="op">&amp;</span> <span class="va">$control</span> <span class="op">-</span>B <span class="op">-</span></span>
+<span id="cb6-28"><a href="#cb6-28" aria-hidden="true" tabindex="-1"></a><span class="cf">if</span> <span class="op">(</span><span class="va">$LASTEXITCODE</span> <span class="op">-ne</span> <span class="dv">0</span><span class="op">)</span> <span class="op">{</span> <span class="cf">throw</span> <span class="st">&#39;Station database provisioning did not complete; inspect before retrying.&#39;</span> <span class="op">}</span></span>
+<span id="cb6-29"><a href="#cb6-29" aria-hidden="true" tabindex="-1"></a><span class="op">&amp;</span> <span class="va">$control</span> <span class="op">-</span>B <span class="op">-</span>m townlight_station<span class="op">.</span><span class="fu">cli</span> migrate</span>
+<span id="cb6-30"><a href="#cb6-30" aria-hidden="true" tabindex="-1"></a><span class="cf">if</span> <span class="op">(</span><span class="va">$LASTEXITCODE</span> <span class="op">-ne</span> <span class="dv">0</span><span class="op">)</span> <span class="op">{</span> <span class="cf">throw</span> <span class="st">&#39;Station migration failed; retain logs and inspect the dedicated schema.&#39;</span> <span class="op">}</span></span></code></pre></div>
 <p>If database creation fails after the role was created, the operation
 is partially complete: inspect that exact owned role/database before
 resuming. Do not rerun against guessed names or remove unrelated
@@ -786,35 +868,35 @@ verifies the existing native activation. Check readiness of that exact
 paired origin, not only the desktop’s canonical port. Startup below
 creates hidden children with private log files and records their
 identities; it does not focus windows or install services.</p>
-<div class="sourceCode" id="cb6"><pre
-class="sourceCode powershell"><code class="sourceCode powershell"><span id="cb6-1"><a href="#cb6-1" aria-hidden="true" tabindex="-1"></a><span class="va">$owned</span> <span class="op">=</span> <span class="op">@()</span></span>
-<span id="cb6-2"><a href="#cb6-2" aria-hidden="true" tabindex="-1"></a><span class="kw">function</span> Start-StationRole<span class="op">([</span><span class="dt">string</span><span class="op">]</span><span class="va">$name</span><span class="op">,</span> <span class="op">[</span><span class="dt">string</span><span class="op">[]]</span><span class="va">$arguments</span><span class="op">)</span> <span class="op">{</span></span>
-<span id="cb6-3"><a href="#cb6-3" aria-hidden="true" tabindex="-1"></a>  <span class="va">$p</span> <span class="op">=</span> <span class="fu">Start-Process</span> <span class="op">-</span>FilePath <span class="va">$control</span> <span class="op">-</span>ArgumentList <span class="va">$arguments</span> <span class="op">-</span>WindowStyle Hidden <span class="op">-</span>PassThru `</span>
-<span id="cb6-4"><a href="#cb6-4" aria-hidden="true" tabindex="-1"></a>    <span class="op">-</span>RedirectStandardOutput <span class="op">(</span><span class="fu">Join-Path</span> <span class="va">$stationRoot</span> <span class="st">&quot;logs\</span><span class="va">$name</span><span class="st">.out.log&quot;</span><span class="op">)</span> `</span>
-<span id="cb6-5"><a href="#cb6-5" aria-hidden="true" tabindex="-1"></a>    <span class="op">-</span>RedirectStandardError <span class="op">(</span><span class="fu">Join-Path</span> <span class="va">$stationRoot</span> <span class="st">&quot;logs\</span><span class="va">$name</span><span class="st">.err.log&quot;</span><span class="op">)</span></span>
-<span id="cb6-6"><a href="#cb6-6" aria-hidden="true" tabindex="-1"></a>  <span class="va">$script</span><span class="op">:</span><span class="va">owned</span> <span class="op">+=</span> <span class="op">[</span>pscustomobject<span class="op">]</span>@<span class="op">{</span> Name<span class="op">=</span><span class="va">$name</span><span class="op">;</span> Id<span class="op">=</span><span class="va">$p</span><span class="op">.</span><span class="fu">Id</span><span class="op">;</span> StartTime<span class="op">=</span><span class="va">$p</span><span class="op">.</span><span class="fu">StartTime</span><span class="op">;</span> Path<span class="op">=</span><span class="va">$p</span><span class="op">.</span><span class="fu">Path</span> <span class="op">}</span></span>
-<span id="cb6-7"><a href="#cb6-7" aria-hidden="true" tabindex="-1"></a>  <span class="va">$script</span><span class="op">:</span><span class="va">owned</span> <span class="op">|</span> <span class="fu">ConvertTo-Json</span> <span class="op">|</span> <span class="fu">Set-Content</span> <span class="op">-</span>LiteralPath <span class="op">(</span><span class="fu">Join-Path</span> <span class="va">$stationRoot</span> <span class="st">&#39;owned-processes.json&#39;</span><span class="op">)</span></span>
-<span id="cb6-8"><a href="#cb6-8" aria-hidden="true" tabindex="-1"></a>  <span class="cf">return</span> <span class="va">$p</span></span>
-<span id="cb6-9"><a href="#cb6-9" aria-hidden="true" tabindex="-1"></a><span class="op">}</span></span>
-<span id="cb6-10"><a href="#cb6-10" aria-hidden="true" tabindex="-1"></a><span class="kw">function</span> Wait-StationReady<span class="op">([</span><span class="dt">string</span><span class="op">]</span><span class="va">$url</span><span class="op">,</span> <span class="va">$process</span><span class="op">)</span> <span class="op">{</span></span>
-<span id="cb6-11"><a href="#cb6-11" aria-hidden="true" tabindex="-1"></a>  <span class="cf">for</span> <span class="op">(</span><span class="va">$attempt</span><span class="op">=</span><span class="dv">0</span><span class="op">;</span> <span class="va">$attempt</span> <span class="op">-lt</span> <span class="dv">40</span><span class="op">;</span> <span class="va">$attempt</span><span class="op">++)</span> <span class="op">{</span></span>
-<span id="cb6-12"><a href="#cb6-12" aria-hidden="true" tabindex="-1"></a>    <span class="cf">if</span> <span class="op">(</span><span class="va">$process</span><span class="op">.</span><span class="fu">HasExited</span><span class="op">)</span> <span class="op">{</span> <span class="cf">throw</span> <span class="st">&quot;Owned process exited; inspect logs for </span><span class="va">$url</span><span class="st">&quot;</span> <span class="op">}</span></span>
-<span id="cb6-13"><a href="#cb6-13" aria-hidden="true" tabindex="-1"></a>    <span class="cf">try</span> <span class="op">{</span></span>
-<span id="cb6-14"><a href="#cb6-14" aria-hidden="true" tabindex="-1"></a>      <span class="va">$response</span> <span class="op">=</span> <span class="fu">Invoke-WebRequest</span> <span class="op">-</span>Uri <span class="va">$url</span> <span class="op">-</span>UseBasicParsing <span class="op">-</span>TimeoutSec <span class="dv">2</span></span>
-<span id="cb6-15"><a href="#cb6-15" aria-hidden="true" tabindex="-1"></a>      <span class="cf">if</span> <span class="op">(</span><span class="va">$response</span><span class="op">.</span><span class="fu">StatusCode</span> <span class="op">-eq</span> <span class="dv">200</span><span class="op">)</span> <span class="op">{</span> <span class="cf">return</span> <span class="op">}</span></span>
-<span id="cb6-16"><a href="#cb6-16" aria-hidden="true" tabindex="-1"></a>    <span class="op">}</span> <span class="cf">catch</span> <span class="op">{</span> <span class="op">}</span></span>
-<span id="cb6-17"><a href="#cb6-17" aria-hidden="true" tabindex="-1"></a>    <span class="fu">Start-Sleep</span> <span class="op">-</span>Milliseconds <span class="dv">250</span></span>
-<span id="cb6-18"><a href="#cb6-18" aria-hidden="true" tabindex="-1"></a>  <span class="op">}</span></span>
-<span id="cb6-19"><a href="#cb6-19" aria-hidden="true" tabindex="-1"></a>  <span class="cf">throw</span> <span class="st">&quot;Readiness not established: </span><span class="va">$url</span><span class="st">; inspect the owned logs&quot;</span></span>
-<span id="cb6-20"><a href="#cb6-20" aria-hidden="true" tabindex="-1"></a><span class="op">}</span></span>
-<span id="cb6-21"><a href="#cb6-21" aria-hidden="true" tabindex="-1"></a><span class="va">$suite</span> <span class="op">=</span> Start-StationRole <span class="st">&#39;paired-suite&#39;</span> <span class="op">@(</span><span class="st">&#39;-B&#39;</span><span class="op">,</span><span class="st">&#39;-m&#39;</span><span class="op">,</span><span class="st">&#39;townlight_runtime.services&#39;</span><span class="op">)</span></span>
-<span id="cb6-22"><a href="#cb6-22" aria-hidden="true" tabindex="-1"></a>Wait-StationReady <span class="st">&#39;http://127.0.0.1:15481/ready&#39;</span> <span class="va">$suite</span></span>
-<span id="cb6-23"><a href="#cb6-23" aria-hidden="true" tabindex="-1"></a><span class="va">$api</span> <span class="op">=</span> Start-StationRole <span class="st">&#39;station-api&#39;</span> <span class="op">@(</span><span class="st">&#39;-B&#39;</span><span class="op">,</span><span class="st">&#39;-m&#39;</span><span class="op">,</span><span class="st">&#39;townlight_station.cli&#39;</span><span class="op">,</span><span class="st">&#39;serve&#39;</span><span class="op">,</span><span class="st">&#39;--port&#39;</span><span class="op">,</span><span class="st">&#39;8756&#39;</span><span class="op">)</span></span>
-<span id="cb6-24"><a href="#cb6-24" aria-hidden="true" tabindex="-1"></a>Wait-StationReady <span class="st">&#39;http://127.0.0.1:8756/health&#39;</span> <span class="va">$api</span></span>
-<span id="cb6-25"><a href="#cb6-25" aria-hidden="true" tabindex="-1"></a><span class="va">$worker</span> <span class="op">=</span> Start-StationRole <span class="st">&#39;station-worker&#39;</span> <span class="op">@(</span><span class="st">&#39;-B&#39;</span><span class="op">,</span><span class="st">&#39;-m&#39;</span><span class="op">,</span><span class="st">&#39;townlight_station.cli&#39;</span><span class="op">,</span><span class="st">&#39;worker&#39;</span><span class="op">)</span></span>
-<span id="cb6-26"><a href="#cb6-26" aria-hidden="true" tabindex="-1"></a><span class="co"># Only for the on-air profile:</span></span>
-<span id="cb6-27"><a href="#cb6-27" aria-hidden="true" tabindex="-1"></a><span class="va">$air</span> <span class="op">=</span> Start-StationRole <span class="st">&#39;station-air&#39;</span> <span class="op">@(</span><span class="st">&#39;-B&#39;</span><span class="op">,</span><span class="st">&#39;-m&#39;</span><span class="op">,</span><span class="st">&#39;townlight_station.cli&#39;</span><span class="op">,</span><span class="st">&#39;air&#39;</span><span class="op">)</span></span>
-<span id="cb6-28"><a href="#cb6-28" aria-hidden="true" tabindex="-1"></a><span class="va">$owned</span> <span class="op">|</span> <span class="fu">ConvertTo-Json</span> <span class="op">|</span> <span class="fu">Set-Content</span> <span class="op">-</span>LiteralPath <span class="op">(</span><span class="fu">Join-Path</span> <span class="va">$stationRoot</span> <span class="st">&#39;owned-processes.json&#39;</span><span class="op">)</span></span></code></pre></div>
+<div class="sourceCode" id="cb7"><pre
+class="sourceCode powershell"><code class="sourceCode powershell"><span id="cb7-1"><a href="#cb7-1" aria-hidden="true" tabindex="-1"></a><span class="va">$owned</span> <span class="op">=</span> <span class="op">@()</span></span>
+<span id="cb7-2"><a href="#cb7-2" aria-hidden="true" tabindex="-1"></a><span class="kw">function</span> Start-StationRole<span class="op">([</span><span class="dt">string</span><span class="op">]</span><span class="va">$name</span><span class="op">,</span> <span class="op">[</span><span class="dt">string</span><span class="op">[]]</span><span class="va">$arguments</span><span class="op">)</span> <span class="op">{</span></span>
+<span id="cb7-3"><a href="#cb7-3" aria-hidden="true" tabindex="-1"></a>  <span class="va">$p</span> <span class="op">=</span> <span class="fu">Start-Process</span> <span class="op">-</span>FilePath <span class="va">$control</span> <span class="op">-</span>ArgumentList <span class="va">$arguments</span> <span class="op">-</span>WindowStyle Hidden <span class="op">-</span>PassThru `</span>
+<span id="cb7-4"><a href="#cb7-4" aria-hidden="true" tabindex="-1"></a>    <span class="op">-</span>RedirectStandardOutput <span class="op">(</span><span class="fu">Join-Path</span> <span class="va">$stationRoot</span> <span class="st">&quot;logs\</span><span class="va">$name</span><span class="st">.out.log&quot;</span><span class="op">)</span> `</span>
+<span id="cb7-5"><a href="#cb7-5" aria-hidden="true" tabindex="-1"></a>    <span class="op">-</span>RedirectStandardError <span class="op">(</span><span class="fu">Join-Path</span> <span class="va">$stationRoot</span> <span class="st">&quot;logs\</span><span class="va">$name</span><span class="st">.err.log&quot;</span><span class="op">)</span></span>
+<span id="cb7-6"><a href="#cb7-6" aria-hidden="true" tabindex="-1"></a>  <span class="va">$script</span><span class="op">:</span><span class="va">owned</span> <span class="op">+=</span> <span class="op">[</span>pscustomobject<span class="op">]</span>@<span class="op">{</span> Name<span class="op">=</span><span class="va">$name</span><span class="op">;</span> Id<span class="op">=</span><span class="va">$p</span><span class="op">.</span><span class="fu">Id</span><span class="op">;</span> StartTime<span class="op">=</span><span class="va">$p</span><span class="op">.</span><span class="fu">StartTime</span><span class="op">;</span> Path<span class="op">=</span><span class="va">$p</span><span class="op">.</span><span class="fu">Path</span> <span class="op">}</span></span>
+<span id="cb7-7"><a href="#cb7-7" aria-hidden="true" tabindex="-1"></a>  <span class="va">$script</span><span class="op">:</span><span class="va">owned</span> <span class="op">|</span> <span class="fu">ConvertTo-Json</span> <span class="op">|</span> <span class="fu">Set-Content</span> <span class="op">-</span>LiteralPath <span class="op">(</span><span class="fu">Join-Path</span> <span class="va">$stationRoot</span> <span class="st">&#39;owned-processes.json&#39;</span><span class="op">)</span></span>
+<span id="cb7-8"><a href="#cb7-8" aria-hidden="true" tabindex="-1"></a>  <span class="cf">return</span> <span class="va">$p</span></span>
+<span id="cb7-9"><a href="#cb7-9" aria-hidden="true" tabindex="-1"></a><span class="op">}</span></span>
+<span id="cb7-10"><a href="#cb7-10" aria-hidden="true" tabindex="-1"></a><span class="kw">function</span> Wait-StationReady<span class="op">([</span><span class="dt">string</span><span class="op">]</span><span class="va">$url</span><span class="op">,</span> <span class="va">$process</span><span class="op">)</span> <span class="op">{</span></span>
+<span id="cb7-11"><a href="#cb7-11" aria-hidden="true" tabindex="-1"></a>  <span class="cf">for</span> <span class="op">(</span><span class="va">$attempt</span><span class="op">=</span><span class="dv">0</span><span class="op">;</span> <span class="va">$attempt</span> <span class="op">-lt</span> <span class="dv">40</span><span class="op">;</span> <span class="va">$attempt</span><span class="op">++)</span> <span class="op">{</span></span>
+<span id="cb7-12"><a href="#cb7-12" aria-hidden="true" tabindex="-1"></a>    <span class="cf">if</span> <span class="op">(</span><span class="va">$process</span><span class="op">.</span><span class="fu">HasExited</span><span class="op">)</span> <span class="op">{</span> <span class="cf">throw</span> <span class="st">&quot;Owned process exited; inspect logs for </span><span class="va">$url</span><span class="st">&quot;</span> <span class="op">}</span></span>
+<span id="cb7-13"><a href="#cb7-13" aria-hidden="true" tabindex="-1"></a>    <span class="cf">try</span> <span class="op">{</span></span>
+<span id="cb7-14"><a href="#cb7-14" aria-hidden="true" tabindex="-1"></a>      <span class="va">$response</span> <span class="op">=</span> <span class="fu">Invoke-WebRequest</span> <span class="op">-</span>Uri <span class="va">$url</span> <span class="op">-</span>UseBasicParsing <span class="op">-</span>TimeoutSec <span class="dv">2</span></span>
+<span id="cb7-15"><a href="#cb7-15" aria-hidden="true" tabindex="-1"></a>      <span class="cf">if</span> <span class="op">(</span><span class="va">$response</span><span class="op">.</span><span class="fu">StatusCode</span> <span class="op">-eq</span> <span class="dv">200</span><span class="op">)</span> <span class="op">{</span> <span class="cf">return</span> <span class="op">}</span></span>
+<span id="cb7-16"><a href="#cb7-16" aria-hidden="true" tabindex="-1"></a>    <span class="op">}</span> <span class="cf">catch</span> <span class="op">{</span> <span class="op">}</span></span>
+<span id="cb7-17"><a href="#cb7-17" aria-hidden="true" tabindex="-1"></a>    <span class="fu">Start-Sleep</span> <span class="op">-</span>Milliseconds <span class="dv">250</span></span>
+<span id="cb7-18"><a href="#cb7-18" aria-hidden="true" tabindex="-1"></a>  <span class="op">}</span></span>
+<span id="cb7-19"><a href="#cb7-19" aria-hidden="true" tabindex="-1"></a>  <span class="cf">throw</span> <span class="st">&quot;Readiness not established: </span><span class="va">$url</span><span class="st">; inspect the owned logs&quot;</span></span>
+<span id="cb7-20"><a href="#cb7-20" aria-hidden="true" tabindex="-1"></a><span class="op">}</span></span>
+<span id="cb7-21"><a href="#cb7-21" aria-hidden="true" tabindex="-1"></a><span class="va">$suite</span> <span class="op">=</span> Start-StationRole <span class="st">&#39;paired-suite&#39;</span> <span class="op">@(</span><span class="st">&#39;-B&#39;</span><span class="op">,</span><span class="st">&#39;-m&#39;</span><span class="op">,</span><span class="st">&#39;townlight_runtime.services&#39;</span><span class="op">)</span></span>
+<span id="cb7-22"><a href="#cb7-22" aria-hidden="true" tabindex="-1"></a>Wait-StationReady <span class="st">&#39;http://127.0.0.1:15481/ready&#39;</span> <span class="va">$suite</span></span>
+<span id="cb7-23"><a href="#cb7-23" aria-hidden="true" tabindex="-1"></a><span class="va">$api</span> <span class="op">=</span> Start-StationRole <span class="st">&#39;station-api&#39;</span> <span class="op">@(</span><span class="st">&#39;-B&#39;</span><span class="op">,</span><span class="st">&#39;-m&#39;</span><span class="op">,</span><span class="st">&#39;townlight_station.cli&#39;</span><span class="op">,</span><span class="st">&#39;serve&#39;</span><span class="op">,</span><span class="st">&#39;--port&#39;</span><span class="op">,</span><span class="st">&#39;8756&#39;</span><span class="op">)</span></span>
+<span id="cb7-24"><a href="#cb7-24" aria-hidden="true" tabindex="-1"></a>Wait-StationReady <span class="st">&#39;http://127.0.0.1:8756/health&#39;</span> <span class="va">$api</span></span>
+<span id="cb7-25"><a href="#cb7-25" aria-hidden="true" tabindex="-1"></a><span class="va">$worker</span> <span class="op">=</span> Start-StationRole <span class="st">&#39;station-worker&#39;</span> <span class="op">@(</span><span class="st">&#39;-B&#39;</span><span class="op">,</span><span class="st">&#39;-m&#39;</span><span class="op">,</span><span class="st">&#39;townlight_station.cli&#39;</span><span class="op">,</span><span class="st">&#39;worker&#39;</span><span class="op">)</span></span>
+<span id="cb7-26"><a href="#cb7-26" aria-hidden="true" tabindex="-1"></a><span class="co"># Only for the on-air profile:</span></span>
+<span id="cb7-27"><a href="#cb7-27" aria-hidden="true" tabindex="-1"></a><span class="va">$air</span> <span class="op">=</span> Start-StationRole <span class="st">&#39;station-air&#39;</span> <span class="op">@(</span><span class="st">&#39;-B&#39;</span><span class="op">,</span><span class="st">&#39;-m&#39;</span><span class="op">,</span><span class="st">&#39;townlight_station.cli&#39;</span><span class="op">,</span><span class="st">&#39;air&#39;</span><span class="op">)</span></span>
+<span id="cb7-28"><a href="#cb7-28" aria-hidden="true" tabindex="-1"></a><span class="va">$owned</span> <span class="op">|</span> <span class="fu">ConvertTo-Json</span> <span class="op">|</span> <span class="fu">Set-Content</span> <span class="op">-</span>LiteralPath <span class="op">(</span><span class="fu">Join-Path</span> <span class="va">$stationRoot</span> <span class="st">&#39;owned-processes.json&#39;</span><span class="op">)</span></span></code></pre></div>
 <p>Before launching, confirm ports 15481 and 8756 are unused. If
 readiness fails, inspect the relevant logs and retained profile/schema
 state; do not start another copy. A port that answers belongs to the
@@ -832,15 +914,15 @@ input and open the operator</h3>
 <strong>data</strong> directory with the following fictional input. An
 actual sender must supply UDP MPEG-TS to that receiver; this
 configuration alone does not generate a signal.</p>
-<div class="sourceCode" id="cb7"><pre
-class="sourceCode json"><code class="sourceCode json"><span id="cb7-1"><a href="#cb7-1" aria-hidden="true" tabindex="-1"></a><span class="ot">[</span><span class="fu">{</span><span class="dt">&quot;id&quot;</span><span class="fu">:</span><span class="st">&quot;synthetic-chamber&quot;</span><span class="fu">,</span><span class="dt">&quot;label&quot;</span><span class="fu">:</span><span class="st">&quot;Synthetic chamber feed&quot;</span><span class="fu">,</span><span class="dt">&quot;kind&quot;</span><span class="fu">:</span><span class="st">&quot;udp-mpegts&quot;</span><span class="fu">,</span><span class="dt">&quot;address&quot;</span><span class="fu">:</span><span class="st">&quot;127.0.0.1&quot;</span><span class="fu">,</span><span class="dt">&quot;port&quot;</span><span class="fu">:</span><span class="dv">19000</span><span class="fu">}</span><span class="ot">]</span></span></code></pre></div>
+<div class="sourceCode" id="cb8"><pre
+class="sourceCode json"><code class="sourceCode json"><span id="cb8-1"><a href="#cb8-1" aria-hidden="true" tabindex="-1"></a><span class="ot">[</span><span class="fu">{</span><span class="dt">&quot;id&quot;</span><span class="fu">:</span><span class="st">&quot;synthetic-chamber&quot;</span><span class="fu">,</span><span class="dt">&quot;label&quot;</span><span class="fu">:</span><span class="st">&quot;Synthetic chamber feed&quot;</span><span class="fu">,</span><span class="dt">&quot;kind&quot;</span><span class="fu">:</span><span class="st">&quot;udp-mpegts&quot;</span><span class="fu">,</span><span class="dt">&quot;address&quot;</span><span class="fu">:</span><span class="st">&quot;127.0.0.1&quot;</span><span class="fu">,</span><span class="dt">&quot;port&quot;</span><span class="fu">:</span><span class="dv">19000</span><span class="fu">}</span><span class="ot">]</span></span></code></pre></div>
 <p>At most 32 rows are accepted. IDs are unique 1–64
 letters/digits/underscore/hyphen; labels have 1–100 characters; IPv4 and
 ports 1024–65535 are validated. Each row has exactly the five shown
 keys. Protect the source network; UDP is not authenticated. Then, under
 the same signed-in native account:</p>
-<div class="sourceCode" id="cb8"><pre
-class="sourceCode powershell"><code class="sourceCode powershell"><span id="cb8-1"><a href="#cb8-1" aria-hidden="true" tabindex="-1"></a><span class="op">&amp;</span> <span class="va">$control</span> <span class="op">-</span>B <span class="op">-</span>m townlight_station<span class="op">.</span><span class="fu">cli</span> operator <span class="op">--</span>profile-root <span class="va">$profilePath</span> <span class="op">--</span>port <span class="dv">8756</span></span></code></pre></div>
+<div class="sourceCode" id="cb9"><pre
+class="sourceCode powershell"><code class="sourceCode powershell"><span id="cb9-1"><a href="#cb9-1" aria-hidden="true" tabindex="-1"></a><span class="op">&amp;</span> <span class="va">$control</span> <span class="op">-</span>B <span class="op">-</span>m townlight_station<span class="op">.</span><span class="fu">cli</span> operator <span class="op">--</span>profile-root <span class="va">$profilePath</span> <span class="op">--</span>port <span class="dv">8756</span></span></code></pre></div>
 <p>This normal operator command opens the operator for a future staff
 exercise. It reads the native session and exchanges a one-use launch
 ticket; it does not seed authority or put the native proof in a URL.
@@ -865,15 +947,15 @@ out and preserve the evidence/logs. The air role starts a separate media
 child; force-stopping only its parent does not run Python cleanup. Stop
 only the process trees you started, checking each root’s identity before
 using a saved PID:</p>
-<div class="sourceCode" id="cb9"><pre
-class="sourceCode powershell"><code class="sourceCode powershell"><span id="cb9-1"><a href="#cb9-1" aria-hidden="true" tabindex="-1"></a><span class="cf">foreach</span> <span class="op">(</span><span class="va">$entry</span> <span class="kw">in</span> <span class="op">@(</span><span class="va">$owned</span> <span class="op">|</span> <span class="fu">Sort-Object</span> StartTime <span class="op">-</span>Descending<span class="op">))</span> <span class="op">{</span></span>
-<span id="cb9-2"><a href="#cb9-2" aria-hidden="true" tabindex="-1"></a>  <span class="va">$process</span> <span class="op">=</span> <span class="fu">Get-Process</span> <span class="op">-</span>Id <span class="va">$entry</span><span class="op">.</span><span class="fu">Id</span> <span class="op">-</span>ErrorAction SilentlyContinue</span>
-<span id="cb9-3"><a href="#cb9-3" aria-hidden="true" tabindex="-1"></a>  <span class="cf">if</span> <span class="op">(</span><span class="va">$process</span> <span class="op">-and</span> <span class="va">$process</span><span class="op">.</span><span class="fu">StartTime</span> <span class="op">-eq</span> <span class="va">$entry</span><span class="op">.</span><span class="fu">StartTime</span> <span class="op">-and</span> <span class="va">$process</span><span class="op">.</span><span class="fu">Path</span> <span class="op">-eq</span> <span class="va">$entry</span><span class="op">.</span><span class="fu">Path</span><span class="op">)</span> <span class="op">{</span></span>
-<span id="cb9-4"><a href="#cb9-4" aria-hidden="true" tabindex="-1"></a>    <span class="op">&amp;</span> taskkill<span class="op">.</span><span class="fu">exe</span> <span class="op">/</span>PID <span class="va">$process</span><span class="op">.</span><span class="fu">Id</span> <span class="op">/</span>T <span class="op">/</span>F <span class="op">|</span> <span class="fu">Out-Null</span></span>
-<span id="cb9-5"><a href="#cb9-5" aria-hidden="true" tabindex="-1"></a>    <span class="cf">if</span> <span class="op">(</span><span class="va">$LASTEXITCODE</span> <span class="op">-ne</span> <span class="dv">0</span><span class="op">)</span> <span class="op">{</span> <span class="cf">throw</span> <span class="st">&#39;Owned process tree did not stop; inspect before proceeding.&#39;</span> <span class="op">}</span></span>
-<span id="cb9-6"><a href="#cb9-6" aria-hidden="true" tabindex="-1"></a>    <span class="va">$process</span><span class="op">.</span><span class="fu">WaitForExit</span><span class="op">()</span></span>
-<span id="cb9-7"><a href="#cb9-7" aria-hidden="true" tabindex="-1"></a>  <span class="op">}</span></span>
-<span id="cb9-8"><a href="#cb9-8" aria-hidden="true" tabindex="-1"></a><span class="op">}</span></span></code></pre></div>
+<div class="sourceCode" id="cb10"><pre
+class="sourceCode powershell"><code class="sourceCode powershell"><span id="cb10-1"><a href="#cb10-1" aria-hidden="true" tabindex="-1"></a><span class="cf">foreach</span> <span class="op">(</span><span class="va">$entry</span> <span class="kw">in</span> <span class="op">@(</span><span class="va">$owned</span> <span class="op">|</span> <span class="fu">Sort-Object</span> StartTime <span class="op">-</span>Descending<span class="op">))</span> <span class="op">{</span></span>
+<span id="cb10-2"><a href="#cb10-2" aria-hidden="true" tabindex="-1"></a>  <span class="va">$process</span> <span class="op">=</span> <span class="fu">Get-Process</span> <span class="op">-</span>Id <span class="va">$entry</span><span class="op">.</span><span class="fu">Id</span> <span class="op">-</span>ErrorAction SilentlyContinue</span>
+<span id="cb10-3"><a href="#cb10-3" aria-hidden="true" tabindex="-1"></a>  <span class="cf">if</span> <span class="op">(</span><span class="va">$process</span> <span class="op">-and</span> <span class="va">$process</span><span class="op">.</span><span class="fu">StartTime</span> <span class="op">-eq</span> <span class="va">$entry</span><span class="op">.</span><span class="fu">StartTime</span> <span class="op">-and</span> <span class="va">$process</span><span class="op">.</span><span class="fu">Path</span> <span class="op">-eq</span> <span class="va">$entry</span><span class="op">.</span><span class="fu">Path</span><span class="op">)</span> <span class="op">{</span></span>
+<span id="cb10-4"><a href="#cb10-4" aria-hidden="true" tabindex="-1"></a>    <span class="op">&amp;</span> taskkill<span class="op">.</span><span class="fu">exe</span> <span class="op">/</span>PID <span class="va">$process</span><span class="op">.</span><span class="fu">Id</span> <span class="op">/</span>T <span class="op">/</span>F <span class="op">|</span> <span class="fu">Out-Null</span></span>
+<span id="cb10-5"><a href="#cb10-5" aria-hidden="true" tabindex="-1"></a>    <span class="cf">if</span> <span class="op">(</span><span class="va">$LASTEXITCODE</span> <span class="op">-ne</span> <span class="dv">0</span><span class="op">)</span> <span class="op">{</span> <span class="cf">throw</span> <span class="st">&#39;Owned process tree did not stop; inspect before proceeding.&#39;</span> <span class="op">}</span></span>
+<span id="cb10-6"><a href="#cb10-6" aria-hidden="true" tabindex="-1"></a>    <span class="va">$process</span><span class="op">.</span><span class="fu">WaitForExit</span><span class="op">()</span></span>
+<span id="cb10-7"><a href="#cb10-7" aria-hidden="true" tabindex="-1"></a>  <span class="op">}</span></span>
+<span id="cb10-8"><a href="#cb10-8" aria-hidden="true" tabindex="-1"></a><span class="op">}</span></span></code></pre></div>
 <p>Retain the ownership file if the shell must close; parse and verify
 its actual process paths/start times before acting. Do not terminate the
 native database/supervisor or CivicCast. Interrupting a worker during a
@@ -888,10 +970,10 @@ frontend/development environment with <code>invoke</code> imported from
 <code>@tauri-apps/api/core</code>. It is not a command for an arbitrary
 web page or an instruction for nontechnical staff. IDs must come from
 records created in an isolated synthetic exercise.</p>
-<div class="sourceCode" id="cb10"><pre
-class="sourceCode javascript"><code class="sourceCode javascript"><span id="cb10-1"><a href="#cb10-1" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> { invoke } <span class="im">from</span> <span class="st">&#39;@tauri-apps/api/core&#39;</span><span class="op">;</span></span>
-<span id="cb10-2"><a href="#cb10-2" aria-hidden="true" tabindex="-1"></a><span class="kw">const</span> result <span class="op">=</span> <span class="cf">await</span> <span class="fu">invoke</span>(<span class="st">&#39;meetings_domain_request&#39;</span><span class="op">,</span> {<span class="dt">request</span><span class="op">:</span> {<span class="dt">operation</span><span class="op">:</span> <span class="st">&#39;get-meeting&#39;</span><span class="op">,</span> <span class="dt">id</span><span class="op">:</span> meetingId}})<span class="op">;</span></span>
-<span id="cb10-3"><a href="#cb10-3" aria-hidden="true" tabindex="-1"></a><span class="bu">console</span><span class="op">.</span><span class="fu">log</span>(result)<span class="op">;</span></span></code></pre></div>
+<div class="sourceCode" id="cb11"><pre
+class="sourceCode javascript"><code class="sourceCode javascript"><span id="cb11-1"><a href="#cb11-1" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> { invoke } <span class="im">from</span> <span class="st">&#39;@tauri-apps/api/core&#39;</span><span class="op">;</span></span>
+<span id="cb11-2"><a href="#cb11-2" aria-hidden="true" tabindex="-1"></a><span class="kw">const</span> result <span class="op">=</span> <span class="cf">await</span> <span class="fu">invoke</span>(<span class="st">&#39;meetings_domain_request&#39;</span><span class="op">,</span> {<span class="dt">request</span><span class="op">:</span> {<span class="dt">operation</span><span class="op">:</span> <span class="st">&#39;get-meeting&#39;</span><span class="op">,</span> <span class="dt">id</span><span class="op">:</span> meetingId}})<span class="op">;</span></span>
+<span id="cb11-3"><a href="#cb11-3" aria-hidden="true" tabindex="-1"></a><span class="bu">console</span><span class="op">.</span><span class="fu">log</span>(result)<span class="op">;</span></span></code></pre></div>
 <h3 id="trusted-local-http-example">Trusted local HTTP example</h3>
 <p>An administrator/developer can inspect an already-configured isolated
 runtime from a trusted local process. This PowerShell example reads the
@@ -899,9 +981,9 @@ signed-in synthetic profile’s existing proof into memory; it does not
 create a user, seed a session, reveal the proof in output or bypass a
 permission check. Do not use real city data in development examples. A
 read response does not prove approval or publication.</p>
-<div class="sourceCode" id="cb11"><pre
-class="sourceCode powershell"><code class="sourceCode powershell"><span id="cb11-1"><a href="#cb11-1" aria-hidden="true" tabindex="-1"></a><span class="fu">Invoke-RestMethod</span> <span class="op">-</span>Uri <span class="st">&#39;http://127.0.0.1:8756/health&#39;</span></span>
-<span id="cb11-2"><a href="#cb11-2" aria-hidden="true" tabindex="-1"></a><span class="co"># Authenticated recording operations additionally require current native proof.</span></span></code></pre></div>
+<div class="sourceCode" id="cb12"><pre
+class="sourceCode powershell"><code class="sourceCode powershell"><span id="cb12-1"><a href="#cb12-1" aria-hidden="true" tabindex="-1"></a><span class="fu">Invoke-RestMethod</span> <span class="op">-</span>Uri <span class="st">&#39;http://127.0.0.1:8756/health&#39;</span></span>
+<span id="cb12-2"><a href="#cb12-2" aria-hidden="true" tabindex="-1"></a><span class="co"># Authenticated recording operations additionally require current native proof.</span></span></code></pre></div>
 <h3 id="a-synthetic-write-with-subsequent-readback">A synthetic write
 with subsequent readback</h3>
 <p>This example demonstrates the existing Meetings HTTP contract in an
@@ -909,24 +991,24 @@ isolated exercise. It is intentionally fictional. It does not start a
 service. Its authentication setup is included so it can be run
 independently under the signed-in synthetic account. If a write times
 out, inspect current records before repeating it.</p>
-<div class="sourceCode" id="cb12"><pre
-class="sourceCode powershell"><code class="sourceCode powershell"><span id="cb12-1"><a href="#cb12-1" aria-hidden="true" tabindex="-1"></a><span class="va">$profilePath</span> <span class="op">=</span> <span class="fu">Join-Path</span> <span class="va">$env</span><span class="op">:</span><span class="va">LOCALAPPDATA</span> <span class="st">&#39;CivicSuite&#39;</span></span>
-<span id="cb12-2"><a href="#cb12-2" aria-hidden="true" tabindex="-1"></a><span class="va">$sessionPath</span> <span class="op">=</span> <span class="fu">Join-Path</span> <span class="va">$profilePath</span> <span class="st">&#39;config/local-session.json&#39;</span></span>
-<span id="cb12-3"><a href="#cb12-3" aria-hidden="true" tabindex="-1"></a><span class="va">$session</span> <span class="op">=</span> <span class="fu">Get-Content</span> <span class="op">-</span>LiteralPath <span class="va">$sessionPath</span> <span class="op">-</span>Raw <span class="op">|</span> <span class="fu">ConvertFrom-Json</span></span>
-<span id="cb12-4"><a href="#cb12-4" aria-hidden="true" tabindex="-1"></a><span class="va">$headers</span> <span class="op">=</span> @<span class="op">{</span> <span class="st">&#39;X-Townlight-Session&#39;</span> <span class="op">=</span> <span class="va">$session</span><span class="op">.</span><span class="fu">session_hash</span> <span class="op">}</span></span>
-<span id="cb12-5"><a href="#cb12-5" aria-hidden="true" tabindex="-1"></a><span class="va">$body</span> <span class="op">=</span> @<span class="op">{</span></span>
-<span id="cb12-6"><a href="#cb12-6" aria-hidden="true" tabindex="-1"></a>  title <span class="op">=</span> <span class="st">&#39;Synthetic documentation exercise&#39;</span></span>
-<span id="cb12-7"><a href="#cb12-7" aria-hidden="true" tabindex="-1"></a>  scheduled_start <span class="op">=</span> <span class="st">&#39;2026-11-05T18:00:00-07:00&#39;</span></span>
-<span id="cb12-8"><a href="#cb12-8" aria-hidden="true" tabindex="-1"></a>  location <span class="op">=</span> <span class="st">&#39;Synthetic room&#39;</span></span>
-<span id="cb12-9"><a href="#cb12-9" aria-hidden="true" tabindex="-1"></a>  meeting_type <span class="op">=</span> <span class="st">&#39;regular&#39;</span></span>
-<span id="cb12-10"><a href="#cb12-10" aria-hidden="true" tabindex="-1"></a><span class="op">}</span> <span class="op">|</span> <span class="fu">ConvertTo-Json</span></span>
-<span id="cb12-11"><a href="#cb12-11" aria-hidden="true" tabindex="-1"></a><span class="va">$meeting</span> <span class="op">=</span> <span class="fu">Invoke-RestMethod</span> <span class="op">-</span>Method Post `</span>
-<span id="cb12-12"><a href="#cb12-12" aria-hidden="true" tabindex="-1"></a>  <span class="op">-</span>Uri <span class="st">&#39;http://127.0.0.1:15480/desktop/v1/meetings/meetings&#39;</span> `</span>
-<span id="cb12-13"><a href="#cb12-13" aria-hidden="true" tabindex="-1"></a>  <span class="op">-</span>Headers <span class="va">$headers</span> <span class="op">-</span>ContentType <span class="st">&#39;application/json&#39;</span> <span class="op">-</span>Body <span class="va">$body</span></span>
-<span id="cb12-14"><a href="#cb12-14" aria-hidden="true" tabindex="-1"></a><span class="fu">Invoke-RestMethod</span> `</span>
-<span id="cb12-15"><a href="#cb12-15" aria-hidden="true" tabindex="-1"></a>  <span class="op">-</span>Uri <span class="op">(</span><span class="st">&#39;http://127.0.0.1:15480/desktop/v1/meetings/meetings/&#39;</span> <span class="op">+</span> <span class="va">$meeting</span><span class="op">.</span><span class="fu">id</span><span class="op">)</span> `</span>
-<span id="cb12-16"><a href="#cb12-16" aria-hidden="true" tabindex="-1"></a>  <span class="op">-</span>Headers <span class="va">$headers</span></span>
-<span id="cb12-17"><a href="#cb12-17" aria-hidden="true" tabindex="-1"></a><span class="fu">Remove-Variable</span> session<span class="op">,</span> headers</span></code></pre></div>
+<div class="sourceCode" id="cb13"><pre
+class="sourceCode powershell"><code class="sourceCode powershell"><span id="cb13-1"><a href="#cb13-1" aria-hidden="true" tabindex="-1"></a><span class="va">$profilePath</span> <span class="op">=</span> <span class="fu">Join-Path</span> <span class="va">$env</span><span class="op">:</span><span class="va">LOCALAPPDATA</span> <span class="st">&#39;CivicSuite&#39;</span></span>
+<span id="cb13-2"><a href="#cb13-2" aria-hidden="true" tabindex="-1"></a><span class="va">$sessionPath</span> <span class="op">=</span> <span class="fu">Join-Path</span> <span class="va">$profilePath</span> <span class="st">&#39;config/local-session.json&#39;</span></span>
+<span id="cb13-3"><a href="#cb13-3" aria-hidden="true" tabindex="-1"></a><span class="va">$session</span> <span class="op">=</span> <span class="fu">Get-Content</span> <span class="op">-</span>LiteralPath <span class="va">$sessionPath</span> <span class="op">-</span>Raw <span class="op">|</span> <span class="fu">ConvertFrom-Json</span></span>
+<span id="cb13-4"><a href="#cb13-4" aria-hidden="true" tabindex="-1"></a><span class="va">$headers</span> <span class="op">=</span> @<span class="op">{</span> <span class="st">&#39;X-Townlight-Session&#39;</span> <span class="op">=</span> <span class="va">$session</span><span class="op">.</span><span class="fu">session_hash</span> <span class="op">}</span></span>
+<span id="cb13-5"><a href="#cb13-5" aria-hidden="true" tabindex="-1"></a><span class="va">$body</span> <span class="op">=</span> @<span class="op">{</span></span>
+<span id="cb13-6"><a href="#cb13-6" aria-hidden="true" tabindex="-1"></a>  title <span class="op">=</span> <span class="st">&#39;Synthetic documentation exercise&#39;</span></span>
+<span id="cb13-7"><a href="#cb13-7" aria-hidden="true" tabindex="-1"></a>  scheduled_start <span class="op">=</span> <span class="st">&#39;2026-11-05T18:00:00-07:00&#39;</span></span>
+<span id="cb13-8"><a href="#cb13-8" aria-hidden="true" tabindex="-1"></a>  location <span class="op">=</span> <span class="st">&#39;Synthetic room&#39;</span></span>
+<span id="cb13-9"><a href="#cb13-9" aria-hidden="true" tabindex="-1"></a>  meeting_type <span class="op">=</span> <span class="st">&#39;regular&#39;</span></span>
+<span id="cb13-10"><a href="#cb13-10" aria-hidden="true" tabindex="-1"></a><span class="op">}</span> <span class="op">|</span> <span class="fu">ConvertTo-Json</span></span>
+<span id="cb13-11"><a href="#cb13-11" aria-hidden="true" tabindex="-1"></a><span class="va">$meeting</span> <span class="op">=</span> <span class="fu">Invoke-RestMethod</span> <span class="op">-</span>Method Post `</span>
+<span id="cb13-12"><a href="#cb13-12" aria-hidden="true" tabindex="-1"></a>  <span class="op">-</span>Uri <span class="st">&#39;http://127.0.0.1:15480/desktop/v1/meetings/meetings&#39;</span> `</span>
+<span id="cb13-13"><a href="#cb13-13" aria-hidden="true" tabindex="-1"></a>  <span class="op">-</span>Headers <span class="va">$headers</span> <span class="op">-</span>ContentType <span class="st">&#39;application/json&#39;</span> <span class="op">-</span>Body <span class="va">$body</span></span>
+<span id="cb13-14"><a href="#cb13-14" aria-hidden="true" tabindex="-1"></a><span class="fu">Invoke-RestMethod</span> `</span>
+<span id="cb13-15"><a href="#cb13-15" aria-hidden="true" tabindex="-1"></a>  <span class="op">-</span>Uri <span class="op">(</span><span class="st">&#39;http://127.0.0.1:15480/desktop/v1/meetings/meetings/&#39;</span> <span class="op">+</span> <span class="va">$meeting</span><span class="op">.</span><span class="fu">id</span><span class="op">)</span> `</span>
+<span id="cb13-16"><a href="#cb13-16" aria-hidden="true" tabindex="-1"></a>  <span class="op">-</span>Headers <span class="va">$headers</span></span>
+<span id="cb13-17"><a href="#cb13-17" aria-hidden="true" tabindex="-1"></a><span class="fu">Remove-Variable</span> session<span class="op">,</span> headers</span></code></pre></div>
 <p>This write requires Meetings to be enabled and the signed-in staff
 role to permit it. It is a cross-suite integration example; for this
 product’s request models, use the complete technical reference
@@ -938,13 +1020,13 @@ handoff example</h3>
 <code>X-Townlight-Session</code> and this JSON, replacing the synthetic
 UUIDs with saved synthetic meeting/agenda IDs. Configure
 <code>synthetic-chamber</code> first.</p>
-<div class="sourceCode" id="cb13"><pre
-class="sourceCode json"><code class="sourceCode json"><span id="cb13-1"><a href="#cb13-1" aria-hidden="true" tabindex="-1"></a><span class="fu">{</span></span>
-<span id="cb13-2"><a href="#cb13-2" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;meeting_id&quot;</span><span class="fu">:</span> <span class="st">&quot;11111111-1111-4111-8111-111111111111&quot;</span><span class="fu">,</span></span>
-<span id="cb13-3"><a href="#cb13-3" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;agenda_ids&quot;</span><span class="fu">:</span> <span class="ot">[</span><span class="st">&quot;22222222-2222-4222-8222-222222222222&quot;</span><span class="ot">]</span><span class="fu">,</span></span>
-<span id="cb13-4"><a href="#cb13-4" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;live_source_id&quot;</span><span class="fu">:</span> <span class="st">&quot;synthetic-chamber&quot;</span><span class="fu">,</span></span>
-<span id="cb13-5"><a href="#cb13-5" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;idempotency_key&quot;</span><span class="fu">:</span> <span class="st">&quot;synthetic-docs-capture-001&quot;</span></span>
-<span id="cb13-6"><a href="#cb13-6" aria-hidden="true" tabindex="-1"></a><span class="fu">}</span></span></code></pre></div>
+<div class="sourceCode" id="cb14"><pre
+class="sourceCode json"><code class="sourceCode json"><span id="cb14-1"><a href="#cb14-1" aria-hidden="true" tabindex="-1"></a><span class="fu">{</span></span>
+<span id="cb14-2"><a href="#cb14-2" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;meeting_id&quot;</span><span class="fu">:</span> <span class="st">&quot;11111111-1111-4111-8111-111111111111&quot;</span><span class="fu">,</span></span>
+<span id="cb14-3"><a href="#cb14-3" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;agenda_ids&quot;</span><span class="fu">:</span> <span class="ot">[</span><span class="st">&quot;22222222-2222-4222-8222-222222222222&quot;</span><span class="ot">]</span><span class="fu">,</span></span>
+<span id="cb14-4"><a href="#cb14-4" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;live_source_id&quot;</span><span class="fu">:</span> <span class="st">&quot;synthetic-chamber&quot;</span><span class="fu">,</span></span>
+<span id="cb14-5"><a href="#cb14-5" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;idempotency_key&quot;</span><span class="fu">:</span> <span class="st">&quot;synthetic-docs-capture-001&quot;</span></span>
+<span id="cb14-6"><a href="#cb14-6" aria-hidden="true" tabindex="-1"></a><span class="fu">}</span></span></code></pre></div>
 <p>The initial response is <code>202</code> with a queued/running
 identity rather than completed media. Read
 <code>/v1/recordings/{identity}</code>, explicitly stop live capture
@@ -953,11 +1035,11 @@ completed status before reading <code>/content</code>. Then the
 authorized Records client calls
 <code>POST /desktop/v1/requests/{request_id}/station-recordings</code>
 on the paired Suite runtime with:</p>
-<div class="sourceCode" id="cb14"><pre
-class="sourceCode json"><code class="sourceCode json"><span id="cb14-1"><a href="#cb14-1" aria-hidden="true" tabindex="-1"></a><span class="fu">{</span></span>
-<span id="cb14-2"><a href="#cb14-2" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;recording_id&quot;</span><span class="fu">:</span> <span class="st">&quot;33333333-3333-4333-8333-333333333333&quot;</span><span class="fu">,</span></span>
-<span id="cb14-3"><a href="#cb14-3" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;expected_sha256&quot;</span><span class="fu">:</span> <span class="st">&quot;aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&quot;</span></span>
-<span id="cb14-4"><a href="#cb14-4" aria-hidden="true" tabindex="-1"></a><span class="fu">}</span></span></code></pre></div>
+<div class="sourceCode" id="cb15"><pre
+class="sourceCode json"><code class="sourceCode json"><span id="cb15-1"><a href="#cb15-1" aria-hidden="true" tabindex="-1"></a><span class="fu">{</span></span>
+<span id="cb15-2"><a href="#cb15-2" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;recording_id&quot;</span><span class="fu">:</span> <span class="st">&quot;33333333-3333-4333-8333-333333333333&quot;</span><span class="fu">,</span></span>
+<span id="cb15-3"><a href="#cb15-3" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;expected_sha256&quot;</span><span class="fu">:</span> <span class="st">&quot;aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&quot;</span></span>
+<span id="cb15-4"><a href="#cb15-4" aria-hidden="true" tabindex="-1"></a><span class="fu">}</span></span></code></pre></div>
 <p>The shown hash is deliberately a placeholder. Use the actual
 completed recording’s hash. A mismatched hash must fail. Repeating the
 identical completed handoff is idempotent; it does not create a release
@@ -992,8 +1074,8 @@ authenticated as Townlight staff or accepted as a Townlight product MCP
 deployment. This documentation does not add such a service.</p>
 <p>For a transcription client already provisioned separately, an
 illustrative tool call is:</p>
-<div class="sourceCode" id="cb15"><pre
-class="sourceCode json"><code class="sourceCode json"><span id="cb15-1"><a href="#cb15-1" aria-hidden="true" tabindex="-1"></a><span class="fu">{</span><span class="dt">&quot;name&quot;</span><span class="fu">:</span><span class="st">&quot;get_job_status&quot;</span><span class="fu">,</span><span class="dt">&quot;arguments&quot;</span><span class="fu">:{</span><span class="dt">&quot;job_id&quot;</span><span class="fu">:</span><span class="st">&quot;synthetic-existing-job-id&quot;</span><span class="fu">}}</span></span></code></pre></div>
+<div class="sourceCode" id="cb16"><pre
+class="sourceCode json"><code class="sourceCode json"><span id="cb16-1"><a href="#cb16-1" aria-hidden="true" tabindex="-1"></a><span class="fu">{</span><span class="dt">&quot;name&quot;</span><span class="fu">:</span><span class="st">&quot;get_job_status&quot;</span><span class="fu">,</span><span class="dt">&quot;arguments&quot;</span><span class="fu">:{</span><span class="dt">&quot;job_id&quot;</span><span class="fu">:</span><span class="st">&quot;synthetic-existing-job-id&quot;</span><span class="fu">}}</span></span></code></pre></div>
 <p>Use a job ID returned by that transcription service. This example
 does not create a Townlight record or bypass its review/Records handoff.
 The exact optional adapter tool signatures are supplied in the <a
@@ -1532,16 +1614,16 @@ component versions are unchanged. Old services expect schema 3; use a
 matched source/runtime and preserve the backup for rollback.</p>
 <p>Create <code>civiccast-feeds.json</code> in the private Station data
 directory:</p>
-<div class="sourceCode" id="cb16"><pre
-class="sourceCode json"><code class="sourceCode json"><span id="cb16-1"><a href="#cb16-1" aria-hidden="true" tabindex="-1"></a><span class="ot">[</span></span>
-<span id="cb16-2"><a href="#cb16-2" aria-hidden="true" tabindex="-1"></a>  <span class="fu">{</span></span>
-<span id="cb16-3"><a href="#cb16-3" aria-hidden="true" tabindex="-1"></a>    <span class="dt">&quot;id&quot;</span><span class="fu">:</span> <span class="st">&quot;peg&quot;</span><span class="fu">,</span></span>
-<span id="cb16-4"><a href="#cb16-4" aria-hidden="true" tabindex="-1"></a>    <span class="dt">&quot;label&quot;</span><span class="fu">:</span> <span class="st">&quot;CivicCast council feed&quot;</span><span class="fu">,</span></span>
-<span id="cb16-5"><a href="#cb16-5" aria-hidden="true" tabindex="-1"></a>    <span class="dt">&quot;address&quot;</span><span class="fu">:</span> <span class="st">&quot;192.0.2.10&quot;</span><span class="fu">,</span></span>
-<span id="cb16-6"><a href="#cb16-6" aria-hidden="true" tabindex="-1"></a>    <span class="dt">&quot;port&quot;</span><span class="fu">:</span> <span class="dv">10080</span><span class="fu">,</span></span>
-<span id="cb16-7"><a href="#cb16-7" aria-hidden="true" tabindex="-1"></a>    <span class="dt">&quot;secret_env&quot;</span><span class="fu">:</span> <span class="st">&quot;TOWNLIGHT_STATION_SRT_PEG&quot;</span></span>
-<span id="cb16-8"><a href="#cb16-8" aria-hidden="true" tabindex="-1"></a>  <span class="fu">}</span></span>
-<span id="cb16-9"><a href="#cb16-9" aria-hidden="true" tabindex="-1"></a><span class="ot">]</span></span></code></pre></div>
+<div class="sourceCode" id="cb17"><pre
+class="sourceCode json"><code class="sourceCode json"><span id="cb17-1"><a href="#cb17-1" aria-hidden="true" tabindex="-1"></a><span class="ot">[</span></span>
+<span id="cb17-2"><a href="#cb17-2" aria-hidden="true" tabindex="-1"></a>  <span class="fu">{</span></span>
+<span id="cb17-3"><a href="#cb17-3" aria-hidden="true" tabindex="-1"></a>    <span class="dt">&quot;id&quot;</span><span class="fu">:</span> <span class="st">&quot;peg&quot;</span><span class="fu">,</span></span>
+<span id="cb17-4"><a href="#cb17-4" aria-hidden="true" tabindex="-1"></a>    <span class="dt">&quot;label&quot;</span><span class="fu">:</span> <span class="st">&quot;CivicCast council feed&quot;</span><span class="fu">,</span></span>
+<span id="cb17-5"><a href="#cb17-5" aria-hidden="true" tabindex="-1"></a>    <span class="dt">&quot;address&quot;</span><span class="fu">:</span> <span class="st">&quot;192.0.2.10&quot;</span><span class="fu">,</span></span>
+<span id="cb17-6"><a href="#cb17-6" aria-hidden="true" tabindex="-1"></a>    <span class="dt">&quot;port&quot;</span><span class="fu">:</span> <span class="dv">10080</span><span class="fu">,</span></span>
+<span id="cb17-7"><a href="#cb17-7" aria-hidden="true" tabindex="-1"></a>    <span class="dt">&quot;secret_env&quot;</span><span class="fu">:</span> <span class="st">&quot;TOWNLIGHT_STATION_SRT_PEG&quot;</span></span>
+<span id="cb17-8"><a href="#cb17-8" aria-hidden="true" tabindex="-1"></a>  <span class="fu">}</span></span>
+<span id="cb17-9"><a href="#cb17-9" aria-hidden="true" tabindex="-1"></a><span class="ot">]</span></span></code></pre></div>
 <p>The address is a numeric IPv4 <strong>local interface bind address on
 Station</strong>, not the CivicCast computer. <code>192.0.2.10</code> is
 a documentation placeholder. Use the actual Station interface, an unused
@@ -1573,12 +1655,12 @@ YouTube video uploads)</li>
 <p>Run the existing <code>serve</code> and capture <code>worker</code>,
 plus the separate upload consumer with the same Station settings and
 dedicated database:</p>
-<div class="sourceCode" id="cb17"><pre
-class="sourceCode powershell"><code class="sourceCode powershell"><span id="cb17-1"><a href="#cb17-1" aria-hidden="true" tabindex="-1"></a>townlight-station migrate</span>
-<span id="cb17-2"><a href="#cb17-2" aria-hidden="true" tabindex="-1"></a>townlight-station serve</span>
-<span id="cb17-3"><a href="#cb17-3" aria-hidden="true" tabindex="-1"></a><span class="co"># In separate managed processes with the same explicit Station configuration:</span></span>
-<span id="cb17-4"><a href="#cb17-4" aria-hidden="true" tabindex="-1"></a>townlight-station worker</span>
-<span id="cb17-5"><a href="#cb17-5" aria-hidden="true" tabindex="-1"></a>townlight-station uploads</span></code></pre></div>
+<div class="sourceCode" id="cb18"><pre
+class="sourceCode powershell"><code class="sourceCode powershell"><span id="cb18-1"><a href="#cb18-1" aria-hidden="true" tabindex="-1"></a>townlight-station migrate</span>
+<span id="cb18-2"><a href="#cb18-2" aria-hidden="true" tabindex="-1"></a>townlight-station serve</span>
+<span id="cb18-3"><a href="#cb18-3" aria-hidden="true" tabindex="-1"></a><span class="co"># In separate managed processes with the same explicit Station configuration:</span></span>
+<span id="cb18-4"><a href="#cb18-4" aria-hidden="true" tabindex="-1"></a>townlight-station worker</span>
+<span id="cb18-5"><a href="#cb18-5" aria-hidden="true" tabindex="-1"></a>townlight-station uploads</span></code></pre></div>
 <p>These are deployment commands, <strong>not commands executed against
 installed apps by this development task</strong>. Run only one capture
 worker and one upload worker per database. Each holds a distinct
@@ -1637,21 +1719,21 @@ only</td>
 <p>Station’s generated <code>/openapi.json</code> includes the new
 routes and request schemas. Example bodies (use real canonical IDs from
 the selected deployment):</p>
-<div class="sourceCode" id="cb18"><pre
-class="sourceCode json"><code class="sourceCode json"><span id="cb18-1"><a href="#cb18-1" aria-hidden="true" tabindex="-1"></a><span class="fu">{</span></span>
-<span id="cb18-2"><a href="#cb18-2" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;meeting_id&quot;</span><span class="fu">:</span> <span class="st">&quot;11111111-1111-4111-8111-111111111111&quot;</span><span class="fu">,</span></span>
-<span id="cb18-3"><a href="#cb18-3" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;agenda_ids&quot;</span><span class="fu">:</span> <span class="ot">[]</span><span class="fu">,</span></span>
-<span id="cb18-4"><a href="#cb18-4" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;live_source_id&quot;</span><span class="fu">:</span> <span class="st">&quot;chamber&quot;</span><span class="fu">,</span></span>
-<span id="cb18-5"><a href="#cb18-5" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;civiccast_feed_id&quot;</span><span class="fu">:</span> <span class="st">&quot;peg&quot;</span><span class="fu">,</span></span>
-<span id="cb18-6"><a href="#cb18-6" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;idempotency_key&quot;</span><span class="fu">:</span> <span class="st">&quot;council-live-2026-10-30&quot;</span></span>
-<span id="cb18-7"><a href="#cb18-7" aria-hidden="true" tabindex="-1"></a><span class="fu">}</span></span></code></pre></div>
 <div class="sourceCode" id="cb19"><pre
 class="sourceCode json"><code class="sourceCode json"><span id="cb19-1"><a href="#cb19-1" aria-hidden="true" tabindex="-1"></a><span class="fu">{</span></span>
-<span id="cb19-2"><a href="#cb19-2" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;title&quot;</span><span class="fu">:</span> <span class="st">&quot;City council meeting — 30 October 2026&quot;</span><span class="fu">,</span></span>
-<span id="cb19-3"><a href="#cb19-3" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;privacy&quot;</span><span class="fu">:</span> <span class="st">&quot;private&quot;</span><span class="fu">,</span></span>
-<span id="cb19-4"><a href="#cb19-4" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;approval_note&quot;</span><span class="fu">:</span> <span class="st">&quot;Reviewed completed recording for upload&quot;</span><span class="fu">,</span></span>
-<span id="cb19-5"><a href="#cb19-5" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;idempotency_key&quot;</span><span class="fu">:</span> <span class="st">&quot;council-vod-2026-10-30&quot;</span></span>
-<span id="cb19-6"><a href="#cb19-6" aria-hidden="true" tabindex="-1"></a><span class="fu">}</span></span></code></pre></div>
+<span id="cb19-2"><a href="#cb19-2" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;meeting_id&quot;</span><span class="fu">:</span> <span class="st">&quot;11111111-1111-4111-8111-111111111111&quot;</span><span class="fu">,</span></span>
+<span id="cb19-3"><a href="#cb19-3" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;agenda_ids&quot;</span><span class="fu">:</span> <span class="ot">[]</span><span class="fu">,</span></span>
+<span id="cb19-4"><a href="#cb19-4" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;live_source_id&quot;</span><span class="fu">:</span> <span class="st">&quot;chamber&quot;</span><span class="fu">,</span></span>
+<span id="cb19-5"><a href="#cb19-5" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;civiccast_feed_id&quot;</span><span class="fu">:</span> <span class="st">&quot;peg&quot;</span><span class="fu">,</span></span>
+<span id="cb19-6"><a href="#cb19-6" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;idempotency_key&quot;</span><span class="fu">:</span> <span class="st">&quot;council-live-2026-10-30&quot;</span></span>
+<span id="cb19-7"><a href="#cb19-7" aria-hidden="true" tabindex="-1"></a><span class="fu">}</span></span></code></pre></div>
+<div class="sourceCode" id="cb20"><pre
+class="sourceCode json"><code class="sourceCode json"><span id="cb20-1"><a href="#cb20-1" aria-hidden="true" tabindex="-1"></a><span class="fu">{</span></span>
+<span id="cb20-2"><a href="#cb20-2" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;title&quot;</span><span class="fu">:</span> <span class="st">&quot;City council meeting — 30 October 2026&quot;</span><span class="fu">,</span></span>
+<span id="cb20-3"><a href="#cb20-3" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;privacy&quot;</span><span class="fu">:</span> <span class="st">&quot;private&quot;</span><span class="fu">,</span></span>
+<span id="cb20-4"><a href="#cb20-4" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;approval_note&quot;</span><span class="fu">:</span> <span class="st">&quot;Reviewed completed recording for upload&quot;</span><span class="fu">,</span></span>
+<span id="cb20-5"><a href="#cb20-5" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;idempotency_key&quot;</span><span class="fu">:</span> <span class="st">&quot;council-vod-2026-10-30&quot;</span></span>
+<span id="cb20-6"><a href="#cb20-6" aria-hidden="true" tabindex="-1"></a><span class="fu">}</span></span></code></pre></div>
 <p>Upload titles are 1–100 characters; control characters and angle
 brackets are rejected. Visibility is private/unlisted/public; approval
 note 3–500 characters; key 1–100 characters. Repeating the same key
@@ -1696,11 +1778,11 @@ synthetic API responses. Existing boundary/ operations checks and
 TypeScript compilation also apply.</p>
 <p>Example invocation from a development environment with existing
 dependencies:</p>
-<div class="sourceCode" id="cb20"><pre
-class="sourceCode powershell"><code class="sourceCode powershell"><span id="cb20-1"><a href="#cb20-1" aria-hidden="true" tabindex="-1"></a><span class="va">$env</span><span class="op">:</span><span class="va">PYTHONPATH</span> <span class="op">=</span> <span class="op">(</span><span class="fu">Resolve-Path</span> <span class="op">./</span>beta-1<span class="op">).</span><span class="fu">Path</span></span>
-<span id="cb20-2"><a href="#cb20-2" aria-hidden="true" tabindex="-1"></a><span class="va">$env</span><span class="op">:</span><span class="va">STATION_TEST_PG_BIN</span> <span class="op">=</span> <span class="st">&#39;C:/test-tools/postgres/bin&#39;</span></span>
-<span id="cb20-3"><a href="#cb20-3" aria-hidden="true" tabindex="-1"></a><span class="va">$env</span><span class="op">:</span><span class="va">STATION_TEST_MEDIA_RUNTIME</span> <span class="op">=</span> <span class="st">&#39;C:/test-tools/station-media-runtime&#39;</span></span>
-<span id="cb20-4"><a href="#cb20-4" aria-hidden="true" tabindex="-1"></a>python <span class="op">-</span>B <span class="op">./</span>beta-1<span class="op">/</span>tests<span class="op">/</span>accept_deliveries<span class="op">.</span><span class="fu">py</span> C<span class="op">:/</span>test-output<span class="op">/</span>station-deliveries-new</span></code></pre></div>
+<div class="sourceCode" id="cb21"><pre
+class="sourceCode powershell"><code class="sourceCode powershell"><span id="cb21-1"><a href="#cb21-1" aria-hidden="true" tabindex="-1"></a><span class="va">$env</span><span class="op">:</span><span class="va">PYTHONPATH</span> <span class="op">=</span> <span class="op">(</span><span class="fu">Resolve-Path</span> <span class="op">./</span>beta-1<span class="op">).</span><span class="fu">Path</span></span>
+<span id="cb21-2"><a href="#cb21-2" aria-hidden="true" tabindex="-1"></a><span class="va">$env</span><span class="op">:</span><span class="va">STATION_TEST_PG_BIN</span> <span class="op">=</span> <span class="st">&#39;C:/test-tools/postgres/bin&#39;</span></span>
+<span id="cb21-3"><a href="#cb21-3" aria-hidden="true" tabindex="-1"></a><span class="va">$env</span><span class="op">:</span><span class="va">STATION_TEST_MEDIA_RUNTIME</span> <span class="op">=</span> <span class="st">&#39;C:/test-tools/station-media-runtime&#39;</span></span>
+<span id="cb21-4"><a href="#cb21-4" aria-hidden="true" tabindex="-1"></a>python <span class="op">-</span>B <span class="op">./</span>beta-1<span class="op">/</span>tests<span class="op">/</span>accept_deliveries<span class="op">.</span><span class="fu">py</span> C<span class="op">:/</span>test-output<span class="op">/</span>station-deliveries-new</span></code></pre></div>
 <p>Use a <strong>new</strong> output directory; the script starts/stops
 only its owned disposable cluster and children. See the task’s retained
 acceptance receipts for actual results. This evidence establishes the

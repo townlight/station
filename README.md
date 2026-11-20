@@ -1,5 +1,10 @@
 > **Repository scope:** the lightweight Python meeting recorder remains in `beta-1/`. The experimental Rust broadcast engine moved to private CivicCast Lab. See `docs/RUST-SEPARATION.md`. Historical release evidence is unchanged.
 
+## Station recorder candidate
+
+Windows 1.9.0.1 / Station 0.4.0 is in development and has not been published. It adds integrated recorder setup/recovery, camera and microphone selection with a test clip, eight-hour/64 GiB recording limits and streamed Records attachment, and renewable authorized operator sessions. Existing released MSI and historical acceptance remain unchanged. Installed candidate acceptance and merge are pending; tagging/publication require Scott approval.
+
+
 ## Windows 1.8.2.1 maintenance release
 
 Windows 1.8.2.1 packages the staff authorization, explicit database configuration and component metadata corrections. Its exact signed installed checks cover setup, the 1.8.1.1 upgrade, saved staff records, procurement/Contracts handoffs, backup/restore and uninstall retention. Unchanged module and 31-source/34-format import evidence remains attributed to the earlier build that produced it; this is not a new exhaustive test of every module or live provider.

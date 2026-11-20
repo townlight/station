@@ -14,12 +14,15 @@ header .brand{display:inline-flex;align-items:center;max-width:100%;flex-shrink:
 <nav aria-label="Main"><a href="../manuals/suite.html">Suite manual</a>
 <a href="../versions.html">Versions and Windows release</a>
 <a href="../terms.html">Terms and license</a></nav></header>
-<main id="main" class="reading wrap"><section id="windows-maintenance"><h2>Windows 1.8.2.1 maintenance release</h2><p>Windows 1.8.2.1 packages the staff authorization, explicit database configuration and component metadata corrections. Its exact signed installed checks cover setup, the 1.8.1.1 upgrade, saved staff records, procurement/Contracts handoffs, backup/restore and uninstall retention. Unchanged module and 31-source/34-format import evidence remains attributed to the earlier build that produced it; this is not a new exhaustive test of every module or live provider.</p><p>Windows 1.8.2.1 has signed installed acceptance for fresh setup and an in-place upgrade from Windows 1.8.1.1. Before upgrading, back up city data and settings, close Townlight, run the signed MSI, and reopen it under the same Windows account with the existing %LOCALAPPDATA%\CivicSuite profile. Keep the prior installer and a restore path. Other upgrade paths are unverified. Station uses its separately configured service. The acceptance summary distinguishes new maintenance checks from reused workflow evidence.</p><p><a href="https://github.com/townlight/townlight/releases/tag/townlight-windows-v1.8.2.1">Release and downloads</a> · <a href="https://github.com/townlight/townlight/releases/download/townlight-windows-v1.8.2.1/ACCEPTANCE-Windows-1.8.2.1.md">Acceptance and limits</a></p></section>
+<main id="main" class="reading wrap">
 <nav id="TOC" role="doc-toc">
 <ul>
 <li><a href="#windows-1.8.2.1-maintenance-release"
 id="toc-windows-1.8.2.1-maintenance-release">Windows 1.8.2.1 maintenance
 release</a></li>
+<li><a href="#windows-recorder-update-1.9.0.1-candidate-not-published"
+id="toc-windows-recorder-update-1.9.0.1-candidate-not-published">Windows
+recorder update — 1.9.0.1 candidate (not published)</a></li>
 <li><a href="#townlight-records-manual"
 id="toc-townlight-records-manual">Townlight Records Manual</a>
 <ul>
@@ -75,6 +78,85 @@ control</a></li>
 </nav>
 <h2 id="windows-1.8.2.1-maintenance-release">Windows 1.8.2.1 maintenance
 release</h2>
+<h2 id="windows-recorder-update-1.9.0.1-candidate-not-published">Windows
+recorder update — 1.9.0.1 candidate (not published)</h2>
+<p>This section describes the new candidate. The public 1.8.2.1 MSI does
+not acquire these capabilities until a new release is approved and
+published. Installed acceptance of this candidate is still pending.</p>
+<h3 id="clerk-and-operator">Clerk and operator</h3>
+<ol type="1">
+<li>Install Townlight and complete normal first-run setup with the full
+Windows profile or a custom selection that includes Meetings and Records
+(Station is bundled). Finishing setup provisions the bundled recorder, a
+private database and Windows sign-in task. No PostgreSQL, Python or
+media-runtime installation commands are needed. Existing installations
+use Settings → Modules → Townlight Station → <strong>Set up meeting
+recording</strong>.</li>
+<li>Keep Windows signed in and the computer awake while recording. The
+recorder runs in that user’s device-access session, independently of the
+Townlight window. It is not a multi-user server or a full PEG station.
+Closing the recorder tab does not stop a recording.</li>
+<li>Sign in with an existing authorized staff account. From Meetings
+choose <strong>Open / reconnect to meeting recorder</strong>. Select a
+meeting and its agenda items. In input setup, find devices, choose one
+camera/capture device and one microphone, and save. Record a ten-second
+input test, then play it to check the picture and sound; the meter
+responds during playback. This test clip is temporary and is not a
+canonical meeting record. Windows camera/microphone privacy settings and
+exclusive device use still apply. Configured UDP MPEG-TS input remains
+supported.</li>
+<li>Start the meeting recording. The default duration limit is eight
+hours, with a 64 GiB file limit and at least 1 GiB reserved disk space.
+Admission estimates the configured duration and bitrate. Free space is
+monitored while recording; low space or a limit requests a graceful stop
+and displays the reason. These are configured limits, not a claim that
+every eight-hour meeting has been tested. Plan space for the recording,
+its Records copy and backups. Sleep, sign-out, power failure and
+unavailable hardware can interrupt capture.</li>
+<li>An open operator page renews its fifteen-minute session against the
+current Townlight staff authority. Sign-out, revoked permissions and the
+underlying staff-session expiry still take effect. Reopen from Townlight
+to reconnect to an existing recording; reconnect never starts a second
+recording. Select <strong>Stop recording</strong> to drain and finalize
+the file.</li>
+<li>After completion, an authorized Records user selects a request and
+explicitly attaches the recording. Records streams a separate managed
+copy and verifies SHA-256, size and provenance; files up to 64 GiB are
+accepted subject to available space. Attachment is not public release.
+Review, redaction and publication remain separate Records
+decisions.</li>
+</ol>
+<h3 id="administrator-and-recovery">Administrator and recovery</h3>
+<p>Station setup uses bundled native dependencies and its existing
+pinned CivicCast media implementation; it never starts or changes
+CivicCast or CivicCast Lab. The per-user logon task owns a separate
+PostgreSQL instance on loopback port 15435; Station’s API listens only
+on 127.0.0.1:8756. Townlight’s existing staff authority remains on its
+configured Suite origin. Protected settings and database credentials
+remain in the recorder data directory, under the selected city data
+location. Setup refuses unrelated nonempty storage or an unrelated task
+with the same name. Retry setup after correcting readiness errors;
+inspect the private background, PostgreSQL, API and worker logs when
+needed.</p>
+<p>Use <strong>Check recorder readiness</strong>, <strong>Back up
+Station</strong>, and <strong>Restore Station backup</strong> in
+Settings → Modules. Finish queued and active recordings before backup or
+restore. Backups contain a PostgreSQL dump, recording/ingest files,
+saved source choices and a SHA-256 member manifest; they omit
+credentials and native executables. Restore verifies the members,
+creates a pre-restore recovery copy, and restores into this
+installation’s separately protected database. Recheck input selection
+afterward. A Suite backup includes a coherent Station backup when
+paired; it does not copy the running Station database or its secrets.
+Suite restore preserves that live private directory and applies the
+included Station backup separately.</p>
+<pre class="mermaid"><code>flowchart LR
+    Staff[Existing Townlight staff authority] --&gt; Operator[Station operator]
+    Camera[Camera and microphone or UDP feed] --&gt; Recorder[Per-user background recorder]
+    Operator --&gt; Recorder
+    Recorder --&gt; Private[Private Station database and recording]
+    Private --&gt;|Explicit hash-verified attachment| Records[Records managed copy]
+    Records --&gt; Review[Separate review and release decision]</code></pre>
 <p>Windows 1.8.2.1 packages the staff authorization, explicit database
 configuration and component metadata corrections. Its exact signed
 installed checks cover setup, the 1.8.1.1 upgrade, saved staff records,
@@ -316,7 +398,7 @@ new Townlight profile for first run.</p>
 <ol type="1">
 <li>Download the signed MSI, matching source companion and checksums
 from the <a
-href="https://github.com/townlight/townlight/releases/tag/townlight-windows-v1.8.2.1">public
+href="https://github.com/townlight/townlight/releases/tag/townlight-windows-v1.8.1.1">public
 Windows release</a>.</li>
 <li>Verify the MSI hash and Authenticode publisher before installation.
 See the <a
@@ -474,10 +556,10 @@ an official permit-fee calculator or payment service.</p>
 at the same level as <code>operation</code> and <code>request_id</code>.
 Examples of command payloads follow; IDs and permissions still come from
 the signed-in synthetic account.</p>
-<div class="sourceCode" id="cb1"><pre
-class="sourceCode json"><code class="sourceCode json"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a><span class="fu">{</span><span class="dt">&quot;action&quot;</span><span class="fu">:</span><span class="st">&quot;add-records-fee-line&quot;</span><span class="fu">,</span><span class="dt">&quot;payload&quot;</span><span class="fu">:{</span><span class="dt">&quot;feeLineDescription&quot;</span><span class="fu">:</span><span class="st">&quot;Synthetic reproduction&quot;</span><span class="fu">,</span><span class="dt">&quot;feeScheduleBasis&quot;</span><span class="fu">:</span><span class="st">&quot;Fictional test schedule&quot;</span><span class="fu">,</span><span class="dt">&quot;feeLineAmount&quot;</span><span class="fu">:</span><span class="st">&quot;12.50&quot;</span><span class="fu">}}</span></span></code></pre></div>
 <div class="sourceCode" id="cb2"><pre
-class="sourceCode json"><code class="sourceCode json"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a><span class="fu">{</span><span class="dt">&quot;action&quot;</span><span class="fu">:</span><span class="st">&quot;waive-records-fee&quot;</span><span class="fu">,</span><span class="dt">&quot;payload&quot;</span><span class="fu">:{</span><span class="dt">&quot;feeWaiverReason&quot;</span><span class="fu">:</span><span class="st">&quot;Synthetic public-interest exercise&quot;</span><span class="fu">}}</span></span></code></pre></div>
+class="sourceCode json"><code class="sourceCode json"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a><span class="fu">{</span><span class="dt">&quot;action&quot;</span><span class="fu">:</span><span class="st">&quot;add-records-fee-line&quot;</span><span class="fu">,</span><span class="dt">&quot;payload&quot;</span><span class="fu">:{</span><span class="dt">&quot;feeLineDescription&quot;</span><span class="fu">:</span><span class="st">&quot;Synthetic reproduction&quot;</span><span class="fu">,</span><span class="dt">&quot;feeScheduleBasis&quot;</span><span class="fu">:</span><span class="st">&quot;Fictional test schedule&quot;</span><span class="fu">,</span><span class="dt">&quot;feeLineAmount&quot;</span><span class="fu">:</span><span class="st">&quot;12.50&quot;</span><span class="fu">}}</span></span></code></pre></div>
+<div class="sourceCode" id="cb3"><pre
+class="sourceCode json"><code class="sourceCode json"><span id="cb3-1"><a href="#cb3-1" aria-hidden="true" tabindex="-1"></a><span class="fu">{</span><span class="dt">&quot;action&quot;</span><span class="fu">:</span><span class="st">&quot;waive-records-fee&quot;</span><span class="fu">,</span><span class="dt">&quot;payload&quot;</span><span class="fu">:{</span><span class="dt">&quot;feeWaiverReason&quot;</span><span class="fu">:</span><span class="st">&quot;Synthetic public-interest exercise&quot;</span><span class="fu">}}</span></span></code></pre></div>
 <p>Use the exact outer apply contract in the API reference rather than
 sending these command fragments to an arbitrary URL. After either
 operation, read the request again; a saved amount does not approve or
@@ -532,8 +614,8 @@ existing local public intake and tracking</h3>
 deployment. Under the application’s configured portal posture, a
 synthetic client can submit
 <code>POST /desktop/v1/public/requests</code> with:</p>
-<div class="sourceCode" id="cb3"><pre
-class="sourceCode json"><code class="sourceCode json"><span id="cb3-1"><a href="#cb3-1" aria-hidden="true" tabindex="-1"></a><span class="fu">{</span><span class="dt">&quot;requester&quot;</span><span class="fu">:</span><span class="st">&quot;Synthetic resident&quot;</span><span class="fu">,</span><span class="dt">&quot;requesterContact&quot;</span><span class="fu">:</span><span class="st">&quot;synthetic@example.invalid&quot;</span><span class="fu">,</span><span class="dt">&quot;summary&quot;</span><span class="fu">:</span><span class="st">&quot;Synthetic minutes request&quot;</span><span class="fu">,</span><span class="dt">&quot;deadline&quot;</span><span class="fu">:</span><span class="st">&quot;&quot;</span><span class="fu">}</span></span></code></pre></div>
+<div class="sourceCode" id="cb4"><pre
+class="sourceCode json"><code class="sourceCode json"><span id="cb4-1"><a href="#cb4-1" aria-hidden="true" tabindex="-1"></a><span class="fu">{</span><span class="dt">&quot;requester&quot;</span><span class="fu">:</span><span class="st">&quot;Synthetic resident&quot;</span><span class="fu">,</span><span class="dt">&quot;requesterContact&quot;</span><span class="fu">:</span><span class="st">&quot;synthetic@example.invalid&quot;</span><span class="fu">,</span><span class="dt">&quot;summary&quot;</span><span class="fu">:</span><span class="st">&quot;Synthetic minutes request&quot;</span><span class="fu">,</span><span class="dt">&quot;deadline&quot;</span><span class="fu">:</span><span class="st">&quot;&quot;</span><span class="fu">}</span></span></code></pre></div>
 <p>Retain the returned tracking information privately.
 <code>POST /desktop/v1/public/lookup</code> requires
 <strong>both</strong> <code>trackingNumber</code> and matching
@@ -644,10 +726,10 @@ frontend/development environment with <code>invoke</code> imported from
 <code>@tauri-apps/api/core</code>. It is not a command for an arbitrary
 web page or an instruction for nontechnical staff. IDs must come from
 records created in an isolated synthetic exercise.</p>
-<div class="sourceCode" id="cb4"><pre
-class="sourceCode javascript"><code class="sourceCode javascript"><span id="cb4-1"><a href="#cb4-1" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> { invoke } <span class="im">from</span> <span class="st">&#39;@tauri-apps/api/core&#39;</span><span class="op">;</span></span>
-<span id="cb4-2"><a href="#cb4-2" aria-hidden="true" tabindex="-1"></a><span class="kw">const</span> result <span class="op">=</span> <span class="cf">await</span> <span class="fu">invoke</span>(<span class="st">&#39;records_domain_request&#39;</span><span class="op">,</span> {<span class="dt">request</span><span class="op">:</span> {<span class="dt">operation</span><span class="op">:</span> <span class="st">&#39;view&#39;</span><span class="op">,</span> <span class="dt">request_id</span><span class="op">:</span> requestId}})<span class="op">;</span></span>
-<span id="cb4-3"><a href="#cb4-3" aria-hidden="true" tabindex="-1"></a><span class="bu">console</span><span class="op">.</span><span class="fu">log</span>(result)<span class="op">;</span></span></code></pre></div>
+<div class="sourceCode" id="cb5"><pre
+class="sourceCode javascript"><code class="sourceCode javascript"><span id="cb5-1"><a href="#cb5-1" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> { invoke } <span class="im">from</span> <span class="st">&#39;@tauri-apps/api/core&#39;</span><span class="op">;</span></span>
+<span id="cb5-2"><a href="#cb5-2" aria-hidden="true" tabindex="-1"></a><span class="kw">const</span> result <span class="op">=</span> <span class="cf">await</span> <span class="fu">invoke</span>(<span class="st">&#39;records_domain_request&#39;</span><span class="op">,</span> {<span class="dt">request</span><span class="op">:</span> {<span class="dt">operation</span><span class="op">:</span> <span class="st">&#39;view&#39;</span><span class="op">,</span> <span class="dt">request_id</span><span class="op">:</span> requestId}})<span class="op">;</span></span>
+<span id="cb5-3"><a href="#cb5-3" aria-hidden="true" tabindex="-1"></a><span class="bu">console</span><span class="op">.</span><span class="fu">log</span>(result)<span class="op">;</span></span></code></pre></div>
 <h3 id="trusted-local-http-example">Trusted local HTTP example</h3>
 <p>An administrator/developer can inspect an already-configured isolated
 runtime from a trusted local process. This PowerShell example reads the
@@ -655,13 +737,13 @@ signed-in synthetic profile’s existing proof into memory; it does not
 create a user, seed a session, reveal the proof in output or bypass a
 permission check. Do not use real city data in development examples. A
 read response does not prove approval or publication.</p>
-<div class="sourceCode" id="cb5"><pre
-class="sourceCode powershell"><code class="sourceCode powershell"><span id="cb5-1"><a href="#cb5-1" aria-hidden="true" tabindex="-1"></a><span class="va">$profilePath</span> <span class="op">=</span> <span class="fu">Join-Path</span> <span class="va">$env</span><span class="op">:</span><span class="va">LOCALAPPDATA</span> <span class="st">&#39;CivicSuite&#39;</span></span>
-<span id="cb5-2"><a href="#cb5-2" aria-hidden="true" tabindex="-1"></a><span class="va">$sessionPath</span> <span class="op">=</span> <span class="fu">Join-Path</span> <span class="va">$profilePath</span> <span class="st">&#39;config\local-session.json&#39;</span></span>
-<span id="cb5-3"><a href="#cb5-3" aria-hidden="true" tabindex="-1"></a><span class="va">$session</span> <span class="op">=</span> <span class="fu">Get-Content</span> <span class="op">-</span>LiteralPath <span class="va">$sessionPath</span> <span class="op">-</span>Raw <span class="op">|</span> <span class="fu">ConvertFrom-Json</span></span>
-<span id="cb5-4"><a href="#cb5-4" aria-hidden="true" tabindex="-1"></a><span class="va">$headers</span> <span class="op">=</span> @<span class="op">{</span> <span class="st">&#39;X-Townlight-Session&#39;</span> <span class="op">=</span> <span class="va">$session</span><span class="op">.</span><span class="fu">session_hash</span> <span class="op">}</span></span>
-<span id="cb5-5"><a href="#cb5-5" aria-hidden="true" tabindex="-1"></a><span class="fu">Invoke-RestMethod</span> <span class="op">-</span>Uri <span class="st">&#39;http://127.0.0.1:15480/desktop/v1/records-state&#39;</span> <span class="op">-</span>Headers <span class="va">$headers</span></span>
-<span id="cb5-6"><a href="#cb5-6" aria-hidden="true" tabindex="-1"></a><span class="fu">Remove-Variable</span> session<span class="op">,</span> headers</span></code></pre></div>
+<div class="sourceCode" id="cb6"><pre
+class="sourceCode powershell"><code class="sourceCode powershell"><span id="cb6-1"><a href="#cb6-1" aria-hidden="true" tabindex="-1"></a><span class="va">$profilePath</span> <span class="op">=</span> <span class="fu">Join-Path</span> <span class="va">$env</span><span class="op">:</span><span class="va">LOCALAPPDATA</span> <span class="st">&#39;CivicSuite&#39;</span></span>
+<span id="cb6-2"><a href="#cb6-2" aria-hidden="true" tabindex="-1"></a><span class="va">$sessionPath</span> <span class="op">=</span> <span class="fu">Join-Path</span> <span class="va">$profilePath</span> <span class="st">&#39;config\local-session.json&#39;</span></span>
+<span id="cb6-3"><a href="#cb6-3" aria-hidden="true" tabindex="-1"></a><span class="va">$session</span> <span class="op">=</span> <span class="fu">Get-Content</span> <span class="op">-</span>LiteralPath <span class="va">$sessionPath</span> <span class="op">-</span>Raw <span class="op">|</span> <span class="fu">ConvertFrom-Json</span></span>
+<span id="cb6-4"><a href="#cb6-4" aria-hidden="true" tabindex="-1"></a><span class="va">$headers</span> <span class="op">=</span> @<span class="op">{</span> <span class="st">&#39;X-Townlight-Session&#39;</span> <span class="op">=</span> <span class="va">$session</span><span class="op">.</span><span class="fu">session_hash</span> <span class="op">}</span></span>
+<span id="cb6-5"><a href="#cb6-5" aria-hidden="true" tabindex="-1"></a><span class="fu">Invoke-RestMethod</span> <span class="op">-</span>Uri <span class="st">&#39;http://127.0.0.1:15480/desktop/v1/records-state&#39;</span> <span class="op">-</span>Headers <span class="va">$headers</span></span>
+<span id="cb6-6"><a href="#cb6-6" aria-hidden="true" tabindex="-1"></a><span class="fu">Remove-Variable</span> session<span class="op">,</span> headers</span></code></pre></div>
 <h3 id="a-synthetic-write-with-subsequent-readback">A synthetic write
 with subsequent readback</h3>
 <p>This example demonstrates the existing Meetings HTTP contract in an
@@ -669,24 +751,24 @@ isolated exercise. It is intentionally fictional. It does not start a
 service. Its authentication setup is included so it can be run
 independently under the signed-in synthetic account. If a write times
 out, inspect current records before repeating it.</p>
-<div class="sourceCode" id="cb6"><pre
-class="sourceCode powershell"><code class="sourceCode powershell"><span id="cb6-1"><a href="#cb6-1" aria-hidden="true" tabindex="-1"></a><span class="va">$profilePath</span> <span class="op">=</span> <span class="fu">Join-Path</span> <span class="va">$env</span><span class="op">:</span><span class="va">LOCALAPPDATA</span> <span class="st">&#39;CivicSuite&#39;</span></span>
-<span id="cb6-2"><a href="#cb6-2" aria-hidden="true" tabindex="-1"></a><span class="va">$sessionPath</span> <span class="op">=</span> <span class="fu">Join-Path</span> <span class="va">$profilePath</span> <span class="st">&#39;config/local-session.json&#39;</span></span>
-<span id="cb6-3"><a href="#cb6-3" aria-hidden="true" tabindex="-1"></a><span class="va">$session</span> <span class="op">=</span> <span class="fu">Get-Content</span> <span class="op">-</span>LiteralPath <span class="va">$sessionPath</span> <span class="op">-</span>Raw <span class="op">|</span> <span class="fu">ConvertFrom-Json</span></span>
-<span id="cb6-4"><a href="#cb6-4" aria-hidden="true" tabindex="-1"></a><span class="va">$headers</span> <span class="op">=</span> @<span class="op">{</span> <span class="st">&#39;X-Townlight-Session&#39;</span> <span class="op">=</span> <span class="va">$session</span><span class="op">.</span><span class="fu">session_hash</span> <span class="op">}</span></span>
-<span id="cb6-5"><a href="#cb6-5" aria-hidden="true" tabindex="-1"></a><span class="va">$body</span> <span class="op">=</span> @<span class="op">{</span></span>
-<span id="cb6-6"><a href="#cb6-6" aria-hidden="true" tabindex="-1"></a>  title <span class="op">=</span> <span class="st">&#39;Synthetic documentation exercise&#39;</span></span>
-<span id="cb6-7"><a href="#cb6-7" aria-hidden="true" tabindex="-1"></a>  scheduled_start <span class="op">=</span> <span class="st">&#39;2026-11-05T18:00:00-07:00&#39;</span></span>
-<span id="cb6-8"><a href="#cb6-8" aria-hidden="true" tabindex="-1"></a>  location <span class="op">=</span> <span class="st">&#39;Synthetic room&#39;</span></span>
-<span id="cb6-9"><a href="#cb6-9" aria-hidden="true" tabindex="-1"></a>  meeting_type <span class="op">=</span> <span class="st">&#39;regular&#39;</span></span>
-<span id="cb6-10"><a href="#cb6-10" aria-hidden="true" tabindex="-1"></a><span class="op">}</span> <span class="op">|</span> <span class="fu">ConvertTo-Json</span></span>
-<span id="cb6-11"><a href="#cb6-11" aria-hidden="true" tabindex="-1"></a><span class="va">$meeting</span> <span class="op">=</span> <span class="fu">Invoke-RestMethod</span> <span class="op">-</span>Method Post `</span>
-<span id="cb6-12"><a href="#cb6-12" aria-hidden="true" tabindex="-1"></a>  <span class="op">-</span>Uri <span class="st">&#39;http://127.0.0.1:15480/desktop/v1/meetings/meetings&#39;</span> `</span>
-<span id="cb6-13"><a href="#cb6-13" aria-hidden="true" tabindex="-1"></a>  <span class="op">-</span>Headers <span class="va">$headers</span> <span class="op">-</span>ContentType <span class="st">&#39;application/json&#39;</span> <span class="op">-</span>Body <span class="va">$body</span></span>
-<span id="cb6-14"><a href="#cb6-14" aria-hidden="true" tabindex="-1"></a><span class="fu">Invoke-RestMethod</span> `</span>
-<span id="cb6-15"><a href="#cb6-15" aria-hidden="true" tabindex="-1"></a>  <span class="op">-</span>Uri <span class="op">(</span><span class="st">&#39;http://127.0.0.1:15480/desktop/v1/meetings/meetings/&#39;</span> <span class="op">+</span> <span class="va">$meeting</span><span class="op">.</span><span class="fu">id</span><span class="op">)</span> `</span>
-<span id="cb6-16"><a href="#cb6-16" aria-hidden="true" tabindex="-1"></a>  <span class="op">-</span>Headers <span class="va">$headers</span></span>
-<span id="cb6-17"><a href="#cb6-17" aria-hidden="true" tabindex="-1"></a><span class="fu">Remove-Variable</span> session<span class="op">,</span> headers</span></code></pre></div>
+<div class="sourceCode" id="cb7"><pre
+class="sourceCode powershell"><code class="sourceCode powershell"><span id="cb7-1"><a href="#cb7-1" aria-hidden="true" tabindex="-1"></a><span class="va">$profilePath</span> <span class="op">=</span> <span class="fu">Join-Path</span> <span class="va">$env</span><span class="op">:</span><span class="va">LOCALAPPDATA</span> <span class="st">&#39;CivicSuite&#39;</span></span>
+<span id="cb7-2"><a href="#cb7-2" aria-hidden="true" tabindex="-1"></a><span class="va">$sessionPath</span> <span class="op">=</span> <span class="fu">Join-Path</span> <span class="va">$profilePath</span> <span class="st">&#39;config/local-session.json&#39;</span></span>
+<span id="cb7-3"><a href="#cb7-3" aria-hidden="true" tabindex="-1"></a><span class="va">$session</span> <span class="op">=</span> <span class="fu">Get-Content</span> <span class="op">-</span>LiteralPath <span class="va">$sessionPath</span> <span class="op">-</span>Raw <span class="op">|</span> <span class="fu">ConvertFrom-Json</span></span>
+<span id="cb7-4"><a href="#cb7-4" aria-hidden="true" tabindex="-1"></a><span class="va">$headers</span> <span class="op">=</span> @<span class="op">{</span> <span class="st">&#39;X-Townlight-Session&#39;</span> <span class="op">=</span> <span class="va">$session</span><span class="op">.</span><span class="fu">session_hash</span> <span class="op">}</span></span>
+<span id="cb7-5"><a href="#cb7-5" aria-hidden="true" tabindex="-1"></a><span class="va">$body</span> <span class="op">=</span> @<span class="op">{</span></span>
+<span id="cb7-6"><a href="#cb7-6" aria-hidden="true" tabindex="-1"></a>  title <span class="op">=</span> <span class="st">&#39;Synthetic documentation exercise&#39;</span></span>
+<span id="cb7-7"><a href="#cb7-7" aria-hidden="true" tabindex="-1"></a>  scheduled_start <span class="op">=</span> <span class="st">&#39;2026-11-05T18:00:00-07:00&#39;</span></span>
+<span id="cb7-8"><a href="#cb7-8" aria-hidden="true" tabindex="-1"></a>  location <span class="op">=</span> <span class="st">&#39;Synthetic room&#39;</span></span>
+<span id="cb7-9"><a href="#cb7-9" aria-hidden="true" tabindex="-1"></a>  meeting_type <span class="op">=</span> <span class="st">&#39;regular&#39;</span></span>
+<span id="cb7-10"><a href="#cb7-10" aria-hidden="true" tabindex="-1"></a><span class="op">}</span> <span class="op">|</span> <span class="fu">ConvertTo-Json</span></span>
+<span id="cb7-11"><a href="#cb7-11" aria-hidden="true" tabindex="-1"></a><span class="va">$meeting</span> <span class="op">=</span> <span class="fu">Invoke-RestMethod</span> <span class="op">-</span>Method Post `</span>
+<span id="cb7-12"><a href="#cb7-12" aria-hidden="true" tabindex="-1"></a>  <span class="op">-</span>Uri <span class="st">&#39;http://127.0.0.1:15480/desktop/v1/meetings/meetings&#39;</span> `</span>
+<span id="cb7-13"><a href="#cb7-13" aria-hidden="true" tabindex="-1"></a>  <span class="op">-</span>Headers <span class="va">$headers</span> <span class="op">-</span>ContentType <span class="st">&#39;application/json&#39;</span> <span class="op">-</span>Body <span class="va">$body</span></span>
+<span id="cb7-14"><a href="#cb7-14" aria-hidden="true" tabindex="-1"></a><span class="fu">Invoke-RestMethod</span> `</span>
+<span id="cb7-15"><a href="#cb7-15" aria-hidden="true" tabindex="-1"></a>  <span class="op">-</span>Uri <span class="op">(</span><span class="st">&#39;http://127.0.0.1:15480/desktop/v1/meetings/meetings/&#39;</span> <span class="op">+</span> <span class="va">$meeting</span><span class="op">.</span><span class="fu">id</span><span class="op">)</span> `</span>
+<span id="cb7-16"><a href="#cb7-16" aria-hidden="true" tabindex="-1"></a>  <span class="op">-</span>Headers <span class="va">$headers</span></span>
+<span id="cb7-17"><a href="#cb7-17" aria-hidden="true" tabindex="-1"></a><span class="fu">Remove-Variable</span> session<span class="op">,</span> headers</span></code></pre></div>
 <p>This write requires Meetings to be enabled and the signed-in staff
 role to permit it. It is a cross-suite integration example; for this
 product’s request models, use the complete technical reference
@@ -721,8 +803,8 @@ authenticated as Townlight staff or accepted as a Townlight product MCP
 deployment. This documentation does not add such a service.</p>
 <p>For a transcription client already provisioned separately, an
 illustrative tool call is:</p>
-<div class="sourceCode" id="cb7"><pre
-class="sourceCode json"><code class="sourceCode json"><span id="cb7-1"><a href="#cb7-1" aria-hidden="true" tabindex="-1"></a><span class="fu">{</span><span class="dt">&quot;name&quot;</span><span class="fu">:</span><span class="st">&quot;get_job_status&quot;</span><span class="fu">,</span><span class="dt">&quot;arguments&quot;</span><span class="fu">:{</span><span class="dt">&quot;job_id&quot;</span><span class="fu">:</span><span class="st">&quot;synthetic-existing-job-id&quot;</span><span class="fu">}}</span></span></code></pre></div>
+<div class="sourceCode" id="cb8"><pre
+class="sourceCode json"><code class="sourceCode json"><span id="cb8-1"><a href="#cb8-1" aria-hidden="true" tabindex="-1"></a><span class="fu">{</span><span class="dt">&quot;name&quot;</span><span class="fu">:</span><span class="st">&quot;get_job_status&quot;</span><span class="fu">,</span><span class="dt">&quot;arguments&quot;</span><span class="fu">:{</span><span class="dt">&quot;job_id&quot;</span><span class="fu">:</span><span class="st">&quot;synthetic-existing-job-id&quot;</span><span class="fu">}}</span></span></code></pre></div>
 <p>Use a job ID returned by that transcription service. This example
 does not create a Townlight record or bypass its review/Records handoff.
 The exact optional adapter tool signatures are supplied in the <a

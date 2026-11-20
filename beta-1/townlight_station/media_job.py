@@ -21,13 +21,31 @@ has_sidecar = (folder / 'captions.srt').exists()
 # cccombiner passes through unchanged when it has no requested caption pad.
 caption_policy = (E('ccextractor', props={'remove-caption-meta': True}),) if has_sidecar else ()
 program = g.PlaylistLeg(label='program', subchains=((
-    *((E('udpsrc', props={'address': live['address'], 'port': live['port'], 'caps': 'video/mpegts,systemstream=true,packetsize=188', 'do-timestamp': True}), E('decodebin')) if live else
+    *((E('udpsrc', props={'address': live['address'], 'port': live['port'], 'caps': 'video/mpegts,systemstream=true,packetsize=188', 'do-timestamp': True}), E('decodebin')) if live and live.get('kind') != 'windows-devices' else
       (E('filesrc', props={'location': str(folder / 'source.media')}), E('decodebin'))),
     *caption_policy,
     E('videoconvert'), E('videoscale'), E('videorate'),
     E('capsfilter', props={'caps': f"video/x-raw,format=I420,width={profile['width']},height={profile['height']},framerate={profile['fps']}/1"}),
 ),), audio_tail=(E('audioconvert'), E('audioresample'),
     E('capsfilter', props={'caps': 'audio/x-raw,format=S16LE,rate=48000,channels=2,layout=interleaved'})))
+if live and live.get('kind') == 'windows-devices':
+    # Re-resolve saved IDs in the actual capture account. Never trust client factories/properties.
+    from civiccast.native.gstreamer_runtime import bootstrap_installed_gstreamer_runtime
+    bootstrap_installed_gstreamer_runtime()
+    import gi
+    gi.require_version('Gst', '1.0')
+    from gi.repository import Gst
+    Gst.init(None)
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from device_probe import enumerate_devices, resolve_device
+    devices = enumerate_devices()
+    camera = resolve_device(devices, live['video_id'], 'video')
+    microphone = resolve_device(devices, live['audio_id'], 'audio')
+    program = g.SourceLeg(label='program', elements=(
+        E(camera['factory'], props=camera['properties']), E('videoconvert'), E('videoscale'), E('videorate'),
+        E('capsfilter', props={'caps': f"video/x-raw,format=I420,width={profile['width']},height={profile['height']},framerate={profile['fps']}/1"})),
+        audio=(E(microphone['factory'], props=microphone['properties']), E('audioconvert'), E('audioresample'),
+            E('capsfilter', props={'caps': 'audio/x-raw,format=S16LE,rate=48000,channels=2,layout=interleaved'})))
 encoder = g.encode_chain_specs(**profile, gop=profile['fps'])
 if not has_sidecar:
     # Preserve decoder caption metadata by serializing it into the new H.264

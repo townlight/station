@@ -50,12 +50,13 @@ class Settings:
     media_python: Path
     media_runtime: Path
     ffprobe: Path
-    max_seconds: int = 7200
-    max_bytes: int = 2_147_483_647
+    max_seconds: int = 28800
+    max_bytes: int = 64 * 1024**3
     width: int = 1920
     height: int = 1080
     fps: int = 30
     bitrate_kbps: int = 6000
+    reserve_bytes: int = 1024**3
 
     @classmethod
     def from_env(cls):
@@ -63,9 +64,11 @@ class Settings:
         get = lambda name: os.environ[prefix + name]
         result = cls(Path(get('DATA_ROOT')), get('DATABASE_URL'), service_url(get('SUITE_URL')),
             Path(get('MEDIA_SOURCE')), Path(get('MEDIA_PYTHON')), Path(get('MEDIA_RUNTIME')),
-            Path(get('FFPROBE')), int(os.environ.get(prefix+'MAX_SECONDS', '7200')),
+            Path(get('FFPROBE')), int(os.environ.get(prefix+'MAX_SECONDS', '28800')),
+            max_bytes=int(os.environ.get(prefix+'MAX_BYTES', str(64 * 1024**3))),
             width=int(os.environ.get(prefix+'WIDTH', '1920')), height=int(os.environ.get(prefix+'HEIGHT', '1080')),
-            fps=int(os.environ.get(prefix+'FPS', '30')), bitrate_kbps=int(os.environ.get(prefix+'BITRATE_KBPS', '6000')))
+            fps=int(os.environ.get(prefix+'FPS', '30')), bitrate_kbps=int(os.environ.get(prefix+'BITRATE_KBPS', '6000')),
+            reserve_bytes=int(os.environ.get(prefix+'RESERVE_BYTES', str(1024**3))))
         result.validate()
         return result
 
@@ -80,6 +83,8 @@ class Settings:
             raise ValueError('Station requires its own PostgreSQL database ending in _station')
         if not 10 <= self.max_seconds <= 86400:
             raise ValueError('Invalid media timeout')
+        if not 1024**2 <= self.max_bytes <= 64 * 1024**3 or self.reserve_bytes < 256*1024**2:
+            raise ValueError('Invalid recording storage policy')
         if (not 320 <= self.width <= 3840 or not 180 <= self.height <= 2160 or self.width % 2 or self.height % 2
             or not 1 <= self.fps <= 60 or not 128 <= self.bitrate_kbps <= 50000):
             raise ValueError('Invalid encoding profile')

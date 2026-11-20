@@ -23,4 +23,13 @@ def sources(settings):
         if type(row['port']) is not int or not 1024 <= row['port'] <= 65535:
             raise ValueError('Invalid live receive port')
         result[row['id']] = row
+    local = private_path(settings.data, 'local-input.json')
+    if local.exists():
+        row = json.loads(local.read_text(encoding='utf-8'))
+        if (set(row) != {'id', 'label', 'kind', 'video_id', 'audio_id'}
+            or row['id'] != 'local-chamber' or row['kind'] != 'windows-devices'
+            or any(not isinstance(row.get(k), str) or not re.fullmatch(r'[a-f0-9]{64}', row[k])
+                   for k in ('video_id', 'audio_id'))):
+            raise ValueError('Invalid saved camera/microphone selection; reopen input setup')
+        result[row['id']] = row
     return result

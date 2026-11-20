@@ -2,6 +2,7 @@
 """Short-lived operator sessions launched explicitly by authenticated Townlight staff."""
 from pathlib import Path
 import secrets
+import subprocess
 import time
 from uuid import UUID
 import httpx
@@ -29,7 +30,9 @@ class ImportedRecording(BaseModel):
 
 
 def install_operator(app, settings, suite):
+    import threading
     tickets, sessions = {}, {}
+    input_lock = threading.Lock()
     static = Path(__file__).with_name('ui')
 
     @app.middleware('http')
@@ -84,6 +87,88 @@ def install_operator(app, settings, suite):
         response.delete_cookie('station_operator', path='/')
         return response
 
+    @app.post('/operator/renew')
+    def renew(request: Request):
+        token = request.cookies.get('station_operator')
+        entry = sessions.get(token)
+        if not entry:
+            raise HTTPException(401, 'Reconnect through your signed-in Townlight session; recording continues')
+        try:
+            suite.get('/desktop/v1/station/context?capability=read', entry[0])
+        except HTTPException as exc:
+            if exc.status_code in (401, 403):
+                sessions.pop(token, None)
+            raise
+        sessions[token] = (entry[0], time.monotonic()+900)
+        response = JSONResponse({'connected': True, 'expires_in': 900})
+        response.set_cookie('station_operator', token, httponly=True,
+                            secure=request.url.scheme == 'https', samesite='strict',
+                            max_age=900, path='/')
+        return response
+
+    @app.get('/operator/devices')
+    def device_list(proof: str | None = Header(default=None, alias='X-Townlight-Session')):
+        suite.get('/desktop/v1/station/context?capability=capture', proof)
+        from .devices import discover
+        try:
+            return [{'id': d['id'], 'label': d['label'], 'kind': d['kind']} for d in discover(settings)]
+        except (OSError, ValueError, subprocess.SubprocessError):
+            raise HTTPException(503, 'Input discovery failed. Check the installed media runtime and Windows camera/microphone permissions.') from None
+
+    class DeviceSelection(BaseModel):
+        model_config = ConfigDict(extra='forbid')
+        video_id: str = Field(pattern='^[a-f0-9]{64}$')
+        audio_id: str = Field(pattern='^[a-f0-9]{64}$')
+
+    @app.post('/operator/devices')
+    def select_devices(data: DeviceSelection, proof: str | None = Header(default=None, alias='X-Townlight-Session')):
+        suite.get('/desktop/v1/station/context?capability=capture', proof)
+        from .devices import save_selection
+        try:
+            return save_selection(settings, data.video_id, data.audio_id)
+        except (OSError, ValueError, subprocess.SubprocessError):
+            raise HTTPException(422, 'Selected inputs are unavailable; refresh the device list and check Windows permissions.') from None
+
+    @app.post('/operator/input-test')
+    def test_inputs(proof: str | None = Header(default=None, alias='X-Townlight-Session')):
+        suite.get('/desktop/v1/station/context?capability=capture', proof)
+        from .store import Store, recordings
+        import sqlalchemy as sa
+        from .input_test import record_test
+        store = Store(settings.database_url)
+        try:
+            with store.engine.begin() as conn:
+                # Same lock as capture admission: testing must not seize a meeting's device.
+                conn.execute(sa.text('SELECT pg_advisory_xact_lock(1953721717)'))
+                if conn.scalar(sa.select(sa.func.count()).select_from(recordings)
+                               .where(recordings.c.status.in_(('queued', 'running')))):
+                    raise HTTPException(409, 'Finish the active recording before testing inputs')
+                if not input_lock.acquire(blocking=False):
+                    raise HTTPException(409, 'An input test is already running')
+                try:
+                    return record_test(settings)
+                except (OSError, ValueError, subprocess.SubprocessError):
+                    raise HTTPException(422, 'Input test failed. Check device access and the Station input-test log, then retry.') from None
+                finally:
+                    input_lock.release()
+        finally:
+            store.engine.dispose()
+
+    @app.get('/operator/input-test/content')
+    def input_preview(proof: str | None = Header(default=None, alias='X-Townlight-Session')):
+        suite.get('/desktop/v1/station/context?capability=capture', proof)
+        from .boundary import private_path
+        path = private_path(settings.data, 'temp', 'input-test', 'preview.mp4')
+        if not path.is_file():
+            raise HTTPException(404, 'Run an input test first')
+        return FileResponse(path, media_type='video/mp4')
+
+    @app.get('/operator/storage')
+    def capacity(proof: str | None = Header(default=None, alias='X-Townlight-Session')):
+        suite.get('/desktop/v1/station/context?capability=read', proof)
+        from .storage_policy import storage_status
+        return storage_status(settings)
+
     @app.get('/operator/catalog')
     def catalog(proof: str | None = Header(default=None, alias='X-Townlight-Session')):
         suite.get('/desktop/v1/station/context?capability=read', proof)
@@ -129,7 +214,9 @@ def install_operator(app, settings, suite):
     def handoff(data: Handoff, proof: str | None = Header(default=None, alias='X-Townlight-Session')):
         suite.get('/desktop/v1/station/context?capability=read', proof)
         try:
-            with httpx.Client(base_url=settings.suite_url, timeout=150, trust_env=False, follow_redirects=False) as client:
+            # Records streams and verifies a separate copy; a multi-hour meeting
+            # can legitimately take longer than the ordinary interactive timeout.
+            with httpx.Client(base_url=settings.suite_url, timeout=httpx.Timeout(30, read=1800), trust_env=False, follow_redirects=False) as client:
                 result = client.post(f'/desktop/v1/requests/{data.request_id}/station-recordings',
                     headers={'X-Townlight-Session': proof}, json={'recording_id': str(data.recording_id), 'expected_sha256': data.expected_sha256})
             if result.status_code != 200:
