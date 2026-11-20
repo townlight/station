@@ -12,6 +12,7 @@ import subprocess
 import sys
 import time
 import xml.etree.ElementTree as ET
+import base64
 
 from .boundary import Settings, private_path
 
@@ -20,16 +21,32 @@ CONFIG_KEYS = {'DATA_ROOT', 'DATABASE_URL', 'SUITE_URL', 'MEDIA_SOURCE', 'MEDIA_
                'MAX_SECONDS', 'MAX_BYTES', 'RESERVE_BYTES', 'WIDTH', 'HEIGHT', 'FPS', 'BITRATE_KBPS', 'DATABASE_ADMIN_PASSWORD'}
 
 
+def save_configuration(path, values):
+    import win32crypt
+    # DPAPI is bound to this Windows account, matching the InteractiveToken task.
+    protected = win32crypt.CryptProtectData(json.dumps(values).encode('utf-8'),
+        'Townlight Station', None, None, None, 1)  # CRYPTPROTECT_UI_FORBIDDEN
+    temporary = path.with_suffix('.tmp')
+    temporary.write_text(json.dumps({'windows_protected_configuration': base64.b64encode(protected).decode('ascii')}), encoding='utf-8')
+    temporary.replace(path)
+
+
 def load_configuration(path):
     path = Path(path)
     if not path.is_absolute():
         raise ValueError('Station configuration path must be absolute')
     private_path(path.parent, path.name)
     values = json.loads(path.read_text(encoding='utf-8'))
+    legacy = isinstance(values, dict) and 'windows_protected_configuration' not in values
+    if isinstance(values, dict) and set(values) == {'windows_protected_configuration'}:
+        import win32crypt
+        values = json.loads(win32crypt.CryptUnprotectData(base64.b64decode(values['windows_protected_configuration'], validate=True), None, None, None, 1)[1].decode('utf-8'))
     if not isinstance(values, dict) or set(values) - CONFIG_KEYS or any(not isinstance(v, str) for v in values.values()):
         raise ValueError('Invalid Station configuration')
     if Path(values.get('DATA_ROOT', '')).resolve() != path.parent.resolve():
         raise ValueError('Station configuration must belong to its protected data directory')
+    if legacy:
+        save_configuration(path, values)
     for key, value in values.items():
         os.environ['TOWNLIGHT_STATION_'+key] = value
     return values
@@ -144,7 +161,7 @@ def provision(payload, data, suite_url):
         cfg = Settings.from_env()
         cfg.initialize_storage()  # Refuses unowned nonempty data and applies private ACLs.
         cfg.verify_media()
-        config.write_text(json.dumps(values, indent=2), encoding='utf-8')
+        save_configuration(config, values)
     paths = dict(MEDIA_SOURCE=str(payload/'station/media-source'),
                  MEDIA_PYTHON=str(payload/'station/media-runtime/python.exe'),
                  MEDIA_RUNTIME=str(payload/'station/media-runtime'), FFPROBE=str(payload/'station/bin/ffprobe.exe'),
@@ -157,9 +174,7 @@ def provision(payload, data, suite_url):
     # Validate media environment and plugins in the actual native runtime.
     from .devices import discover
     discover(cfg)  # Empty devices is permitted; a saved network source may be used.
-    temporary = config.with_suffix('.tmp')
-    temporary.write_text(json.dumps(values, indent=2), encoding='utf-8')
-    temporary.replace(config)
+    save_configuration(config, values)
     pythonw = Path(values['CONTROL_PYTHON']).with_name('pythonw.exe')
     if not pythonw.is_file():
         raise ValueError('Installed background Python is missing; repair the Townlight installation')
@@ -199,16 +214,10 @@ def background(config):
     pg = Path(values['POSTGRES_BIN'])
     cluster = private_path(cfg.data, 'postgres')
     cluster.mkdir(exist_ok=True)
-    password_file = private_path(cfg.data, 'postgres-password.tmp')
     # PostgreSQL lock plus the scheduled task's IgnoreNew policy prevent duplicate ownership.
     if not (cluster/'PG_VERSION').exists():
-        password_file.write_text(values['DATABASE_ADMIN_PASSWORD']+'\n', encoding='utf-8')
-        try:
-            subprocess.run([str(pg/'initdb.exe'), '-D', str(cluster), '-U', 'station_owner',
-                '--auth=scram-sha-256', '--encoding=UTF8', '--pwfile='+str(password_file)],
-                capture_output=True, check=True, timeout=180, creationflags=subprocess.CREATE_NO_WINDOW)
-        finally:
-            password_file.unlink(missing_ok=True)
+        from .windows_cluster import initialize_cluster
+        initialize_cluster(pg, cluster, values['DATABASE_ADMIN_PASSWORD'])
     handles, children = [], []
     def start(name, argv):
         log = (cfg.data/(name+'.log')).open('a', encoding='utf-8')

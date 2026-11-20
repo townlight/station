@@ -99,9 +99,11 @@ def install_operator(app, settings, suite):
             if exc.status_code in (401, 403):
                 sessions.pop(token, None)
             raise
-        sessions[token] = (entry[0], time.monotonic()+900)
+        renewed = secrets.token_urlsafe(32)
+        sessions.pop(token, None)
+        sessions[renewed] = (entry[0], time.monotonic()+900)
         response = JSONResponse({'connected': True, 'expires_in': 900})
-        response.set_cookie('station_operator', token, httponly=True,
+        response.set_cookie('station_operator', renewed, httponly=True,
                             secure=request.url.scheme == 'https', samesite='strict',
                             max_age=900, path='/')
         return response

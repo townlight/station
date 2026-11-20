@@ -47,6 +47,21 @@ def test_config_rejects_unrelated_environment_and_wrong_storage(tmp_path):
         load_configuration(path)
 
 
+def test_windows_configuration_is_account_protected_and_legacy_plaintext_is_replaced(tmp_path):
+    import secrets
+    from townlight_station.setup_windows import save_configuration
+    path = tmp_path/'settings.json'
+    password = secrets.token_hex(32)
+    values = {'DATA_ROOT':str(tmp_path), 'DATABASE_ADMIN_PASSWORD':password}
+    save_configuration(path, values)
+    assert password.encode() not in path.read_bytes()
+    assert load_configuration(path) == values
+    # Earlier private candidate configurations are migrated on their next read.
+    path.write_text(json.dumps(values), encoding='utf-8')
+    assert load_configuration(path) == values
+    assert password.encode() not in path.read_bytes()
+
+
 def test_backup_rejects_changed_unlisted_and_traversal_files(tmp_path):
     dump = tmp_path/'station.dump'
     dump.write_bytes(b'fixture-dump')
