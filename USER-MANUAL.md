@@ -2,7 +2,7 @@
 
 ## Windows recorder update — 1.9.0.1 candidate (not published)
 
-This section describes the new candidate. The public 1.8.2.1 MSI does not acquire these capabilities until a new release is approved and published. Installed acceptance of this candidate is still pending.
+This section describes the new candidate. The public 1.8.2.1 MSI does not acquire these capabilities until a new release is approved and published. Candidate verification and its limits are recorded in the [recorder completion record](https://github.com/townlight/station/blob/main/beta-1/docs/RECORDER-COMPLETION.md); this is separate from the published 1.8.2.1 evidence.
 
 ### Clerk and operator
 

@@ -2,7 +2,7 @@
 
 ## Station recorder candidate
 
-Windows 1.9.0.1 / Station 0.4.0 is in development and has not been published. It adds integrated recorder setup/recovery, camera and microphone selection with a test clip, eight-hour/64 GiB recording limits and streamed Records attachment, and renewable authorized operator sessions. Existing released MSI and historical acceptance remain unchanged. Installed candidate acceptance and merge are pending; tagging/publication require Scott approval.
+Windows 1.9.0.1 / Station 0.4.0 is in development and has not been published. It adds integrated recorder setup/recovery, camera and microphone selection with a test clip, eight-hour/64 GiB recording limits and streamed Records attachment, and renewable authorized operator sessions. Existing released MSI and historical acceptance remain unchanged. Candidate verification and limits: [recorder completion record](https://github.com/townlight/station/blob/main/beta-1/docs/RECORDER-COMPLETION.md). Tagging/publication require the project owner’s approval.
 
 
 ## Windows 1.8.2.1 maintenance release

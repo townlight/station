@@ -4,7 +4,9 @@ Windows recorder update — 1.9.0.1 candidate (not published)
 
 This section describes the new candidate. The public 1.8.2.1 MSI does
 not acquire these capabilities until a new release is approved and
-published. Installed acceptance of this candidate is still pending.
+published. Candidate verification and its limits are recorded in the
+recorder completion record; this is separate from the published 1.8.2.1
+evidence.
 
 Clerk and operator
 
