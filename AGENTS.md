@@ -1,35 +1,13 @@
-# Townlight Station engineering rules
+# Townlight Station engineering boundaries
 
-- Build the complete station product; do not redefine acceptance by shrinking capability scope.
-- Keep the active repository free of historical product names, code layouts, runtime assumptions, and repository history.
-- Treat archived material only as a behavior, fixture, and product-requirement quarry.
-- Use Rust for the native appliance and TypeScript/React for web interfaces unless an accepted architecture decision changes that boundary.
-- Preserve one authoritative SQLite writer and one isolated persistent media worker per channel.
-- Never introduce PostgreSQL, NATS, WSL, a Python runtime chassis, or FFmpeg-based linear playout.
-- Work test-first for logic and public interfaces. Capture a real failing assertion before implementation and run the full relevant suite before commit.
-- Do not claim a capability from source presence. Require the same-candidate installed-machine evidence.
-- Never commit secrets, signing material, customer data, generated databases, or local environment files.
-- Keep commits atomic and update contracts and documentation with behavior.
-- Treat Windows Sandbox as a shared machine resource. Never assume it is free. Before every launch, use
-  `scripts/invoke-owned-windows-sandbox.ps1`; unknown ownership, an active sandbox process, or a
-  concurrent launch decision fails closed. Never terminate a sandbox process by name or broad
-  search. Cleanup is permitted only for an exact PID, creation identity, and executable recorded by
-  the harness that launched it. All Claude-owned or Claude-created local processes and files are
-  inside a no-touch fence, always outside Townlight's ownership boundary, and must not be inspected
-  beyond the minimum identity needed to detect occupancy, changed, moved, deleted, or used as
-  cleanup targets.
-- Run Cargo commands from the workspace root. On Windows, invoke Cargo only through
-  `scripts/invoke-cargo.ps1`; it binds Cargo and every descendant process to the explicit GStreamer
-  runtime. The checked-in target runner is a second boundary. Never bypass either boundary or launch
-  `target` artifacts directly.
-- This is an operator-safety rule, not a preference: raw `cargo`, `cargo.exe`, direct test binaries,
-  and IDE test launchers can create persistent modal Windows DLL-error dialogs. The only allowed
-  Windows Cargo command form is `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass
-  -File scripts\invoke-cargo.ps1 ...`. If that wrapper cannot run, report the test as blocked; do not
-  substitute another launcher.
-- After a successful non-clean Cargo command, that wrapper independently deploys the complete
-  GStreamer DLL closure beside the supported debug/release artifact directories. Those are copies,
-  never hard links: build output is writable and must not alias the installed runtime. The automated
-  harness proves deployment integrity, not Windows loader closure. A real direct-artifact loader
-  proof requires a separately controlled manual gate, exact adjacent hashes, and before/after Windows
-  popup-log checks; ordinary agents and tests remain prohibited from direct artifact launches.
+- Maintain the lightweight Python meeting recorder in beta-1/ and its TypeScript
+  operator UI. Rust broadcast code is private in scottconverse/civiccast-lab.
+- Read docs/RUST-SEPARATION.md. Do not restore Rust station code, impose Rust
+  acceptance on the recorder or expand it into a full PEG product.
+- Preserve pinned CivicCast bytes and media lock, staff authorization, private
+  recordings, canonical meeting/agenda references and Records integrity.
+- Preserve historical receipts, tags and released installer identities.
+- Use meaningful affected checks and actual repository requirements. Reuse
+  unchanged evidence; bookkeeping does not require a new signed installer.
+- Work headlessly; preserve unrelated work, data, credentials and processes.
+- Recorder source commands run from beta-1/. Rust launcher rules apply in Lab.

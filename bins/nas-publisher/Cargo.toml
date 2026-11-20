@@ -1,8 +1,0 @@
-[package]
-name = "nas-publisher"
-version.workspace = true
-edition.workspace = true
-publish.workspace = true
-
-[dependencies]
-station-storage.workspace = true
