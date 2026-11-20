@@ -199,6 +199,9 @@ def provision(payload, data, suite_url):
 
 def background(config):
     import psycopg2
+    import win32api
+    import win32con
+    import win32event
     from sqlalchemy.engine import make_url
     from .store import Store
     values = load_configuration(config)
@@ -212,44 +215,107 @@ def background(config):
         raise RuntimeError('Recorder cannot contain its own children')
     db = make_url(cfg.database_url)
     pg = Path(values['POSTGRES_BIN'])
+    pg_ctl = pg / 'pg_ctl.exe'
     cluster = private_path(cfg.data, 'postgres')
     cluster.mkdir(exist_ok=True)
-    # PostgreSQL lock plus the scheduled task's IgnoreNew policy prevent duplicate ownership.
-    if not (cluster/'PG_VERSION').exists():
+    if not (cluster / 'PG_VERSION').exists():
         from .windows_cluster import initialize_cluster
         initialize_cluster(pg, cluster, values['DATABASE_ADMIN_PASSWORD'])
+    pid_path = cluster / 'postmaster.pid'
+    pg_log = private_path(cfg.data, 'postgres.log')
     handles, children = [], []
+    owned = False
+    postmaster_pid = None
+    postmaster_handle = None
+
     def start(name, argv):
-        log = (cfg.data/(name+'.log')).open('a', encoding='utf-8')
+        log = (cfg.data / (name + '.log')).open('a', encoding='utf-8')
         handles.append(log)
         child = subprocess.Popen(argv, stdout=log, stderr=subprocess.STDOUT,
                                  creationflags=subprocess.CREATE_NO_WINDOW)
         children.append(child)
         return child
-    try:
-        server = start('postgres', [str(pg/'postgres.exe'), '-D', str(cluster),
-                                   '-h', '127.0.0.1', '-p', str(db.port)])
-        deadline = time.monotonic()+180
-        while True:
-            try:
-                connection = psycopg2.connect(host=db.host, port=db.port, user='station_owner',
-                    password=values['DATABASE_ADMIN_PASSWORD'], dbname='postgres', connect_timeout=2)
-                connection.autocommit = True
-                if server.poll() is not None:
-                    connection.close()
-                    raise RuntimeError('Recorder port is already owned by another database; nothing was stopped')
-                with connection.cursor() as cursor:
-                    cursor.execute('SHOW data_directory')
-                    if Path(cursor.fetchone()[0]).resolve() != cluster.resolve():
-                        connection.close()
-                        raise RuntimeError('Recorder database identity does not match the configured data directory')
-                break
-            except psycopg2.OperationalError:
-                if server.poll() is not None or time.monotonic() >= deadline:
-                    raise RuntimeError('Recorder database did not start; inspect its private PostgreSQL log') from None
-                time.sleep(.5)
-        connection.autocommit = True
+
+    def read_pid():
         try:
+            return int(pid_path.read_text(encoding='utf-8').splitlines()[0].strip())
+        except (OSError, ValueError, IndexError):
+            return None
+
+    def alive(handle):
+        return (handle is not None and
+                win32event.WaitForSingleObject(handle, 0) == win32event.WAIT_TIMEOUT)
+
+    try:
+        # A running cluster is foreign to this startup attempt. Never touch it.
+        status = subprocess.run([str(pg_ctl), 'status', '-D', str(cluster)],
+                                capture_output=True, timeout=30,
+                                creationflags=subprocess.CREATE_NO_WINDOW)
+        if status.returncode == 0:
+            raise RuntimeError('Recorder cluster is already running; refusing to touch it')
+        if status.returncode != 3:
+            raise RuntimeError('Recorder cluster status is indeterminate; refusing to start')
+
+        # pg_ctl starts postgres.exe with a restricted token and inherits the
+        # already-active Station Job Object, so crash containment still applies.
+        with private_path(cfg.data, 'postgres-start.log').open('a', encoding='utf-8') as startup_log:
+            startup = subprocess.run(
+                [str(pg_ctl), 'start', '-w', '-t', '160', '-D', str(cluster),
+                 '-l', str(pg_log), '-o', f'-h 127.0.0.1 -p {db.port}'],
+                stdin=subprocess.DEVNULL, stdout=startup_log, stderr=subprocess.STDOUT,
+                timeout=200,
+                creationflags=subprocess.CREATE_NO_WINDOW)
+        if startup.returncode != 0:
+            raise RuntimeError('Recorder database did not start; inspect its private PostgreSQL log')
+
+        postmaster_pid = read_pid()
+        if not postmaster_pid:
+            raise RuntimeError('Recorder database started without a readable postmaster PID file')
+        try:
+            postmaster_handle = win32api.OpenProcess(win32con.SYNCHRONIZE, False, postmaster_pid)
+        except Exception:
+            raise RuntimeError('Recorder database postmaster is not running after start') from None
+        if not alive(postmaster_handle):
+            raise RuntimeError('Recorder database postmaster is not running after start')
+
+        # pg_ctl -w -t 160 already blocked until the postmaster accepts
+        # connections; the SQL retry below is only a short post-condition so
+        # the whole function stays inside the caller's 240s budget.
+        deadline = time.monotonic() + 15
+        connection = None
+        while connection is None:
+            try:
+                connection = psycopg2.connect(
+                    host=db.host, port=db.port, user='station_owner',
+                    password=values['DATABASE_ADMIN_PASSWORD'], dbname='postgres',
+                    connect_timeout=2)
+            except psycopg2.OperationalError:
+                if not alive(postmaster_handle) or time.monotonic() >= deadline:
+                    raise RuntimeError('Recorder database did not start; inspect its private PostgreSQL log') from None
+                time.sleep(0.5)
+
+        # One authenticated session serves both the identity check and the
+        # bootstrap SQL, so there is no window for a foreign cluster to swap
+        # in between SHOW data_directory and CREATE ROLE / CREATE DATABASE.
+        try:
+            connection.autocommit = True
+            with connection.cursor() as cursor:
+                cursor.execute('SHOW data_directory')
+                actual = Path(cursor.fetchone()[0])
+            if actual.resolve() != cluster.resolve():
+                raise RuntimeError('Recorder database identity does not match the configured data directory')
+
+            # Ownership is claimed only when: our pg_ctl start succeeded, the
+            # PID file still names the postmaster we started, the handle we
+            # hold is still live, and SQL confirmed our data directory. The
+            # liveness/PID recheck happens right before we claim ownership and
+            # before any CREATE statements run.
+            if not alive(postmaster_handle):
+                raise RuntimeError('Recorder database postmaster exited')
+            if read_pid() != postmaster_pid:
+                raise RuntimeError('Recorder database postmaster PID file changed; refusing to continue')
+            owned = True
+
             with connection.cursor() as cursor:
                 from psycopg2 import sql
                 cursor.execute('SELECT 1 FROM pg_roles WHERE rolname=%s', (db.username,))
@@ -262,11 +328,13 @@ def background(config):
                                    .format(sql.Identifier(db.database), sql.Identifier(db.username)))
         finally:
             connection.close()
+
         store = Store(cfg.database_url)
         try:
             store.migrate()
         finally:
             store.engine.dispose()
+
         for role in ('serve', 'worker', 'uploads'):
             # The API and workers receive only the application login, not the cluster owner secret.
             saved_admin = os.environ.pop('TOWNLIGHT_STATION_DATABASE_ADMIN_PASSWORD', None)
@@ -275,23 +343,85 @@ def background(config):
             finally:
                 if saved_admin is not None:
                     os.environ['TOWNLIGHT_STATION_DATABASE_ADMIN_PASSWORD'] = saved_admin
-        while all(child.poll() is None for child in children) and not (cfg.data/'background.stop').exists():
-            health = cfg.data/'background-health.json'
+
+        while not (cfg.data / 'background.stop').exists():
+            for child in children:
+                if child.poll() is not None:
+                    raise RuntimeError('Recorder child exited; logon task will perform bounded restart')
+            if not alive(postmaster_handle):
+                raise RuntimeError('Recorder database postmaster exited; logon task will perform bounded restart')
+            if read_pid() != postmaster_pid:
+                raise RuntimeError('Recorder database postmaster PID file changed; refusing to continue')
+            health = cfg.data / 'background-health.json'
             temporary = health.with_suffix('.tmp')
             temporary.write_text(json.dumps({'updated_at': time.time(), 'pid': os.getpid()}), encoding='utf-8')
             temporary.replace(health)
             time.sleep(1)
-        if not (cfg.data/'background.stop').exists():
-            raise RuntimeError('Recorder child exited; logon task will perform bounded restart')
     finally:
-        for child in reversed(children[1:]):
-            if child.poll() is None:
-                child.terminate()
-                child.wait(timeout=20)
-        if children and children[0].poll() is None:
-            subprocess.run([str(pg/'pg_ctl.exe'), '-D', str(cluster), '-m', 'fast', 'stop'],
-                           capture_output=True, timeout=180, creationflags=subprocess.CREATE_NO_WINDOW)
-            children[0].wait(timeout=30)
-        for log in handles:
-            log.close()
-        (cfg.data/'background-health.json').unlink(missing_ok=True)
+        # Each cleanup step is isolated so that a failure in one (child kill,
+        # DB stop) never prevents the remaining handles/handlers from being
+        # released, and so that the primary error is never silently masked.
+        primary_error = sys.exc_info()[1]
+        cleanup_error = None
+
+        try:
+            for child in reversed(children):
+                if child.poll() is None:
+                    child.terminate()
+                    try:
+                        child.wait(timeout=20)
+                    except subprocess.TimeoutExpired:
+                        child.kill()
+                        child.wait(timeout=10)
+        except BaseException as exc:
+            if cleanup_error is None:
+                cleanup_error = exc
+
+        try:
+            # Fast stop only our exact original postmaster, still live, with
+            # the same PID file. A non-zero exit must be reported rather than
+            # silently discarded.
+            if (owned and postmaster_handle is not None and alive(postmaster_handle) and
+                    read_pid() == postmaster_pid):
+                stop = subprocess.run(
+                    [str(pg_ctl), '-D', str(cluster), '-m', 'fast', '-w', '-t', '180', 'stop'],
+                    capture_output=True, timeout=200,
+                    creationflags=subprocess.CREATE_NO_WINDOW)
+                win32event.WaitForSingleObject(postmaster_handle, 30000)
+                if stop.returncode != 0 and cleanup_error is None:
+                    cleanup_error = RuntimeError(
+                        'Recorder database fast stop failed; inspect its private PostgreSQL log')
+        except BaseException as exc:
+            if cleanup_error is None:
+                cleanup_error = exc
+
+        try:
+            if postmaster_handle is not None:
+                win32api.CloseHandle(postmaster_handle)
+        except BaseException as exc:
+            if cleanup_error is None:
+                cleanup_error = exc
+
+        try:
+            for log in handles:
+                log.close()
+        except BaseException as exc:
+            if cleanup_error is None:
+                cleanup_error = exc
+
+        try:
+            (cfg.data / 'background-health.json').unlink(missing_ok=True)
+        except BaseException as exc:
+            if cleanup_error is None:
+                cleanup_error = exc
+
+        if cleanup_error is not None:
+            if isinstance(primary_error, (KeyboardInterrupt, SystemExit)):
+                # Don't replace operator-initiated interrupts/exits.
+                pass
+            elif primary_error is not None:
+                # Chaining keeps the original launch/child/postmaster error
+                # visible in the traceback alongside the stop failure.
+                raise cleanup_error from primary_error
+            else:
+                raise cleanup_error
