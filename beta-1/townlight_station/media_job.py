@@ -56,6 +56,8 @@ encoder = tuple(
         'slice-mode': 'n-slices',
         'num-slices': 4,
         'multi-thread': 4,
+        # Keep live 1080p in real time on a four-core software recorder.
+        **({'complexity': 'low'} if live is not None else {}),
     }) if spec.factory == 'openh264enc' else spec
     for spec in g.encode_chain_specs(**profile, gop=profile['fps'])
 )
