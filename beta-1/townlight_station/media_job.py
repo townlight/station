@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 """Narrow worker-process adapter. Never starts CivicCast app/service/DB."""
+from dataclasses import replace
 import json
 from pathlib import Path
 import subprocess
@@ -46,7 +47,18 @@ if live and live.get('kind') == 'windows-devices':
         E('capsfilter', props={'caps': f"video/x-raw,format=I420,width={profile['width']},height={profile['height']},framerate={profile['fps']}/1"})),
         audio=(E(microphone['factory'], props=microphone['properties']), E('audioconvert'), E('audioresample'),
             E('capsfilter', props={'caps': 'audio/x-raw,format=S16LE,rate=48000,channels=2,layout=interleaved'})))
-encoder = g.encode_chain_specs(**profile, gop=profile['fps'])
+# The low-level graph builder takes kbit/s. OpenH264 uses bit/s, and
+# the donor uses four fixed slices so its software encoder keeps up live.
+encoder = tuple(
+    replace(spec, props={
+        **spec.props,
+        'bitrate': profile['bitrate_kbps'] * 1000,
+        'slice-mode': 'n-slices',
+        'num-slices': 4,
+        'multi-thread': 4,
+    }) if spec.factory == 'openh264enc' else spec
+    for spec in g.encode_chain_specs(**profile, gop=profile['fps'])
+)
 if not has_sidecar:
     # Preserve decoder caption metadata by serializing it into the new H.264
     # stream. An encoder alone does not establish embedded-caption preservation.
