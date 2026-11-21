@@ -84,9 +84,9 @@ Windows 1.9.1.1 is a signed public beta. See the acceptance summary for the veri
 
 ### Fresh installation
 
-For a fresh setup, run the signed Windows 1.9.1.1 MSI and use an empty database and a new Townlight profile. For an upgrade from 1.9.1.1, back up city data and settings, close Townlight, run the MSI, then reopen Townlight under the same Windows account and profile. See the acceptance summary for which build was used and the limits of upgrade testing.
+For a fresh setup, run the signed Windows 1.9.1.1 MSI and use an empty database and a new Townlight profile. For an upgrade from 1.9.0.1, back up city data and settings, close Townlight, run the MSI, then reopen Townlight under the same Windows account and profile. The upgrade was exercised on the earlier signed 1.9.1.1 iteration. See [acceptance and limits](https://github.com/townlight/townlight/releases/download/townlight-windows-v1.9.1.1/ACCEPTANCE-Windows-1.9.1.1.md) for evidence by build.
 
-1.  Download the signed MSI, matching source companion and checksums from the [public Windows release](https://github.com/townlight/townlight/releases/tag/townlight-windows-v1.8.1.1).
+1.  Download the signed MSI, matching source companion and checksums from the [public Windows release](https://github.com/townlight/townlight/releases/tag/townlight-windows-v1.9.1.1).
 2.  Verify the MSI hash and Authenticode publisher before installation. See the [Windows acceptance summary](https://github.com/townlight/townlight/releases/download/townlight-windows-v1.9.1.1/ACCEPTANCE-Windows-1.9.1.1.md) for the tested setup.
 3.  Launch Townlight under the intended named Windows account. Choose the storage folders. Select **Townlight Inspections candidate** (`inspections-preview`) for the bounded desktop composition, including Access and Notice. A narrower default selection will not expose all workspaces.
 4.  Enter the city profile, time zone and contacts. Create the first named local administrator, sign in and choose protected backup storage. **Continue without local AI** is valid for the deterministic workflows.
