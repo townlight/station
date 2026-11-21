@@ -8,7 +8,7 @@ Windows 1.9.0.1 has signed fresh-install acceptance, including Station recording
 
 The 1.9.0.1 installer ships Station 0.4.0. See the [current manual](USER-MANUAL.md).
 
-Station 0.4.3 is prepared for the next Windows candidate. From a saved meeting in Townlight, open Station with that meeting selected. An operator chooses the input and starts recording. Use the meeting title to find the recording, then choose a Records request to attach a verified copy privately for review.
+Station 0.4.4 is prepared for the next Windows candidate. The ten-second input test allows time for the camera and microphone to start before timing the clip. From a saved meeting in Townlight, open Station with that meeting selected. An operator chooses the input and starts recording. Use the meeting title to find the recording, then choose a Records request to attach a verified copy privately for review.
 
 # Townlight Station service boundary
 
