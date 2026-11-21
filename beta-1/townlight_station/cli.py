@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 import argparse
+from uuid import UUID
 from .boundary import Settings
 from .store import Store
 
@@ -15,7 +16,10 @@ def main():
     parser.add_argument('--data-root', type=str)
     parser.add_argument('--destination', type=str)
     parser.add_argument('--suite-url', type=str, default='http://127.0.0.1:15480')
+    parser.add_argument('--meeting-id', type=UUID)
     args = parser.parse_args()
+    if args.meeting_id and args.command != 'operator':
+        parser.error('--meeting-id is only valid with operator')
     if args.command == 'setup':
         import json
         from .setup_windows import provision
@@ -92,7 +96,10 @@ def main():
         with httpx.Client(trust_env=False, timeout=15) as client:
             result = client.post(origin+'/v1/operator-ticket', headers={'X-Townlight-Session': proof})
             result.raise_for_status()
+        from urllib.parse import urlencode
         url = origin+'/#ticket='+result.json()['ticket']
+        if args.meeting_id:
+            url += '&'+urlencode({'meeting': str(args.meeting_id)})
         import os
         if os.environ.get('TOWNLIGHT_SUPPRESS_OPEN_BROWSER') == '1':
             print(json.dumps({'operator_url': url}))
