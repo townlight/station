@@ -12,7 +12,7 @@ function App(){
  const [connected,setConnected]=useState(false),[message,setMessage]=useState('Connecting to your Townlight staff session…'),[error,setError]=useState(false);
  const [catalog,setCatalog]=useState<Catalog|null>(null),[sources,setSources]=useState<any[]>([]),[records,setRecords]=useState<any[]>([]);
  const [schedules,setSchedules]=useState<any[]>([]),[playouts,setPlayouts]=useState<any[]>([]),[air,setAir]=useState<Air>({mode:'schedule'});
- const [meeting,setMeeting]=useState(''),[agenda,setAgenda]=useState<string[]>([]),[source,setSource]=useState(''),[busy,setBusy]=useState(false);
+ const [meeting,setMeeting]=useState(''),[agenda,setAgenda]=useState<string[]>([]),[source,setSource]=useState(''),[busy,setBusy]=useState(false),[recordingFilter,setRecordingFilter]=useState('');
  const [sourceFile,setSourceFile]=useState(''),[captionsFile,setCaptionsFile]=useState(''),[startsAt,setStartsAt]=useState('');
  const [imported,setImported]=useState<{index:number;direct:boolean}[]>([]),[importIndex,setImportIndex]=useState('');
  const [onAirSource,setOnAirSource]=useState(''),[reason,setReason]=useState('');
@@ -43,10 +43,29 @@ function App(){
   }catch(e){fail(e);}finally{refreshing.current=false;}
  }
  useEffect(()=>{let alive=true;(async()=>{try{
- const ticket=new URLSearchParams(location.hash.slice(1)).get('ticket');history.replaceState(null,'',location.pathname);
- if(ticket)await api('/operator/session',{ticket});await api('/v1/identity');const data=await api('/operator/catalog');
- if(!alive)return;setCatalog(data);if(data.can_capture){const inputs=await api('/v1/live-sources');setSources(inputs);setFeeds(await api("/v1/civiccast-feeds"));setSource(inputs[0]?.id||'');setOnAirSource(inputs[0]?.id||'');}
- setConnected(true);tell(data.can_capture?'Select a meeting and live input to begin.':'Select a completed recording and Records request.');
+ const launch=new URLSearchParams(location.hash.slice(1));
+ const ticket=launch.get('ticket'), selected=launch.get('meeting');
+ history.replaceState(null,'',location.pathname);
+ if(ticket)await api('/operator/session',{ticket});
+ await api('/v1/identity');
+ const data:Catalog=await api('/operator/catalog');
+ if(!alive)return;
+ let selectedMeeting=data.meetings.find(m=>m.id===selected);
+ if(!selectedMeeting&&data.can_capture&&selected&&/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(selected)){
+  try{
+   const found=await api('/operator/meeting/'+selected);
+   if(found.id===selected){data.meetings.push(found);selectedMeeting=found;}
+  }catch(e:any){if(![403,404,422].includes(e.status))throw e;}
+ }
+ if(!alive)return;
+ if(selectedMeeting&&data.can_capture)setMeeting(selectedMeeting.id);
+ setCatalog(data);
+ if(data.can_capture){const inputs=await api('/v1/live-sources');setSources(inputs);setFeeds(await api("/v1/civiccast-feeds"));setSource(inputs[0]?.id||'');setOnAirSource(inputs[0]?.id||'');}
+ setConnected(true);
+ tell(selected&&data.can_capture
+  ? selectedMeeting ? `Ready to record ${selectedMeeting.title}. Choose the live input and start when ready.`
+    : 'That meeting is unavailable. Choose a saved meeting from the list.'
+  : data.can_capture ? 'Select a meeting and live input to begin.' : 'Select a completed recording and Records request.');
  await refresh();
  }catch(e){fail(e);}})();return()=>{alive=false;};},[]);
  useEffect(()=>{if(!connected)return;const timer=setInterval(refresh,2000);return()=>clearInterval(timer);},[connected]);
@@ -102,12 +121,19 @@ function App(){
   }catch(e){fail(e);}finally{setBusy(false);}
  }
  async function stop(id:string){try{await api(`/v1/recordings/${id}/stop`,{});tell('Stop requested. Station is finishing and verifying the recording.');await refresh();}catch(e){fail(e);}}
- async function attach(id:string,hash:string,request:string){try{const receipt=await api('/operator/handoff',{request_id:request,recording_id:id,expected_sha256:hash});tell(`Attached privately to Records. Request ${receipt.request.id} has ${receipt.request.documents.length} document(s).`);}catch(e){fail(e);}}
+ async function attach(id:string,hash:string,request:string){try{const receipt=await api('/operator/handoff',{request_id:request,recording_id:id,expected_sha256:hash});const name=catalog?.requests.find(q=>q.id===request)?.summary||'the selected request';tell(`Attached privately to ${name}. Records has ${receipt.request.documents.length} documents for review.`);}catch(e){fail(e);}}
  async function act(label:string, path:string, body:unknown, done:string){
   if(busy)return;setBusy(true);
   try{await api(path,body);tell(done);await refresh();}catch(e){fail(e);}finally{setBusy(false);}
  }
  const active=records.some(r=>['running','queued'].includes(r.status));
+ const recordingFilterText=recordingFilter.trim().toLowerCase();
+ const visibleRecords=records.filter(r=>{
+  const isActive=['queued','running'].includes(r.status);
+  if(!recordingFilterText)return true;
+  const title=(r.details?.meeting?.title||'').toLowerCase();
+  return isActive||title.includes(recordingFilterText);
+ });
  const scheduleKey=useRef(crypto.randomUUID()),play=(id:string,mode:string,busyFlag:boolean)=>act(
   mode==='commit'?'Commit to air':'Check playout',"/v1/playouts",{recording_id:id,mode,idempotency_key:crypto.randomUUID()},
   mode==='commit'?'Playout queued. Station will render and switch to it.':'Playout dry run queued.');
@@ -157,7 +183,8 @@ function App(){
  {s.status==='scheduled'&&<button disabled={busy} onClick={()=>act('cancel',`/v1/schedules/${s.id}/cancel`,{},'Schedule cancelled; it will not start.')}>Cancel schedule</button>}
  {s.status==='dispatched'&&s.details?.recording_id&&<p>Recording {s.details.recording_id}</p>}</article>)}</section>}
  {connected&&<section id="recordings"><div className="section-heading"><h2>Recordings</h2><button onClick={refresh}>Refresh</button></div><p>Status updates automatically. Stop finishes and verifies media before Records can accept it.</p>
- {!records.length&&<p>No recordings yet.</p>}{records.map(r=><Recording key={r.id} record={r} catalog={catalog!} stop={stop} attach={attach} play={play} busy={busy} uploads={uploads.filter(u=>u.recording_id===r.id)} upload={(body:any)=>act("upload",`/v1/recordings/${r.id}/youtube`,body,"YouTube upload queued. Watch its receipt below.")}/>)}</section>}
+ <label>Find recording by meeting title<input type="search" value={recordingFilter} onChange={e=>setRecordingFilter(e.target.value)}/></label>
+ {!visibleRecords.length&&<p role="status">{records.length?'No recordings match this meeting title.':'No recordings yet.'}</p>}{visibleRecords.map(r=><Recording key={r.id} record={r} catalog={catalog!} stop={stop} attach={attach} play={play} busy={busy} uploads={uploads.filter(u=>u.recording_id===r.id)} upload={(body:any)=>act("upload",`/v1/recordings/${r.id}/youtube`,body,"YouTube upload queued. Watch its receipt below.")}/>)}</section>}
  {connected&&<section id="playouts"><div className="section-heading"><h2>Playout and playback</h2><button onClick={refresh}>Refresh</button></div>
  <p>A playout renders a completed recording for broadcast. Nothing becomes public until a supervisor approves it and a staff member explicitly publishes it; publication packages the program into a browser-playable MP4 (with the supplied captions as a WebVTT track).</p>
  {!playouts.length&&<p>No playouts yet.</p>}
