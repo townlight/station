@@ -17,6 +17,9 @@ function App(){
  const [imported,setImported]=useState<{index:number;direct:boolean}[]>([]),[importIndex,setImportIndex]=useState('');
  const [onAirSource,setOnAirSource]=useState(''),[reason,setReason]=useState('');
  const [feeds,setFeeds]=useState<any[]>([]),[feed,setFeed]=useState(''),[uploads,setUploads]=useState<any[]>([]);
+ const [devices,setDevices]=useState<any[]>([]),[camera,setCamera]=useState(''),[microphone,setMicrophone]=useState('');
+ const [preview,setPreview]=useState(''),[storage,setStorage]=useState<any>(null),[level,setLevel]=useState(0);
+ const previewElement=useRef<HTMLVideoElement|null>(null);
  const pending=useRef<any>(null), refreshing=useRef(false);
  const tell=(text:string,bad=false)=>{setMessage(text);setError(bad);};
  const fail=(e:any)=>{tell(e.message,true);if(e.status===401)setConnected(false);};
@@ -36,6 +39,7 @@ function App(){
    replace('records',views[0],setRecords);replace('schedules',views[1],setSchedules);
    replace('playouts',views[2],setPlayouts);replace('air',views[3],setAir);
    const deliveries=await api('/v1/youtube-uploads');setUploads(deliveries);
+   setStorage(await api('/operator/storage'));
   }catch(e){fail(e);}finally{refreshing.current=false;}
  }
  useEffect(()=>{let alive=true;(async()=>{try{
@@ -46,6 +50,34 @@ function App(){
  await refresh();
  }catch(e){fail(e);}})();return()=>{alive=false;};},[]);
  useEffect(()=>{if(!connected)return;const timer=setInterval(refresh,2000);return()=>clearInterval(timer);},[connected]);
+ useEffect(()=>{if(!connected)return;const timer=setInterval(()=>{
+  api('/operator/renew',{}).catch(fail);
+ },60000);return()=>clearInterval(timer);},[connected]);
+ useEffect(()=>{
+  if(!preview||!previewElement.current)return;
+  const context=new AudioContext(),node=context.createMediaElementSource(previewElement.current);
+  const analyser=context.createAnalyser();node.connect(analyser);analyser.connect(context.destination);
+  const buffer=new Uint8Array(analyser.fftSize);
+  const timer=setInterval(()=>{analyser.getByteTimeDomainData(buffer);
+   setLevel(Math.sqrt(buffer.reduce((sum,v)=>sum+((v-128)/128)**2,0)/buffer.length));},100);
+  const resume=()=>{void context.resume();};previewElement.current.addEventListener('play',resume);
+  const video=previewElement.current;
+  return()=>{clearInterval(timer);video.removeEventListener('play',resume);void context.close();};
+ },[preview]);
+ async function findDevices(){setBusy(true);try{
+  const found=await api('/operator/devices');setDevices(found);
+  setCamera(found.find((d:any)=>d.kind==='video')?.id||'');
+  setMicrophone(found.find((d:any)=>d.kind==='audio')?.id||'');
+  tell(found.length?'Choose the chamber camera and microphone.':'No supported inputs found. Check Windows permissions and device connections.');
+ }catch(e){fail(e);}finally{setBusy(false);}}
+ async function saveDevices(e:React.FormEvent){e.preventDefault();setBusy(true);try{
+  const input=await api('/operator/devices',{video_id:camera,audio_id:microphone});
+  setSources(await api('/v1/live-sources'));setSource(input.id);
+  tell('Chamber inputs saved. Run a test and check picture and sound.');
+ }catch(e){fail(e);}finally{setBusy(false);}}
+ async function testDevices(){setBusy(true);setPreview('');try{
+  const result=await api('/operator/input-test',{});setPreview(result.preview_url+'?v='+Date.now());tell(result.message);
+ }catch(e){fail(e);}finally{setBusy(false);}}
  async function queueCapture(values:object){
  if(!pending.current||JSON.stringify(pending.current.values)!==JSON.stringify(values))pending.current={values,key:crypto.randomUUID()};
  await api('/v1/recordings',{...values,idempotency_key:pending.current.key});pending.current=null;tell('Recording accepted. Watch its status below.');await refresh();
@@ -89,7 +121,18 @@ function App(){
  <label>Reason<input id="on-air-reason" required minLength={3} maxLength={200} value={reason} placeholder="e.g. Council returns from recess" onChange={e=>setReason(e.target.value)}/></label>
  <button id="go-live" disabled={!onAirSource||reason.trim().length<3||busy}>Take live override</button></form>}
  {!sources.length&&<p>No live input configured. Ask your Station administrator to configure the chamber feed.</p>}</section>}
+ {connected&&catalog?.can_capture&&<section id="input-setup"><h2>Chamber camera and microphone</h2>
+ <p>Use one local camera/capture input and microphone, or retain your configured network chamber feed. Input testing is unavailable during a meeting recording.</p>
+ <button id="find-devices" onClick={findDevices} disabled={busy||active}>Find connected inputs</button>
+ {devices.length>0&&<form onSubmit={saveDevices}>
+ <label>Camera<select id="camera" value={camera} onChange={e=>setCamera(e.target.value)}>{devices.filter(d=>d.kind==='video').map(d=><option key={d.id} value={d.id}>{d.label}</option>)}</select></label>
+ <label>Microphone<select id="microphone" value={microphone} onChange={e=>setMicrophone(e.target.value)}>{devices.filter(d=>d.kind==='audio').map(d=><option key={d.id} value={d.id}>{d.label}</option>)}</select></label>
+ <button id="save-inputs" disabled={!camera||!microphone||busy||active}>Save chamber inputs</button></form>}
+ <button id="test-inputs" onClick={testDevices} disabled={busy||active||!sources.some(s=>s.id==='local-chamber')}>Record 10-second input test</button>
+ {preview&&<div><video id="input-preview" ref={previewElement} src={preview} controls preload="metadata"/><label>Test playback audio level <meter min="0" max="1" value={level}/></label><p>Confirm the picture, sound and synchronization. This test clip is temporary and is not a meeting record.</p></div>}
+ </section>}
  {connected&&catalog?.can_capture&&<section id="capture"><h2>Record a meeting</h2><p>Select the meeting and chamber feed. Recordings remain private for Records review.</p>
+ {storage&&<p role="status">Recording storage: {(storage.free_bytes/1024**3).toFixed(1)} GB free. Configured maximum: {Math.round(storage.max_seconds/3600)} hours. {!storage.ready?'Free more space before starting.':''} Records needs space for its separate verified copy.</p>}
  <form id="capture-form" onSubmit={start}><label>Meeting<select id="meeting-id" required value={meeting} disabled={busy} onChange={e=>selectMeeting(e.target.value)}><option value="">Choose a meeting</option>{catalog.meetings.map(m=><option key={m.id} value={m.id}>{m.title}</option>)}</select></label>
  <label>Live input<select id="source" required value={source} onChange={e=>setSource(e.target.value)}>{sources.map(s=><option key={s.id} value={s.id}>{s.label}</option>)}</select></label><label>CivicCast live feed<select id="civiccast-feed" value={feed} onChange={e=>setFeed(e.target.value)}><option value="">Recording only</option>{feeds.map(f=><option key={f.id} value={f.id}>{f.label}</option>)}</select></label><button id="start" disabled={!meeting||!source||active||busy}>Start recording</button></form>
  {catalog.agenda.filter(a=>a.meeting_id===meeting).map(a=><label className="agenda-choice" key={a.id}><input type="checkbox" checked={agenda.includes(a.id)} onChange={e=>setAgenda(e.target.checked?[...agenda,a.id]:agenda.filter(id=>id!==a.id))}/>{a.title}</label>)}
@@ -139,6 +182,7 @@ function Recording({record:r,catalog,stop,attach,play,busy,uploads,upload}:{reco
  const [request,setRequest]=useState(''),[local,setLocal]=useState(false);
  const status=r.control.stop_requested_at&&['queued','running'].includes(r.status)?'Stopping — finishing and verifying media':r.status==='running'?(r.live_progress?.bytes_written>0?'Recording live feed':'Starting — waiting for live input'):r.status;
  return <article data-id={r.id}><h3>{r.details.meeting.title}</h3><p className="status">{status}</p>
+ {r.details.attempts?.at(-1)?.end_reason&&r.details.attempts.at(-1).end_reason!=='operator-stop'&&<p role="alert">Recording ended because of {r.details.attempts.at(-1).end_reason}. Check the end of the recording before using it as a complete meeting record.</p>}
  {r.status==='running'&&r.live_progress?.bytes_written>0&&<p>{(r.live_progress.bytes_written/1048576).toFixed(2)} MiB captured</p>}
  {catalog.can_capture&&r.details.live_source&&['queued','running'].includes(r.status)&&<button disabled={busy||local||!!r.control.stop_requested_at} onClick={async()=>{setLocal(true);try{await stop(r.id);}finally{setLocal(false);}}}>Stop recording</button>}
  {['failed','interrupted'].includes(r.status)&&<p>Recording did not complete. Partial evidence is retained. Start a new live recording; missing live time cannot be recovered.</p>}

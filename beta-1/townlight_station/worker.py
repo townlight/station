@@ -199,8 +199,13 @@ def process(cfg, store, row):
                     if feed_child:
                         _feed_progress(store, identity, details, feed_child, feed_status)
                     current = store.get(identity)
-                    if not stopping and (current['control'].get('stop_requested_at') or now-started >= cfg.max_seconds):
-                        attempt['end_reason'] = 'operator-stop' if current['control'].get('stop_requested_at') else 'duration-limit'
+                    from .storage_policy import storage_status
+                    disk = storage_status(cfg)
+                    details['storage'] = disk
+                    near_limit = current_size >= cfg.max_bytes - 16*1024**2
+                    if not stopping and (current['control'].get('stop_requested_at') or now-started >= cfg.max_seconds or disk['low_space'] or near_limit):
+                        attempt['end_reason'] = ('operator-stop' if current['control'].get('stop_requested_at')
+                            else 'low-disk-space' if disk['low_space'] else 'size-limit' if near_limit else 'duration-limit')
                         output.with_suffix('.stop').write_text(attempt['end_reason'], encoding='ascii')
                         stopping = now
                     if current_size > cfg.max_bytes:
