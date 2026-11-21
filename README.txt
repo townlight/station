@@ -1,14 +1,18 @@
-> **Repository scope:** the lightweight Python meeting recorder remains in `beta-1/`. The experimental Rust broadcast engine moved to private CivicCast Lab. See `docs/RUST-SEPARATION.md`. Historical release evidence is unchanged.
+  Repository scope: the lightweight Python meeting recorder remains in beta-1/. The experimental Rust broadcast engine moved to private CivicCast Lab. See docs/RUST-SEPARATION.md. Historical release evidence is unchanged.
 
-Windows 1.8.2.1 maintenance release
+Station recorder in Windows 1.9.0.1
 
-Windows 1.8.2.1 packages the staff authorization, explicit database configuration and component metadata corrections. Its exact signed installed checks cover setup, the 1.8.1.1 upgrade, saved staff records, procurement/Contracts handoffs, backup/restore and uninstall retention. Unchanged module and 31-source/34-format import evidence remains attributed to the earlier build that produced it; this is not a new exhaustive test of every module or live provider.
+Windows 1.9.0.1 integrates Station setup, camera and microphone selection, renewable operator sessions and verified large-recording transfers to Records. Acceptance and limits.
 
-Windows 1.8.2.1 has signed installed acceptance for fresh setup and an in-place upgrade from Windows 1.8.1.1. Before upgrading, back up city data and settings, close Townlight, run the signed MSI, and reopen it under the same Windows account with the existing %LOCALAPPDATA%\CivicSuite profile. Keep the prior installer and a restore path. Other upgrade paths are unverified. Station uses its separately configured service. The acceptance summary distinguishes new maintenance checks from reused workflow evidence.
+Windows 1.9.0.1 Station recorder release
+
+Windows 1.9.0.1 integrates Station setup, camera and microphone selection, renewable operator sessions and verified large-recording transfers to Records.
+
+Windows 1.9.0.1 has signed fresh-install acceptance, including Station recording, Records handoff and recovery. Set up Station during Townlight first run. Read the acceptance summary before upgrading.
 
 Release and downloads · Acceptance and limits.
 
-Windows x64 Beta 1 · MSI 1.8.2.1
+Windows x64 Beta 1 · MSI 1.9.0.1
 
 Windows 1.8.1.1 adds shared meeting imports for 31 source families, with 34 supported source/format pairs. Installed Windows Sandbox checks exercised preview, save and durable readback using public captures and fixtures, plus the documented Townlight handoffs. These checks do not establish automatic discovery on every live portal or a complete retest of every module.
 
@@ -43,9 +47,9 @@ Windows 1.8.1.1 adds shared meeting imports for 31 source families, with 34 supp
 
 All 31 sources, formats and handoffs · Installed acceptance.
 
-Windows 1.8.2.1 has signed installed acceptance for fresh setup and an in-place upgrade from Windows 1.8.1.1. Before upgrading, back up city data and settings, close Townlight, run the signed MSI, and reopen it under the same Windows account with the existing %LOCALAPPDATA%\CivicSuite profile. Keep the prior installer and a restore path. Other upgrade paths are unverified. Station uses its separately configured service. The acceptance summary distinguishes new maintenance checks from reused workflow evidence.
+Windows 1.9.0.1 has signed fresh-install acceptance, including Station recording, Records handoff and recovery. Set up Station during Townlight first run. Read the acceptance summary before upgrading.
 
-Windows 1.8.2.1 contains Townlight Runtime 0.3.2 and Meetings 1.0.6. Its current component sources and installed evidence are identified in the maintenance acceptance summary.
+Windows 1.9.0.1 contains Station 0.4.0, Records 1.8.0.dev4, Townlight Runtime 0.3.2 and Meetings 1.0.6. Its current component sources and installed evidence are identified in the maintenance acceptance summary.
 
 Windows 1.8.1.1 adds shared meeting imports for 31 source families, with 34 supported source/format pairs. Installed Windows Sandbox checks exercised preview, save and durable readback using public captures and fixtures, plus the documented Townlight handoffs. These checks do not establish automatic discovery on every live portal or a complete retest of every module.
 
@@ -57,9 +61,9 @@ Staff should begin with First run and Daily workflow. Administrators should also
 
 Beta identity
 
-  ------------------------------------------------------------------------------------------------------------------------------------------------------------------
+  --------------------------------------------------------------------------------------------------------------------
   Identity                            Value
-  ----------------------------------- ------------------------------------------------------------------------------------------------------------------------------
+  ----------------------------------- --------------------------------------------------------------------------------
   Documentation                       Townlight naming, Access and Notice candidate
 
   Intended installer                  1.8.1.1
@@ -70,22 +74,22 @@ Beta identity
 
   Station distribution/import         townlight-station 0.3.0 / townlight_station
 
-  Acceptance composition              Windows 1.8.2.1: fresh-install and 1.8.1.1 upgrade acceptance. Select the full profile. Station uses separate configuration.
+  Acceptance composition              Windows 1.9.0.1: signed fresh-install acceptance. Station setup is integrated.
 
   Candidate hashes/signature          SHA-256 checksums and Windows acceptance summary
 
   Owned software license              AGPL-3.0-only
-  ------------------------------------------------------------------------------------------------------------------------------------------------------------------
+  --------------------------------------------------------------------------------------------------------------------
 
-Station continues to use its separately configured service. The Windows MSI upgrade below applies to the desktop suite.
+Townlight first run can provision the bundled Station service. Existing installations can use Settings → Modules → Townlight Station → Set up meeting recording.
 
 First run
 
-Windows 1.8.2.1 has signed installed acceptance for fresh setup and an in-place upgrade from Windows 1.8.1.1. Before upgrading, back up city data and settings, close Townlight, run the signed MSI, and reopen it under the same Windows account with the existing %LOCALAPPDATA%\CivicSuite profile. Keep the prior installer and a restore path. Other upgrade paths are unverified. Station uses its separately configured service. The acceptance summary distinguishes new maintenance checks from reused workflow evidence.
+Windows 1.9.0.1 has signed fresh-install acceptance, including Station recording, Records handoff and recovery. Set up Station during Townlight first run. Read the acceptance summary before upgrading.
 
 Fresh installation
 
-Run the signed Windows 1.8.2.1 MSI and use an empty database and a new Townlight profile for first run.
+Run the signed Windows 1.9.0.1 MSI and use an empty database and a new Townlight profile for first run.
 
 1.  Download the signed MSI, matching source companion and checksums from the public Windows release.
 2.  Verify the MSI hash and Authenticode publisher before installation. See the Windows acceptance summary for the tested setup.
@@ -93,7 +97,7 @@ Run the signed Windows 1.8.2.1 MSI and use an empty database and a new Townlight
 4.  Enter the city profile, time zone and contacts. Create the first named local administrator, sign in and choose protected backup storage. Continue without local AI is valid for the deterministic workflows.
 5.  Run Health Check and wait for readiness. Open Townlight. In System Health select Finish Records Migration to activate the canonical Python/PostgreSQL runtime. Do not fabricate migration receipts or seed accounts.
 6.  Create named staff through Settings. Import authorized sources using each product’s source library. All examples in this package are synthetic; they are not municipal authority.
-7.  Provision Station separately if it is part of the beta exercise. Selecting the desktop composition does not start or configure Station. Configure vision explicitly only if automatic photo drafting is selected.
+7.  Set up Station during first run with the full profile or with Meetings and Records selected. On an existing installation, open Settings → Modules → Townlight Station → Set up meeting recording. Configure vision explicitly only if automatic photo drafting is selected.
 
 Daily workflow
 
@@ -177,7 +181,7 @@ Apply the caption profile
 
 For a managed recorded file, an explicitly supplied SRT sidecar replaces embedded captions for this profile; otherwise embedded captions are retained where supported by the pinned media profile. Live capture preserves the embedded-caption path and does not accept an SRT sidecar. An absent caption stream is not automatic speech recognition. Check the actual captured/packaged captions for the selected synthetic input.
 
-Original files are limited to 2,147,483,647 bytes and sidecars to 5,000,000 bytes. After publication, browser playback uses the packaged MP4 and a separate WebVTT track when produced. Preserve original inputs and recorded caption provenance separately from those derivatives.
+The legacy recorded-file intake limits original files to 2,147,483,647 bytes and sidecars to 5,000,000 bytes. The integrated meeting recorder has a separate 64 GiB file limit. After publication, browser playback uses the packaged MP4 and a separate WebVTT track when produced. Preserve original inputs and recorded caption provenance separately from those derivatives.
 
 Check playout and commit deliberately
 
@@ -217,7 +221,7 @@ Technical specifications
 
 Runtime and storage
 
-The Windows 1.8.2.1 package has signed fresh-install and 1.8.1.1 upgrade acceptance. Its native shell uses Rust 2021, Tauri 2 and Microsoft WebView2; browser assets are JavaScript built with Vite 8.1.6. This describes the native desktop frontend; Station has a separate React operator, specified below or in its product manual. Canonical business workflows use bundled CPython 3.13.5, FastAPI, Pydantic, SQLAlchemy and Alembic, with PostgreSQL 17 / PostGIS and managed original files. Bundled dependency versions are recorded with the release evidence. Package minimum Python requirements can differ from the bundled executable; the metadata reference preserves both. No stack rewrite is implied by the beta label.
+The Windows 1.9.0.1 package has signed fresh-install and Station recorder acceptance. Its native shell uses Rust 2021, Tauri 2 and Microsoft WebView2; browser assets are JavaScript built with Vite 8.1.6. This describes the native desktop frontend; Station has a separate React operator, specified below or in its product manual. Canonical business workflows use bundled CPython 3.13.5, FastAPI, Pydantic, SQLAlchemy and Alembic, with PostgreSQL 17 / PostGIS and managed original files. Bundled dependency versions are recorded with the release evidence. Package minimum Python requirements can differ from the bundled executable; the metadata reference preserves both. No stack rewrite is implied by the beta label.
 
 The native transport is fixed to loopback 127.0.0.1:15480; PostgreSQL uses the configured local runtime port (default 15432). Optional local model service defaults to 127.0.0.1:15434. Those are deployment defaults, not internet endpoints. The runtime has health, module and readiness endpoints; readiness is stronger than process existence. The task queue is the existing local Core task infrastructure, not an assertion that a separate Redis service is required for this desktop composition.
 
@@ -579,7 +583,7 @@ Staff verify the jurisdiction, source currency, permissions, citations and propo
 
 Beta operation and recovery
 
-Windows 1.8.0.1 was tested for fresh installation and in-place upgrade from 1.7.2.1. Upgrade paths from versions older than 1.7.2.1 are unverified. Station uses its separately configured service. Keep backups and original evidence. Test your physical equipment and network and service configuration before relying on them. See the acceptance summary for the tested paths.
+Windows 1.8.0.1 was tested for fresh installation and in-place upgrade from 1.7.2.1. Upgrade paths from versions older than 1.7.2.1 are unverified. Station is configured during Townlight first run. Keep backups and original evidence. Test your physical equipment and network and service configuration before relying on them. See the acceptance summary for the tested paths.
 
 Warranty and liability
 
@@ -666,7 +670,7 @@ Operating subject links
 
 Source and document control
 
-This manual covers the Station service paired with Windows MSI 1.8.1.1. The Windows acceptance summary records the tested Meetings, Station and Records handoff.
+This manual covers Station 0.4.0 installed with Windows MSI 1.9.0.1. The Windows acceptance summary records the tested Meetings, Station and Records handoff.
 
 Workflow subject index
 

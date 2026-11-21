@@ -1,8 +1,8 @@
 # Windows recorder completion contract
 
-## Windows recorder update — 1.9.0.1 candidate (not published)
+## Windows 1.9.0.1 meeting recorder
 
-The Townlight Station candidate verification record covers Windows 1.9.0.1 as an unpublished candidate, while 1.8.2.1 is the current public release. See the [Suite pull request checks](https://github.com/townlight/townlight/pull/330/checks) for installed acceptance results.
+This record describes the Station recorder verification performed for Windows 1.9.0.1. See the [published signed acceptance](https://github.com/townlight/townlight/releases/download/townlight-windows-v1.9.0.1/ACCEPTANCE-Windows-1.9.0.1.md) for artifact identity and evidence.
 
 ### Clerk and operator
 

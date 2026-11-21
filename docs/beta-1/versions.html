@@ -8,13 +8,14 @@
 main,.toc a,.hero h1{overflow-wrap:anywhere}
 @page{size:Letter;margin:.7in .65in .75in}
 @media print{html{scroll-behavior:auto}body{font:10.5pt/1.45 Arial,sans-serif;color:#172f39}header,footer,.search-area,.screen-only{display:none}.doclayout{display:block;padding:0;max-width:none}.toc{position:static;max-height:none;overflow:visible;font-size:10pt;break-after:page}.toc>h2{border:0}.toc ul{columns:2;column-gap:.3in}.toc li{break-inside:avoid}.docbody h1{font-size:30pt}.docbody h2{font-size:19pt;break-after:avoid;padding-top:.15in;margin-top:.35in}.docbody h3{font-size:12pt;break-after:avoid}.docbody h4{break-after:avoid}p{orphans:3;widows:3}pre{font-size:8.2pt;line-height:1.4;padding:.1in;break-inside:auto}table{font-size:8.4pt;line-height:1.35}th,td{padding:.06in .07in}tr{break-inside:avoid}.flow{max-height:6in;object-fit:contain;break-inside:avoid}a{color:#172f39;text-decoration:underline}.cover{break-after:page;padding-top:1in}.cover .edition{font-size:11pt}.cover h1{font-size:32pt}.cover .lead{font-size:14pt}.api-entry{break-inside:auto}.api-entry h3{break-after:avoid}.index-columns{columns:2}}
-header .brand{display:inline-flex;align-items:center;max-width:100%;flex-shrink:0}header .brand img{display:block;width:217px;max-width:100%;height:auto}</style><link rel="icon" href="./brand/favicon.svg" type="image/svg+xml"><link rel="icon" href="./brand/favicon.ico" sizes="16x16 32x32 48x48"><link rel="apple-touch-icon" href="./brand/png/townlight-hall-app-icon-180.png"><meta property="og:image" content="https://townlight.github.io/brand/png/townlight-hall-social-preview.png"><meta name="twitter:card" content="summary_large_image"></head>
+header .brand{display:inline-flex;align-items:center;max-width:100%;flex-shrink:0}header .brand img{display:block;width:217px;max-width:100%;height:auto}.release-note{max-width:1240px;margin:3rem auto 0;padding:1.2rem 4vw 0;border-top:1px solid var(--line);font-size:.88rem;line-height:1.55;color:var(--muted)}.release-note p{margin:0;max-width:60rem}.release-note+footer{margin-top:1.5rem}@media print{.release-note{display:none}}
+</style><link rel="icon" href="./brand/favicon.svg" type="image/svg+xml"><link rel="icon" href="./brand/favicon.ico" sizes="16x16 32x32 48x48"><link rel="apple-touch-icon" href="./brand/png/townlight-hall-app-icon-180.png"><meta property="og:image" content="https://townlight.github.io/brand/png/townlight-hall-social-preview.png"><meta name="twitter:card" content="summary_large_image"></head>
 <body><a class="skip" href="#main">Skip to content</a>
 <header><a class="brand" href="./index.html"><img src="./brand/svg/townlight-hall-lockup.svg" alt="Townlight" width="217" height="45"></a>
 <nav aria-label="Main"><a href="./manuals/suite.html">Suite manual</a>
 <a href="./versions.html">Versions and Windows release</a>
 <a href="./terms.html">Terms and license</a></nav></header>
-<main id="main" class="reading wrap"><section id="windows-maintenance"><h2>Windows 1.8.2.1 maintenance release</h2><p>Windows 1.8.2.1 packages the staff authorization, explicit database configuration and component metadata corrections. Its exact signed installed checks cover setup, the 1.8.1.1 upgrade, saved staff records, procurement/Contracts handoffs, backup/restore and uninstall retention. Unchanged module and 31-source/34-format import evidence remains attributed to the earlier build that produced it; this is not a new exhaustive test of every module or live provider.</p><p>Windows 1.8.2.1 has signed installed acceptance for fresh setup and an in-place upgrade from Windows 1.8.1.1. Before upgrading, back up city data and settings, close Townlight, run the signed MSI, and reopen it under the same Windows account with the existing %LOCALAPPDATA%\CivicSuite profile. Keep the prior installer and a restore path. Other upgrade paths are unverified. Station uses its separately configured service. The acceptance summary distinguishes new maintenance checks from reused workflow evidence.</p><p><a href="https://github.com/townlight/townlight/releases/tag/townlight-windows-v1.8.2.1">Release and downloads</a> · <a href="https://github.com/townlight/townlight/releases/download/townlight-windows-v1.8.2.1/ACCEPTANCE-Windows-1.8.2.1.md">Acceptance and limits</a></p></section><p class="edition">Windows x64 Beta 1 · MSI 1.8.2.1</p>
+<main id="main" class="reading wrap"><p class="edition">Windows x64 Beta 1 · MSI 1.9.0.1</p>
 <p>Windows 1.8.1.1 adds shared meeting imports for 31 source families, with 34 supported source/format pairs. Installed Windows Sandbox checks exercised preview, save and durable readback using public captures and fixtures, plus the documented Townlight handoffs. These checks do not establish automatic discovery on every live portal or a complete retest of every module. <a href="https://github.com/townlight/townlight/releases/download/townlight-windows-v1.8.1.1/ACCEPTANCE-Windows-1.8.1.1.md">Acceptance and limits</a>.</p>
 
 <nav id="TOC" role="doc-toc">
@@ -24,7 +25,7 @@ versions</a></li>
 </ul>
 </nav>
 <h1 id="component-versions">Component versions</h1>
-<p>These components are included in the signed <a href="https://github.com/townlight/townlight/releases/tag/townlight-windows-v1.8.2.1">Windows x64 beta 1.8.2.1</a>. See the <a href="https://github.com/townlight/townlight/releases/download/townlight-windows-v1.8.2.1/ACCEPTANCE-Windows-1.8.2.1.md">Windows acceptance summary</a> for the tested workflows.</p>
+<p>These components are included in the signed <a href="https://github.com/townlight/townlight/releases/tag/townlight-windows-v1.9.0.1">Windows x64 beta 1.9.0.1</a>. See the <a href="https://github.com/townlight/townlight/releases/download/townlight-windows-v1.9.0.1/ACCEPTANCE-Windows-1.9.0.1.md">Windows acceptance summary</a> for the tested workflows.</p>
 <table>
 <thead>
 <tr>
@@ -42,7 +43,7 @@ versions</a></li>
 <tr>
 <td>Townlight Records</td>
 <td><code>townlight-records</code></td>
-<td>1.8.0.dev3</td>
+<td>1.8.0.dev4</td>
 </tr>
 <tr>
 <td>Townlight Meetings</td>
@@ -87,7 +88,7 @@ versions</a></li>
 <tr>
 <td>Townlight Station</td>
 <td><code>townlight-station</code></td>
-<td>0.3.1</td>
+<td>0.4.0</td>
 </tr>
 <tr><td>Boards &amp; Commissions</td><td><code>townlight-boards</code></td><td>0.2.1</td></tr>
 <tr><td>Contracts</td><td><code>townlight-contracts</code></td><td>0.2.1</td></tr>
@@ -95,11 +96,8 @@ versions</a></li>
 <tr><td>Local runtime</td><td><code>townlight-runtime</code></td><td>0.3.2</td></tr>
 </tbody>
 </table>
-<p>Desktop source version <code>1.8.2-1</code>. Windows MSI version <code>1.8.2.1</code>. See the <a href="https://github.com/townlight/townlight/releases/download/townlight-windows-v1.8.2.1/SHA256SUMS-Windows-1.8.2.1.txt">SHA-256 checksums</a> and <a href="https://github.com/townlight/townlight/releases/download/townlight-windows-v1.8.2.1/ACCEPTANCE-Windows-1.8.2.1.md">Windows acceptance summary</a>.</p>
+<p>Desktop source version <code>1.9.0-1</code>. Windows MSI version <code>1.9.0.1</code>. See the <a href="https://github.com/townlight/townlight/releases/download/townlight-windows-v1.9.0.1/SHA256SUMS-Windows-1.9.0.1.txt">SHA-256 checksums</a> and <a href="https://github.com/townlight/townlight/releases/download/townlight-windows-v1.9.0.1/ACCEPTANCE-Windows-1.9.0.1.md">Windows acceptance summary</a>.</p>
 <p>Historical releases retain their original package identities, version
 numbers and evidence. These candidate names do not rename historical
 artifacts.</p>
-<p>Station remains the existing Beta 1 Python service. Its separate Rust
-development line and standalone CivicCast are outside this
-migration.</p>
-<section id="meeting-imports"><h2>Shared meeting imports · Windows 1.8.1.1</h2><p>Windows 1.8.1.1 adds shared meeting imports for 31 source families, with 34 supported source/format pairs. Installed Windows Sandbox checks exercised preview, save and durable readback using public captures and fixtures, plus the documented Townlight handoffs. These checks do not establish automatic discovery on every live portal or a complete retest of every module.</p><p><a href="https://townlight.github.io/manuals/meeting-imports.html">All 31 sources, formats, operator steps and integration contracts</a> · <a href="https://github.com/townlight/townlight/releases/download/townlight-windows-v1.8.1.1/ACCEPTANCE-Windows-1.8.1.1.md">Installed acceptance and limits</a>.</p><p>Windows 1.8.2.1 has signed installed acceptance for fresh setup and an in-place upgrade from Windows 1.8.1.1. Before upgrading, back up city data and settings, close Townlight, run the signed MSI, and reopen it under the same Windows account with the existing %LOCALAPPDATA%\CivicSuite profile. Keep the prior installer and a restore path. Other upgrade paths are unverified. Station uses its separately configured service. The acceptance summary distinguishes new maintenance checks from reused workflow evidence.</p><p>Windows 1.8.2.1 contains Townlight Runtime 0.3.2 and Meetings 1.0.6, including corrected version displays.</p></section></main><footer>Townlight · AGPL-3.0-only · Candidate evidence applies only to its identified artifacts.<span><a href="./brand/">Brand package</a></span><span><a href="./announcement.html">Announcement</a> · <a href="./support.html">Support and feedback</a></span></footer></body></html>
+<p>Station 0.4.0 is the bundled Python recording service. Townlight first run provisions it for profiles that include Meetings and Records.</p></main><aside class="release-note" aria-label="Current release"><p><strong>Current release:</strong> Townlight for Windows 1.9.0.1, a signed public beta. Installed checks cover fresh setup, Station recording, Records handoff and recovery. <a href="https://github.com/townlight/townlight/releases/tag/townlight-windows-v1.9.0.1">Downloads</a> · <a href="/announcement.html">Release notes and installation</a> · <a href="/versions.html">Versions and limits</a></p></aside><footer>Townlight · AGPL-3.0-only · Candidate evidence applies only to its identified artifacts.<span><a href="./brand/">Brand package</a></span><span><a href="./announcement.html">Announcement</a> · <a href="./support.html">Support and feedback</a></span></footer></body></html>
