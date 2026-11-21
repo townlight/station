@@ -1,14 +1,14 @@
-## Windows 1.9.0.1 Station recorder release
+## Windows 1.9.1.1 Station recorder release
 
-## Windows 1.9.0.1 meeting recorder
+## Windows 1.9.1.1 meeting recorder
 
-Windows 1.9.0.1 has signed fresh-install acceptance, including Station recording, Records handoff and recovery. Set up Station during Townlight first run. Read the acceptance summary before upgrading. [Acceptance and limits](https://github.com/townlight/townlight/releases/download/townlight-windows-v1.9.0.1/ACCEPTANCE-Windows-1.9.0.1.md).
+Windows 1.9.1.1 is a signed public beta. See the acceptance summary for the verified workflows and artifact identities. Set up Station during Townlight first run. Read the acceptance summary before upgrading. [Acceptance and limits](https://github.com/townlight/townlight/releases/download/townlight-windows-v1.9.1.1/ACCEPTANCE-Windows-1.9.1.1.md).
 
 ### Clerk and operator
 
 1. Install Townlight and complete normal first-run setup with the full Windows profile or a custom selection that includes Meetings and Records (Station is bundled). Finishing setup provisions the bundled recorder, a private database and Windows sign-in task. No PostgreSQL, Python or media-runtime installation commands are needed. Existing installations use Settings → Modules → Townlight Station → **Set up meeting recording**.
 2. Keep Windows signed in and the computer awake while recording. The recorder runs in that user's device-access session, independently of the Townlight window. It is not a multi-user server or a full PEG station. Closing the recorder tab does not stop a recording.
-3. Sign in with an existing authorized staff account. From Meetings choose **Open / reconnect to meeting recorder**. Select a meeting and its agenda items. In input setup, find devices, choose one camera/capture device and one microphone, and save. Record a ten-second input test, then play it to check the picture and sound; the meter responds during playback. This test clip is temporary and is not a canonical meeting record. Windows camera/microphone privacy settings and exclusive device use still apply. Configured UDP MPEG-TS input remains supported.
+3. Sign in with an existing authorized staff account. From Meetings choose **Open / reconnect to meeting recorder**. Select a meeting and its agenda items. In input setup, find devices, choose one camera/capture device and one microphone, and save. Select **Record 10-second input test**. Station starts timing once it captures media, so the first run can take longer than ten seconds. Play the clip to check the picture and sound before recording the meeting. This test clip is temporary and is not a canonical meeting record. Windows camera/microphone privacy settings and exclusive device use still apply. Configured UDP MPEG-TS input remains supported.
 4. Start the meeting recording. The default duration limit is eight hours, with a 64 GiB file limit and at least 1 GiB reserved disk space. Admission estimates the configured duration and bitrate. Free space is monitored while recording; low space or a limit requests a graceful stop and displays the reason. These are configured limits, not a claim that every eight-hour meeting has been tested. Plan space for the recording, its Records copy and backups. Sleep, sign-out, power failure and unavailable hardware can interrupt capture.
 5. An open operator page renews its fifteen-minute session against the current Townlight staff authority. Sign-out, revoked permissions and the underlying staff-session expiry still take effect. Reopen from Townlight to reconnect to an existing recording; reconnect never starts a second recording. Select **Stop recording** to drain and finalize the file.
 6. After completion, an authorized Records user selects a request and explicitly attaches the recording. Records streams a separate managed copy and verifies SHA-256, size and provenance; files up to 64 GiB are accepted subject to available space. Attachment is not public release. Review, redaction and publication remain separate Records decisions.
@@ -30,13 +30,13 @@ flowchart LR
 ```
 
 
-Windows 1.9.0.1 integrates Station setup, camera and microphone selection, renewable operator sessions and verified large-recording transfers to Records.
+Windows 1.9.1.1 improves the clerk workflows for Records, Meetings, and Code, adds Open Hall icons, and fixes the ten-second Station preview.
 
-Windows 1.9.0.1 has signed fresh-install acceptance, including Station recording, Records handoff and recovery. Set up Station during Townlight first run. Read the acceptance summary before upgrading.
+Windows 1.9.1.1 is a signed public beta. See the acceptance summary for the verified workflows and artifact identities. Set up Station during Townlight first run. Read the acceptance summary before upgrading.
 
-[Release and downloads](https://github.com/townlight/townlight/releases/tag/townlight-windows-v1.9.0.1) · [Acceptance and limits](https://github.com/townlight/townlight/releases/download/townlight-windows-v1.9.0.1/ACCEPTANCE-Windows-1.9.0.1.md).
+[Release and downloads](https://github.com/townlight/townlight/releases/tag/townlight-windows-v1.9.1.1) · [Acceptance and limits](https://github.com/townlight/townlight/releases/download/townlight-windows-v1.9.1.1/ACCEPTANCE-Windows-1.9.1.1.md).
 
-Windows x64 Beta 1 · MSI 1.9.0.1
+Windows x64 Beta 1 · MSI 1.9.1.1
 
 Windows 1.8.1.1 adds shared meeting imports for 31 source families, with 34 supported source/format pairs. Installed Windows Sandbox checks exercised preview, save and durable readback using public captures and fixtures, plus the documented Townlight handoffs. These checks do not establish automatic discovery on every live portal or a complete retest of every module.
 
@@ -71,9 +71,9 @@ Windows 1.8.1.1 adds shared meeting imports for 31 source families, with 34 supp
 
 [All 31 sources, formats and handoffs](https://townlight.github.io/manuals/meeting-imports.html) · [Installed acceptance](https://github.com/townlight/townlight/releases/download/townlight-windows-v1.8.1.1/ACCEPTANCE-Windows-1.8.1.1.md).
 
-Windows 1.9.0.1 has signed fresh-install acceptance, including Station recording, Records handoff and recovery. Set up Station during Townlight first run. Read the acceptance summary before upgrading.
+Windows 1.9.1.1 is a signed public beta. See the acceptance summary for the verified workflows and artifact identities. Set up Station during Townlight first run. Read the acceptance summary before upgrading.
 
-Windows 1.9.0.1 contains Station 0.4.0, Records 1.8.0.dev4, Townlight Runtime 0.3.2 and Meetings 1.0.6. Its current component sources and installed evidence are identified in the maintenance acceptance summary.
+Windows 1.9.1.1 contains Station 0.4.4, Records 1.8.0.dev4, Townlight Runtime 0.3.3 and Meetings 1.0.6. The release acceptance summary identifies the verified workflows and the builds that produced the evidence.
 
 
 Windows 1.8.1.1 adds shared meeting imports for 31 source families, with 34 supported source/format pairs. Installed Windows Sandbox checks exercised preview, save and durable readback using public captures and fixtures, plus the documented Townlight handoffs. These checks do not establish automatic discovery on every live portal or a complete retest of every module.
@@ -93,22 +93,22 @@ Staff should begin with First run and Daily workflow. Administrators should also
 | Desktop source | 1.8.1-1 |
 | Runtime distribution | townlight-runtime 0.2.0 |
 | Station distribution/import | townlight-station 0.3.0 / townlight_station |
-| Acceptance composition | Windows 1.9.0.1: signed fresh-install acceptance. Station setup is integrated. |
-| Candidate hashes/signature | [SHA-256 checksums](https://github.com/townlight/townlight/releases/download/townlight-windows-v1.9.0.1/SHA256SUMS-Windows-1.9.0.1.txt) and [Windows acceptance summary](https://github.com/townlight/townlight/releases/download/townlight-windows-v1.9.0.1/ACCEPTANCE-Windows-1.9.0.1.md) |
+| Acceptance composition | Windows 1.9.1.1: physical Station preview, recording and playback verified. Station setup is integrated. |
+| Candidate hashes/signature | [SHA-256 checksums](https://github.com/townlight/townlight/releases/download/townlight-windows-v1.9.1.1/SHA256SUMS-Windows-1.9.1.1.txt) and [Windows acceptance summary](https://github.com/townlight/townlight/releases/download/townlight-windows-v1.9.1.1/ACCEPTANCE-Windows-1.9.1.1.md) |
 | Owned software license | AGPL-3.0-only |
 
 Townlight first run can provision the bundled Station service. Existing installations can use Settings → Modules → Townlight Station → Set up meeting recording.
 
 ## First run
 
-Windows 1.9.0.1 has signed fresh-install acceptance, including Station recording, Records handoff and recovery. Set up Station during Townlight first run. Read the acceptance summary before upgrading.
+Windows 1.9.1.1 is a signed public beta. See the acceptance summary for the verified workflows and artifact identities. Set up Station during Townlight first run. Read the acceptance summary before upgrading.
 
 ### Fresh installation
 
-Run the signed Windows 1.9.0.1 MSI and use an empty database and a new Townlight profile for first run.
+For a fresh setup, run the signed Windows 1.9.1.1 MSI and use an empty database and a new Townlight profile. For an upgrade from 1.9.1.1, back up city data and settings, close Townlight, run the MSI, then reopen Townlight under the same Windows account and profile. See the acceptance summary for which build was used and the limits of upgrade testing.
 
 1.  Download the signed MSI, matching source companion and checksums from the [public Windows release](https://github.com/townlight/townlight/releases/tag/townlight-windows-v1.8.1.1).
-2.  Verify the MSI hash and Authenticode publisher before installation. See the [Windows acceptance summary](https://github.com/townlight/townlight/releases/download/townlight-windows-v1.9.0.1/ACCEPTANCE-Windows-1.9.0.1.md) for the tested setup.
+2.  Verify the MSI hash and Authenticode publisher before installation. See the [Windows acceptance summary](https://github.com/townlight/townlight/releases/download/townlight-windows-v1.9.1.1/ACCEPTANCE-Windows-1.9.1.1.md) for the tested setup.
 3.  Launch Townlight under the intended named Windows account. Choose the storage folders. Select **Townlight Inspections candidate** (`inspections-preview`) for the bounded desktop composition, including Access and Notice. A narrower default selection will not expose all workspaces.
 4.  Enter the city profile, time zone and contacts. Create the first named local administrator, sign in and choose protected backup storage. **Continue without local AI** is valid for the deterministic workflows.
 5.  Run Health Check and wait for readiness. Open Townlight. In System Health select **Finish Records Migration** to activate the canonical Python/PostgreSQL runtime. Do not fabricate migration receipts or seed accounts.
@@ -240,7 +240,7 @@ Source contracts: `townlight_station/operations.py`, `worker.py`, `airplay.py`, 
 
 ### Runtime and storage
 
-The Windows 1.9.0.1 package has signed fresh-install and Station recorder acceptance. Its native shell uses **Rust 2021, Tauri 2 and Microsoft WebView2**; browser assets are JavaScript built with **Vite 8.1.6**. This describes the native desktop frontend; Station has a separate React operator, specified below or in its product manual. Canonical business workflows use bundled **CPython 3.13.5, FastAPI, Pydantic, SQLAlchemy and Alembic**, with **PostgreSQL 17 / PostGIS** and managed original files. Bundled dependency versions are recorded with the release evidence. Package minimum Python requirements can differ from the bundled executable; the metadata reference preserves both. No stack rewrite is implied by the beta label.
+The Windows 1.9.1.1 package has physical Station camera and microphone acceptance. Its native shell uses **Rust 2021, Tauri 2 and Microsoft WebView2**; browser assets are JavaScript built with **Vite 8.1.6**. This describes the native desktop frontend; Station has a separate React operator, specified below or in its product manual. Canonical business workflows use bundled **CPython 3.13.5, FastAPI, Pydantic, SQLAlchemy and Alembic**, with **PostgreSQL 17 / PostGIS** and managed original files. Bundled dependency versions are recorded with the release evidence. Package minimum Python requirements can differ from the bundled executable; the metadata reference preserves both. No stack rewrite is implied by the beta label.
 
 The native transport is fixed to loopback `127.0.0.1:15480`; PostgreSQL uses the configured local runtime port (default `15432`). Optional local model service defaults to `127.0.0.1:15434`. Those are deployment defaults, not internet endpoints. The runtime has health, module and readiness endpoints; readiness is stronger than process existence. The task queue is the existing local Core task infrastructure, not an assertion that a separate Redis service is required for this desktop composition.
 
@@ -616,7 +616,7 @@ Staff verify the jurisdiction, source currency, permissions, citations and propo
 
 ### Beta operation and recovery
 
-Windows 1.8.0.1 was tested for fresh installation and in-place upgrade from 1.7.2.1. Upgrade paths from versions older than 1.7.2.1 are unverified. Station is configured during Townlight first run. Keep backups and original evidence. Test your physical equipment and network and service configuration before relying on them. See the [acceptance summary](https://github.com/townlight/townlight/releases/download/townlight-windows-v1.8.0.1/ACCEPTANCE-Windows-1.8.0.1.md) for the tested paths.
+Back up city data and settings before upgrading from 1.9.0.1. Close Townlight, run the 1.9.1.1 MSI, then reopen under the same Windows account and existing profile. Station is configured during Townlight first run. Keep backups and original evidence. Test your physical equipment and network and service configuration before relying on them. See the [acceptance summary](https://github.com/townlight/townlight/releases/download/townlight-windows-v1.9.1.1/ACCEPTANCE-Windows-1.9.1.1.md) for the tested paths.
 
 ### Warranty and liability
 
@@ -688,7 +688,7 @@ When an organization ends testing, it controls retention/export and removes acce
 
 ## Source and document control
 
-This manual covers Station 0.4.0 installed with Windows MSI 1.9.0.1. The [Windows acceptance summary](https://github.com/townlight/townlight/releases/download/townlight-windows-v1.9.0.1/ACCEPTANCE-Windows-1.9.0.1.md) records the tested Meetings, Station and Records handoff.
+This manual covers Station 0.4.4 installed with Windows MSI 1.9.1.1. The [Windows acceptance summary](https://github.com/townlight/townlight/releases/download/townlight-windows-v1.9.1.1/ACCEPTANCE-Windows-1.9.1.1.md) identifies the physical camera and microphone test and the build used for installed handoff evidence.
 
 ### Workflow subject index
 
