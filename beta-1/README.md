@@ -1,12 +1,12 @@
 # Station recorder in Windows
 
-Windows 1.9.0.1 integrates Station setup, camera and microphone selection, renewable operator sessions and verified large-recording transfers to Records.
+Windows 1.9.1.1 improves the clerk workflows for Records, Meetings, and Code, adds Open Hall icons, and fixes the ten-second Station preview.
 
-Windows 1.9.0.1 has signed fresh-install acceptance, including Station recording, Records handoff and recovery. Set up Station during Townlight first run. Read the acceptance summary before upgrading.
+Windows 1.9.1.1 is a signed public beta. See the acceptance summary for the verified workflows and artifact identities. Set up Station during Townlight first run. Read the acceptance summary before upgrading.
 
-[Release and downloads](https://github.com/townlight/townlight/releases/tag/townlight-windows-v1.9.0.1) · [Acceptance and limits](https://github.com/townlight/townlight/releases/download/townlight-windows-v1.9.0.1/ACCEPTANCE-Windows-1.9.0.1.md).
+[Release and downloads](https://github.com/townlight/townlight/releases/tag/townlight-windows-v1.9.1.1) · [Acceptance and limits](https://github.com/townlight/townlight/releases/download/townlight-windows-v1.9.1.1/ACCEPTANCE-Windows-1.9.1.1.md).
 
-The 1.9.0.1 installer ships Station 0.4.0. See the [current manual](USER-MANUAL.md).
+The 1.9.1.1 installer ships Station 0.4.4. See the [current manual](USER-MANUAL.md).
 
 Station 0.4.4 is prepared for the next Windows candidate. The ten-second input test allows time for the camera and microphone to start before timing the clip. From a saved meeting in Townlight, open Station with that meeting selected. An operator chooses the input and starts recording. Use the meeting title to find the recording, then choose a Records request to attach a verified copy privately for review.
 
