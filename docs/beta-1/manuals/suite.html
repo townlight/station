@@ -17,31 +17,16 @@ header .brand{display:inline-flex;align-items:center;max-width:100%;flex-shrink:
 <a href="../terms.html">Terms and license</a></nav></header>
 <main id="main" class="reading wrap">
 <!-- candidate-note-suite:begin -->
-<aside id="candidate-note-suite" class="release-note" aria-label="Windows 1.9.2.1 candidate status"><p><strong>Windows 1.9.2.1 signed candidate · not distributed.</strong></p><p>The signed Windows 1.9.2.1 candidate adds a city-hosted shared mode:
-named Windows workstations use Meetings and Records through the city’s
-private HTTPS endpoint, while the host owns the database, managed files
-and Station capture. Townlight Clerk and Records Staff remain separate
-named roles; existing City Staff and Local Admin retain only the actions
-their current permissions allow, and Code Staff gains no Meetings or
-Records authority. On a workstation, clerks can prepare council packets
-and send a reviewed correction; the host verifies copied files and
-records the operator. Station capture and administration remain on the
-host.</p>
-<p>Fulfilling a Records request does not publish its contents. Staff
-must separately review and approve the exact council packet revision or
-eligible Records release copy for the portal. The shared host queues
-approved actions, retries after sign-out, outage or restart, and reports
-the confirmed status in Meetings. A packet correction replaces that
-packet only; packet and recording withdrawals are separate. The public
-1.9.1.1 installer does not include this shared-host workflow or
-unattended publisher. Read the <a
-href="https://townlight.github.io/manuals/windows-1.9.2.1-candidate.html">1.9.2.1
-candidate guide</a>, <a
-href="https://github.com/townlight/townlight/blob/1bc45be5a14aa969e53b87b1cef1f278dadc79a4/docs/installer/windows-shared-staff.md">shared
-staff guide at the signed source commit</a>, and <a
-href="https://github.com/townlight/townlight/blob/a35afc2bd7702a8ddbfabbd0ec3dbc75a3d581de/docs/portal/guide.md">Portal
-guide</a>. Candidate acceptance used a host and Sandbox guest on the
-same physical PC and a synthetic portal.</p></aside>
+<aside id="candidate-note-suite" class="release-note" aria-label="Windows 1.9.2.1 release details"><p><strong>Windows 1.9.2.1 signed public beta.</strong></p><p>Windows 1.9.2.1 adds shared Meetings and Records use from a Windows
+workstation through the city host, reviewed council packet revisions,
+and queued delivery of separately approved packets and recording copies
+to the separately deployed portal.</p>
+<p>Acceptance used synthetic data and a test portal on the physical
+Windows host with a clean Windows Sandbox guest on the same PC. It does
+not establish two physical PCs, recovery on another computer or account,
+production portal or city network operation, direct MSI upgrade from an
+earlier version, new hardware or broadcast acceptance, or PDF/UA and
+full assistive-technology review.</p></aside>
 <!-- candidate-note-suite:end -->
 <nav id="TOC" role="doc-toc">
 <ul>
@@ -1362,4 +1347,4 @@ and reconciliation.</li>
 href="https://townlight.github.io/manuals/portal.html">Townlight Portal
 Guide</a> for its workflow and acceptance limits.</p>
 </section>
-</main><aside class="release-note" aria-label="Current release"><p><strong>Current release:</strong> Townlight for Windows 1.9.1.1, a signed public beta. See acceptance for the hardware test and earlier installed evidence. <a href="https://github.com/townlight/townlight/releases/tag/townlight-windows-v1.9.1.1">Downloads</a> · <a href="/announcement.html">Release notes and installation</a> · <a href="/versions.html">Versions and limits</a></p></aside><footer>Townlight · AGPL-3.0-only · Candidate evidence applies only to its identified artifacts.<span><a href="../brand/">Brand package</a></span><span><a href="../announcement.html">Announcement</a> · <a href="../support.html">Support and feedback</a></span></footer></body></html>
+</main><aside class="release-note" aria-label="Current release"><p><strong>Current release:</strong> Townlight for Windows 1.9.2.1, a signed public beta. Shared staff and portal delivery require explicit setup. Acceptance used synthetic data on a physical Windows host and a clean Sandbox guest on the same computer; direct upgrades, a separate physical PC and live city deployment were not tested. <a href="https://github.com/townlight/townlight/releases/download/townlight-windows-v1.9.2.1/Townlight-Windows-x64-1.9.2.1.msi">Download MSI</a> · <a href="https://github.com/townlight/townlight/releases/tag/townlight-windows-v1.9.2.1">Release catalog</a> · <a href="https://github.com/townlight/townlight/releases/download/townlight-windows-v1.9.2.1/SHA256SUMS-Windows-1.9.2.1.txt">SHA-256 checksums</a> · <a href="https://github.com/townlight/townlight/releases/download/townlight-windows-v1.9.2.1/ACCEPTANCE-Windows-1.9.2.1.md">Acceptance and limits</a> · <a href="/versions.html">Versions</a></p></aside><footer>Townlight · AGPL-3.0-only · Acceptance evidence applies only to its identified artifacts.<span><a href="../brand/">Brand package</a></span><span><a href="../announcement.html">Announcement</a> · <a href="../support.html">Support and feedback</a></span></footer></body></html>
