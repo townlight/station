@@ -19,6 +19,9 @@ id="toc-townlight-portal-guide">Townlight Portal guide</a>
 <li><a href="#windows-1.9.1.1-station-recorder-release"
 id="toc-windows-1.9.1.1-station-recorder-release">Windows 1.9.1.1
 Station recorder release</a></li>
+
+
+<li data-candidate-note="portal"><a href="#windows-shared-host-candidate-publication" id="toc-windows-shared-host-candidate-publication">Windows shared-host candidate publication</a></li>
 <li><a href="#for-staff-prepare-and-publish"
 id="toc-for-staff-prepare-and-publish">For staff: prepare and
 publish</a></li>
@@ -65,6 +68,38 @@ selected for publication. It does not add a tenth product. The existing
 signed Beta 1 installer and prior Sandbox evidence predate this local
 portal integration; they do not demonstrate that it is installed or
 publicly deployed. CivicCast remains separate.</p>
+<!-- candidate-note-portal:begin -->
+<h2 id="windows-shared-host-candidate-publication">Windows shared-host
+candidate publication</h2>
+<p>This section describes the unreleased Windows 1.9.2.1 candidate. The
+public Windows 1.9.1.1 installer does not include or deploy the portal;
+deployments paired with that release use the separately deployed manual
+Wagtail publication workflow below.</p>
+<p>In the shared Meetings workspace, review the public council packet
+and approve the exact revision for publication. When publishing a
+recording, select the approved Records release copy and explicitly
+approve it for publication. The host sends the queued items even after
+staff sign out. Check the status in Meetings. During an outage,
+previously published material remains available while delivery retries.
+To correct a packet, approve and send a new revision. To remove a
+recording, withdraw that recording and confirm it is gone from the
+public meeting page. The approved packet remains available unless
+separately withdrawn.</p>
+<p>For city IT, run the existing portal migrations before connecting the
+Windows host. Configure <code>TOWNLIGHT_PUBLISHER_PUBLISH_ORIGIN</code>
+on the Windows host with the canonical HTTPS portal origin. Set
+<code>TOWNLIGHT_PORTAL_PUBLISHER_TOKEN_FILE</code> to a private absolute
+path readable by the Windows service identity. Put a random 32-byte
+base64url token without padding in that file. On the portal, set
+<code>TOWNLIGHT_PORTAL_PUBLISHER_TOKEN_SHA256_FILE</code> to a private
+absolute path containing the SHA-256 of the token text without a
+trailing line break. Restrict both credential files to their service
+owners and rotate both if the token is exposed. The Windows host
+initiates publication; the public website does not need access to the
+staff network. See the <a
+href="https://github.com/townlight/townlight/blob/main/portal/README.md">portal
+deployment README</a> for proxy and upload settings.</p>
+<!-- candidate-note-portal:end -->
 <h2 id="for-staff-prepare-and-publish">For staff: prepare and
 publish</h2>
 <ol type="1">
