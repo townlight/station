@@ -21,7 +21,8 @@ id="toc-windows-1.9.1.1-station-recorder-release">Windows 1.9.1.1
 Station recorder release</a></li>
 
 
-<li data-candidate-note="portal"><a href="#windows-shared-host-candidate-publication" id="toc-windows-shared-host-candidate-publication">Windows shared-host candidate publication</a></li>
+
+<li data-candidate-note="portal"><a href="#windows-shared-host-candidate-publication" id="toc-windows-shared-host-candidate-publication">Windows shared-host release publication · 1.9.2.1</a></li>
 <li><a href="#for-staff-prepare-and-publish"
 id="toc-for-staff-prepare-and-publish">For staff: prepare and
 publish</a></li>
@@ -69,36 +70,26 @@ signed Beta 1 installer and prior Sandbox evidence predate this local
 portal integration; they do not demonstrate that it is installed or
 publicly deployed. CivicCast remains separate.</p>
 <!-- candidate-note-portal:begin -->
-<h2 id="windows-shared-host-candidate-publication">Windows shared-host
-candidate publication</h2>
-<p>This section describes the unreleased Windows 1.9.2.1 candidate. The
-public Windows 1.9.1.1 installer does not include or deploy the portal;
-deployments paired with that release use the separately deployed manual
-Wagtail publication workflow below.</p>
-<p>In the shared Meetings workspace, review the public council packet
-and approve the exact revision for publication. When publishing a
-recording, select the approved Records release copy and explicitly
-approve it for publication. The host sends the queued items even after
-staff sign out. Check the status in Meetings. During an outage,
-previously published material remains available while delivery retries.
-To correct a packet, approve and send a new revision. To remove a
-recording, withdraw that recording and confirm it is gone from the
-public meeting page. The approved packet remains available unless
-separately withdrawn.</p>
-<p>For city IT, run the existing portal migrations before connecting the
-Windows host. Configure <code>TOWNLIGHT_PUBLISHER_PUBLISH_ORIGIN</code>
-on the Windows host with the canonical HTTPS portal origin. Set
-<code>TOWNLIGHT_PORTAL_PUBLISHER_TOKEN_FILE</code> to a private absolute
-path readable by the Windows service identity. Put a random 32-byte
-base64url token without padding in that file. On the portal, set
-<code>TOWNLIGHT_PORTAL_PUBLISHER_TOKEN_SHA256_FILE</code> to a private
-absolute path containing the SHA-256 of the token text without a
-trailing line break. Restrict both credential files to their service
-owners and rotate both if the token is exposed. The Windows host
-initiates publication; the public website does not need access to the
-staff network. See the <a
-href="https://github.com/townlight/townlight/blob/main/portal/README.md">portal
-deployment README</a> for proxy and upload settings.</p>
+<h2 id="windows-shared-host-candidate-publication">
+Windows shared-host release publication · 1.9.2.1
+</h2>
+<p>Windows 1.9.2.1 includes the shared-host publisher and its
+integration with the separately deployed Townlight Portal. The MSI
+installs the Windows desktop only; the Wagtail portal server remains a
+separate deployment.</p>
+<p>Acceptance used synthetic data and a test portal on the physical
+Windows host with a clean Windows Sandbox guest on the same PC. It does
+not establish two physical PCs, recovery on another computer or account,
+production portal or city network operation, direct MSI upgrade from an
+earlier version, new hardware or broadcast acceptance, or PDF/UA and
+full assistive-technology review.</p>
+<p><a
+href="https://github.com/townlight/townlight/releases/tag/townlight-windows-v1.9.2.1">Windows
+release</a> · <a
+href="https://github.com/townlight/townlight/releases/download/townlight-windows-v1.9.2.1/ACCEPTANCE-Windows-1.9.2.1.md">Windows
+acceptance and limits</a> · <a
+href="https://github.com/townlight/townlight/blob/1bc45be5a14aa969e53b87b1cef1f278dadc79a4/docs/installer/windows-shared-staff.md">Shared
+staff guide at the signed source commit</a></p>
 <!-- candidate-note-portal:end -->
 <h2 id="for-staff-prepare-and-publish">For staff: prepare and
 publish</h2>
@@ -612,5 +603,5 @@ or Chromium executable, set <code>PLAYWRIGHT_MODULE</code> or
 <code>CHROMIUM_EXECUTABLE</code>; <code>PYTHON</code> selects a Python
 executable. The sibling product repositories are not needed to rebuild
 this guide.</p>
-</main><aside class="release-note" aria-label="Current release"><p><strong>Current release:</strong> Townlight for Windows 1.9.1.1, a signed public beta. See acceptance for the hardware test and earlier installed evidence. <a href="https://github.com/townlight/townlight/releases/tag/townlight-windows-v1.9.1.1">Downloads</a> · <a href="/announcement.html">Release notes and installation</a> · <a href="/versions.html">Versions and limits</a></p></aside><footer><span>Townlight Beta 1 · Local private-beta documentation · AGPL-3.0-only</span><span><a href="../versions.html">Exact versions and candidate</a> · CivicCast remains separate</span><span><a href="../brand/">Brand package</a></span><span><a href="../announcement.html">Announcement</a> · <a href="../support.html">Support and feedback</a></span></footer>
+</main><aside class="release-note" aria-label="Current release"><p><strong>Current release:</strong> Townlight for Windows 1.9.2.1, a signed public beta. Shared staff and portal delivery require explicit setup. Acceptance used synthetic data on a physical Windows host and a clean Sandbox guest on the same computer; direct upgrades, a separate physical PC and live city deployment were not tested. <a href="https://github.com/townlight/townlight/releases/download/townlight-windows-v1.9.2.1/Townlight-Windows-x64-1.9.2.1.msi">Download MSI</a> · <a href="https://github.com/townlight/townlight/releases/tag/townlight-windows-v1.9.2.1">Release catalog</a> · <a href="https://github.com/townlight/townlight/releases/download/townlight-windows-v1.9.2.1/SHA256SUMS-Windows-1.9.2.1.txt">SHA-256 checksums</a> · <a href="https://github.com/townlight/townlight/releases/download/townlight-windows-v1.9.2.1/ACCEPTANCE-Windows-1.9.2.1.md">Acceptance and limits</a> · <a href="/versions.html">Versions</a></p></aside><footer><span>Townlight Beta 1 · Local private-beta documentation · AGPL-3.0-only</span><span><a href="../versions.html">Exact versions and release</a> · CivicCast remains separate</span><span><a href="../brand/">Brand package</a></span><span><a href="../announcement.html">Announcement</a> · <a href="../support.html">Support and feedback</a></span></footer>
 <script>const search=document.getElementById('find-section');if(search)search.addEventListener('input',()=>{const q=search.value.toLowerCase();let n=0;document.querySelectorAll('.toc li').forEach(li=>{const match=li.textContent.toLowerCase().includes(q);li.hidden=!match;if(match)n++;});document.querySelector('.search-status').textContent=q?n+' matching entries':'';});</script></body></html>
