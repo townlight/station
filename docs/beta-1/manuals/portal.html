@@ -8,22 +8,20 @@ Guide | Townlight Beta 1</title><style>
 main,.toc a,.hero h1{overflow-wrap:anywhere}
 @page{size:Letter;margin:.7in .65in .75in}
 @media print{html{scroll-behavior:auto}body{font:10.5pt/1.45 Arial,sans-serif;color:#172f39}header,footer,.search-area,.screen-only{display:none}.doclayout{display:block;padding:0;max-width:none}.toc{position:static;max-height:none;overflow:visible;font-size:10pt;break-after:page}.toc>h2{border:0}.toc ul{columns:2;column-gap:.3in}.toc li{break-inside:avoid}.docbody h1{font-size:30pt}.docbody h2{font-size:19pt;break-after:avoid;padding-top:.15in;margin-top:.35in}.docbody h3{font-size:12pt;break-after:avoid}.docbody h4{break-after:avoid}p{orphans:3;widows:3}pre{font-size:8.2pt;line-height:1.4;padding:.1in;break-inside:auto}table{font-size:8.4pt;line-height:1.35}th,td{padding:.06in .07in}tr{break-inside:avoid}.flow{max-height:6in;object-fit:contain;break-inside:avoid}a{color:#172f39;text-decoration:underline}.cover{break-after:page;padding-top:1in}.cover .edition{font-size:11pt}.cover h1{font-size:32pt}.cover .lead{font-size:14pt}.api-entry{break-inside:auto}.api-entry h3{break-after:avoid}.index-columns{columns:2}}
-
-/* Townlight Open Hall documentation identity. Software adoption is separate. */
-header .brand{display:inline-flex;align-items:center;max-width:100%;flex-shrink:0}header .brand img{display:block;width:217px;max-width:100%;height:auto}
+header .brand{display:inline-flex;align-items:center;max-width:100%;flex-shrink:0}header .brand img{display:block;width:217px;max-width:100%;height:auto}.release-note{max-width:1240px;margin:3rem auto 0;padding:1.2rem 4vw 0;border-top:1px solid var(--line);font-size:.88rem;line-height:1.55;color:var(--muted)}.release-note p{margin:0;max-width:60rem}.release-note+footer{margin-top:1.5rem}@media print{.release-note{display:none}}
 </style><link rel="icon" href="../brand/favicon.svg" type="image/svg+xml"><link rel="icon" href="../brand/favicon.ico" sizes="16x16 32x32 48x48"><link rel="apple-touch-icon" href="../brand/png/townlight-hall-app-icon-180.png"><meta property="og:image" content="https://townlight.github.io/brand/png/townlight-hall-social-preview.png"><meta name="twitter:card" content="summary_large_image"></head><body><a class="skip" href="#main">Skip to content</a><header><a class="brand" href="../index.html"><img src="../brand/svg/townlight-hall-lockup.svg" alt="Townlight" width="217" height="45"></a><span class="edition">Townlight Beta 1</span><nav aria-label="Main"><a href="../index.html#products">Products</a><a href="../manuals/suite.html">Suite manual</a><a href="../reference/index.html">Technical reference</a><a href="../terms.html">Terms and license</a></nav></header>
-<main id="main"><div class="cover wrap"><div class="hero"><div class="edition">Townlight Beta 1</div><h1>Townlight
-Portal
-Guide</h1><p class="lead">Staff guide and technical reference</p><p class="docmeta">Separately deployed portal beta · 2 November 2026<br>Existing signed installer and historical acceptance predate this integration</p></div></div><div class="doclayout"><aside class="toc" aria-label="Table of contents"><h2>Contents</h2><div class="search-area"><label for="find-section">Find a section</label><input class="search" id="find-section" type="search" placeholder="Type a heading"><p class="search-status" aria-live="polite"></p></div><ul>
+<main id="main">
+<nav id="TOC" role="doc-toc">
+<ul>
 <li><a href="#townlight-portal-guide"
 id="toc-townlight-portal-guide">Townlight Portal guide</a>
 <ul>
 <li><a href="#windows-1.9.1.1-station-recorder-release"
 id="toc-windows-1.9.1.1-station-recorder-release">Windows 1.9.1.1
 Station recorder release</a></li>
-<li><a href="#windows-shared-host-candidate-publication"
-id="toc-windows-shared-host-candidate-publication">Windows shared-host
-candidate publication</a></li>
+
+
+<li data-candidate-note="portal"><a href="#windows-shared-host-candidate-publication" id="toc-windows-shared-host-candidate-publication">Windows shared-host candidate publication</a></li>
 <li><a href="#for-staff-prepare-and-publish"
 id="toc-for-staff-prepare-and-publish">For staff: prepare and
 publish</a></li>
@@ -49,21 +47,20 @@ index</a></li>
 <li><a href="#rebuild-this-guide" id="toc-rebuild-this-guide">Rebuild
 this guide</a></li>
 </ul></li>
-</ul></aside><article class="docbody"><h2 id="townlight-portal-guide">Townlight Portal guide</h2>
+</ul>
+</nav>
+<h1 id="townlight-portal-guide">Townlight Portal guide</h1>
 <h2 id="windows-1.9.1.1-station-recorder-release">Windows 1.9.1.1
 Station recorder release</h2>
-<p>Windows 1.9.1.1 includes bundled Station setup and a preview that
-verifies ten seconds of picture and sound before meeting recording.</p>
-<p>Windows 1.9.1.1 adds the Open Hall installer and app icons, clerk
-workflow improvements, Records setup checks and Station 0.4.4. The
-signed release passed a headless C920 camera and microphone test. See
-the acceptance summary for the checks and their scope.</p>
+<p>Windows 1.9.1.1 improves the clerk workflows for Records, Meetings, and Code, adds Open Hall icons, and fixes the ten-second Station preview.</p>
+<p>Windows 1.9.1.1 is a signed public beta. See the acceptance summary for the verified workflows and artifact identities. Set up Station during
+Townlight first run. Read the acceptance summary before upgrading.</p>
 <p><a
 href="https://github.com/townlight/townlight/releases/tag/townlight-windows-v1.9.1.1">Release
 and downloads</a> · <a
 href="https://github.com/townlight/townlight/releases/download/townlight-windows-v1.9.1.1/ACCEPTANCE-Windows-1.9.1.1.md">Acceptance
 and limits</a>.</p>
-<p>Townlight Beta 1 · separately deployed portal beta</p><p><a href="../pdf/Townlight-Portal-Guide-Beta-1.pdf">Printable PDF</a> · <a href="../docx/Townlight-Portal-Guide-Beta-1.docx">Editable Word</a></p>
+<p>Townlight Beta 1 · separately deployed portal beta</p>
 <p>The portal is a separately deployed suite capability for city pages
 and public meeting archives. It brings together a public Meetings
 archive, a completed Station recording and a Records release copy
@@ -71,6 +68,7 @@ selected for publication. It does not add a tenth product. The existing
 signed Beta 1 installer and prior Sandbox evidence predate this local
 portal integration; they do not demonstrate that it is installed or
 publicly deployed. CivicCast remains separate.</p>
+<!-- candidate-note-portal:begin -->
 <h2 id="windows-shared-host-candidate-publication">Windows shared-host
 candidate publication</h2>
 <p>This section describes the unreleased Windows 1.9.2.1 candidate. The
@@ -101,6 +99,7 @@ initiates publication; the public website does not need access to the
 staff network. See the <a
 href="https://github.com/townlight/townlight/blob/main/portal/README.md">portal
 deployment README</a> for proxy and upload settings.</p>
+<!-- candidate-note-portal:end -->
 <h2 id="for-staff-prepare-and-publish">For staff: prepare and
 publish</h2>
 <ol type="1">
@@ -305,7 +304,7 @@ With that runtime’s Python, start
 portal’s server-side active proof and trusted origin as described above.
 Verify the authenticated selections endpoint with a real eligible
 request in the prepared environment before relying on publication. See
-<a href="../reference/portal-verification.html">verification and test inputs</a> for the
+<a href="verification.md">verification and test inputs</a> for the
 isolated acceptance runner and its explicit flags. These instructions do
 not upgrade the old installer or establish installed or public
 deployment acceptance.</p>
@@ -379,18 +378,17 @@ streams bundles and release bytes through private files. Set
 <code>TOWNLIGHT_PORTAL_MAX_BYTES</code> consistently on both services;
 the default is 8 GiB and the maximum is 64 GiB. Allow private disk space
 for the bundle, staged copy and retained releases. The portal serves MP4
-or octet-stream releases. The transport limit applies to the portal
-bundle. Windows 1.9.1.1 acceptance includes a private Station-to-Records
-transfer over 2 GiB on the earlier signed iteration. Verify the complete
-approval and publication path at the recording sizes your city uses. At
-Station’s default 6,000 kbps video rate, approximately 47 minutes
-reaches 2 GiB before accounting for audio and container overhead. Plan
-capture duration and bitrate before recording: for example, 2,000 kbps
-video plus audio for two hours is roughly 1.9 GB, depending on actual
-rates and overhead. Measure the resulting files and leave margin. The
-portal does not automatically transcode recordings. Consult the
-checked-in bridge and portal source for the exact contract and errors;
-do not log session proofs.</p>
+or octet-stream releases. This transport limit is not the end-to-end
+recording limit: the inherited Records managed-file receipt limits both
+originals and release copies to 2,147,483,647 bytes. At Station’s
+default 6,000 kbps video rate, approximately 47 minutes reaches 2 GiB
+before accounting for audio and container overhead. Plan capture
+duration and bitrate before recording: for example, 2,000 kbps video
+plus audio for two hours is roughly 1.9 GB, depending on actual rates
+and overhead. Measure the resulting files and leave margin. The portal
+does not automatically transcode recordings. Consult the checked-in
+bridge and portal source for the exact contract and errors; do not log
+session proofs.</p>
 <p><code>python manage.py export_public &lt;empty-directory&gt;</code>
 exports published pages, metadata and approved release bytes with
 hashes. Secure the export as appropriate. Stop the portal and any
@@ -582,7 +580,7 @@ bridge from a repository checkout. Operators must provide the exact
 deployed corresponding source, modifications and dependencies as
 required by their license obligations. See the repository licenses,
 <code>portal/UPSTREAM.md</code>, and the existing <a
-href="../terms.html">terms and license</a>; no city-specific
+href="../beta-1/terms.html">terms and license</a>; no city-specific
 legal terms are supplied here.</p>
 <h2 id="subject-index">Subject index</h2>
 <ul>
@@ -613,6 +611,6 @@ template and Word reference. To use an existing Playwright installation
 or Chromium executable, set <code>PLAYWRIGHT_MODULE</code> or
 <code>CHROMIUM_EXECUTABLE</code>; <code>PYTHON</code> selects a Python
 executable. The sibling product repositories are not needed to rebuild
-this
-guide.</p></article></div></main><footer><span>Townlight Beta 1 · Local private-beta documentation · AGPL-3.0-only</span><span><a href="../versions.html">Exact versions and candidate</a> · CivicCast remains separate</span><span><a href="../brand/">Brand package</a></span><span><a href="../announcement.html">Announcement</a> · <a href="../support.html">Support and feedback</a></span></footer>
+this guide.</p>
+</main><aside class="release-note" aria-label="Current release"><p><strong>Current release:</strong> Townlight for Windows 1.9.1.1, a signed public beta. See acceptance for the hardware test and earlier installed evidence. <a href="https://github.com/townlight/townlight/releases/tag/townlight-windows-v1.9.1.1">Downloads</a> · <a href="/announcement.html">Release notes and installation</a> · <a href="/versions.html">Versions and limits</a></p></aside><footer><span>Townlight Beta 1 · Local private-beta documentation · AGPL-3.0-only</span><span><a href="../versions.html">Exact versions and candidate</a> · CivicCast remains separate</span><span><a href="../brand/">Brand package</a></span><span><a href="../announcement.html">Announcement</a> · <a href="../support.html">Support and feedback</a></span></footer>
 <script>const search=document.getElementById('find-section');if(search)search.addEventListener('input',()=>{const q=search.value.toLowerCase();let n=0;document.querySelectorAll('.toc li').forEach(li=>{const match=li.textContent.toLowerCase().includes(q);li.hidden=!match;if(match)n++;});document.querySelector('.search-status').textContent=q?n+' matching entries':'';});</script></body></html>
