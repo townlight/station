@@ -163,6 +163,10 @@ Drafting, review, approval, attachment, export, fulfillment and publication are 
 
 Meetings → Station → Records is the accepted recording workflow. Townlight owns current session authority; Station owns its database, storage and media children. Standalone CivicCast remains separate, with no shared configuration, service, data directory or automatic updater fallback.
 
+### Shared Windows staff candidate — 1.9.2.1
+
+In the signed Suite 1.9.2.1 candidate, Station capture and administration remain on the city Windows host. Named Records Staff can use a workstation to attach a completed private recording by its ID and verified hash; a workstation does not operate or administer Station. The original recording stays private, and a Records release copy is a separate reviewed artifact. This shared workflow is not in the public 1.9.1.1 installer and does not change the standalone Station package. Read the [1.9.2.1 candidate guide](https://townlight.github.io/manuals/windows-1.9.2.1-candidate.html) and [shared staff guide at the signed source commit](https://github.com/townlight/townlight/blob/1bc45be5a14aa969e53b87b1cef1f278dadc79a4/docs/installer/windows-shared-staff.md). The acceptance guest ran in Windows Sandbox on the same physical PC as the host.
+
 | Direction | Material |
 |----|----|
 | Input | A real Townlight staff session, saved Meetings records, a dedicated Station database/data root, a managed ingest filename or configured live-source ID, and optional supplied SRT captions for recorded-file input. |

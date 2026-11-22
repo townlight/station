@@ -13,6 +13,10 @@ Windows 1.9.1.1 is a signed public beta. See the acceptance summary for the veri
 
 [Release and downloads](https://github.com/townlight/townlight/releases/tag/townlight-windows-v1.9.1.1) · [Acceptance and limits](https://github.com/townlight/townlight/releases/download/townlight-windows-v1.9.1.1/ACCEPTANCE-Windows-1.9.1.1.md).
 
+## Windows 1.9.2.1 shared staff candidate
+
+The signed Suite candidate keeps Station capture and administration on the shared Windows host while Records staff can review the completed recording from a workstation using its ID and verified hash. This is a Suite integration, not a new Station package release; the public Windows installer remains 1.9.1.1. See the [1.9.2.1 candidate guide](https://townlight.github.io/manuals/windows-1.9.2.1-candidate.html) and [shared staff guide at the signed source commit](https://github.com/townlight/townlight/blob/1bc45be5a14aa969e53b87b1cef1f278dadc79a4/docs/installer/windows-shared-staff.md).
+
 Save the selected camera and microphone, then select **Record 10-second input test**. Station starts timing once it captures media, so the first use can take longer than ten seconds. Play the clip and confirm picture and sound before recording the meeting. [Station manual](https://townlight.github.io/manuals/station.html).
 
 Windows x64 Beta 1 · MSI 1.9.1.1
