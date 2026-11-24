@@ -9,99 +9,35 @@ main,.toc a,.hero h1{overflow-wrap:anywhere}
 @page{size:Letter;margin:.7in .65in .75in}
 @media print{html{scroll-behavior:auto}body{font:10.5pt/1.45 Arial,sans-serif;color:#172f39}header,footer,.search-area,.screen-only{display:none}.doclayout{display:block;padding:0;max-width:none}.toc{position:static;max-height:none;overflow:visible;font-size:10pt;break-after:page}.toc>h2{border:0}.toc ul{columns:2;column-gap:.3in}.toc li{break-inside:avoid}.docbody h1{font-size:30pt}.docbody h2{font-size:19pt;break-after:avoid;padding-top:.15in;margin-top:.35in}.docbody h3{font-size:12pt;break-after:avoid}.docbody h4{break-after:avoid}p{orphans:3;widows:3}pre{font-size:8.2pt;line-height:1.4;padding:.1in;break-inside:auto}table{font-size:8.4pt;line-height:1.35}th,td{padding:.06in .07in}tr{break-inside:avoid}.flow{max-height:6in;object-fit:contain;break-inside:avoid}a{color:#172f39;text-decoration:underline}.cover{break-after:page;padding-top:1in}.cover .edition{font-size:11pt}.cover h1{font-size:32pt}.cover .lead{font-size:14pt}.api-entry{break-inside:auto}.api-entry h3{break-after:avoid}.index-columns{columns:2}}
 header .brand{display:inline-flex;align-items:center;max-width:100%;flex-shrink:0}header .brand img{display:block;width:217px;max-width:100%;height:auto}.release-note{max-width:1240px;margin:3rem auto 0;padding:1.2rem 4vw 0;border-top:1px solid var(--line);font-size:.88rem;line-height:1.55;color:var(--muted)}.release-note p{margin:0;max-width:60rem}.release-note+footer{margin-top:1.5rem}@media print{.release-note{display:none}}
-</style><link rel="icon" href="../brand/favicon.svg" type="image/svg+xml"><link rel="icon" href="../brand/favicon.ico" sizes="16x16 32x32 48x48"><link rel="apple-touch-icon" href="../brand/png/townlight-hall-app-icon-180.png"><meta property="og:image" content="https://townlight.github.io/brand/png/townlight-hall-social-preview.png"><meta name="twitter:card" content="summary_large_image"></head>
+</style><link rel="icon" href="https://townlight.github.io/brand/favicon.svg" type="image/svg+xml"><link rel="icon" href="https://townlight.github.io/brand/favicon.ico" sizes="16x16 32x32 48x48"><link rel="apple-touch-icon" href="https://townlight.github.io/brand/png/townlight-hall-app-icon-180.png"><meta property="og:image" content="https://townlight.github.io/brand/png/townlight-hall-social-preview.png"><meta name="twitter:card" content="summary_large_image"></head>
 <body><a class="skip" href="#main">Skip to content</a>
-<header><a class="brand" href="../index.html"><img src="../brand/svg/townlight-hall-lockup.svg" alt="Townlight" width="217" height="45"></a>
-<nav aria-label="Main"><a href="../manuals/suite.html">Suite manual</a>
-<a href="../versions.html">Versions and Windows release</a>
-<a href="../terms.html">Terms and license</a></nav></header>
-<main id="main" class="reading wrap">
-<!-- candidate-note-station:begin -->
-<aside id="candidate-note-station" class="release-note" aria-label="Windows 1.9.2.1 release details"><p><strong>Windows 1.9.2.1 signed public beta.</strong></p><p>Station capture remains on the city host. The current Suite release
-supports verified handoff of recording copies to Records for separately
-approved portal delivery; it does not introduce a standalone Station
-release.</p>
-<p>Acceptance used synthetic data and a test portal on the physical
-Windows host with a clean Windows Sandbox guest on the same PC. It does
-not establish two physical PCs, recovery on another computer or account,
-production portal or city network operation, direct MSI upgrade from an
-earlier version, new hardware or broadcast acceptance, or PDF/UA and
-full assistive-technology review.</p></aside>
-<!-- candidate-note-station:end -->
-<nav id="TOC" role="doc-toc">
-<ul>
-<li><a href="#windows-1.9.1.1-station-recorder-release"
-id="toc-windows-1.9.1.1-station-recorder-release">Windows 1.9.1.1
-Station recorder release</a></li>
-<li><a href="#windows-1.9.1.1-meeting-recorder"
-id="toc-windows-1.9.1.1-meeting-recorder">Windows 1.9.1.1 meeting
-recorder</a></li>
-<li><a href="#townlight-station-manual"
-id="toc-townlight-station-manual">Townlight Station Manual</a>
-<ul>
-<li><a href="#shared-meeting-imports-windows-1.8.1.1"
-id="toc-shared-meeting-imports-windows-1.8.1.1">Shared meeting imports ·
-Windows 1.8.1.1</a></li>
-<li><a href="#using-this-manual" id="toc-using-this-manual">Using this
-manual</a></li>
-<li><a href="#beta-identity" id="toc-beta-identity">Beta
-identity</a></li>
-<li><a href="#first-run" id="toc-first-run">First run</a></li>
-<li><a href="#daily-workflow" id="toc-daily-workflow">Daily
-workflow</a></li>
-<li><a href="#connected-workflows"
-id="toc-connected-workflows">Connected workflows</a></li>
-<li><a href="#architecture" id="toc-architecture">Architecture</a></li>
-<li><a href="#scheduling-playout-and-recovery"
-id="toc-scheduling-playout-and-recovery">Scheduling playout and
-recovery</a></li>
-<li><a href="#technical-specifications"
-id="toc-technical-specifications">Technical specifications</a></li>
-<li><a href="#configuration-and-administration"
-id="toc-configuration-and-administration">Configuration and
-administration</a></li>
-<li><a href="#api-and-integration-examples"
-id="toc-api-and-integration-examples">API and integration
-examples</a></li>
-<li><a href="#mcp-and-automation-boundary"
-id="toc-mcp-and-automation-boundary">MCP and automation
-boundary</a></li>
-<li><a href="#security-and-permissions"
-id="toc-security-and-permissions">Security and permissions</a></li>
-<li><a href="#backup-recovery-and-maintenance"
-id="toc-backup-recovery-and-maintenance">Backup recovery and
-maintenance</a></li>
-<li><a href="#troubleshooting"
-id="toc-troubleshooting">Troubleshooting</a></li>
-<li><a href="#verified-workflows-and-limits"
-id="toc-verified-workflows-and-limits">Verified workflows and
-limits</a></li>
-<li><a href="#terms-of-service-and-license"
-id="toc-terms-of-service-and-license">Terms of service and
-license</a></li>
-<li><a href="#glossary" id="toc-glossary">Glossary</a></li>
-<li><a href="#alphabetical-subject-index"
-id="toc-alphabetical-subject-index">Alphabetical subject index</a></li>
-<li><a href="#source-and-document-control"
-id="toc-source-and-document-control">Source and document
-control</a></li>
-<li><a
-href="#completed-recordings-on-youtube-and-live-civiccast-coverage"
-id="toc-completed-recordings-on-youtube-and-live-civiccast-coverage">Completed
-recordings on YouTube and live CivicCast coverage</a></li>
-<li><a href="#delivery-subject-index"
-id="toc-delivery-subject-index">Delivery subject index</a></li>
-</ul></li>
-</ul>
-</nav>
-<h2 id="windows-1.9.1.1-station-recorder-release">Windows 1.9.1.1
-Station recorder release</h2>
-<p>Save the selected audio and video devices, then select <strong>Record 10-second input test</strong>. Timing starts once media is captured, so the first run can take longer than ten seconds. Play the clip and confirm picture and sound before starting the meeting recording.</p><h2 id="windows-1.9.1.1-meeting-recorder">Windows 1.9.1.1 meeting
+<header><a class="brand" href="https://townlight.github.io/index.html"><img src="https://townlight.github.io/brand/svg/townlight-hall-lockup.svg" alt="Townlight" width="217" height="45"></a>
+<nav aria-label="Main"><a href="https://townlight.github.io/manuals/suite.html">Suite manual</a>
+<a href="https://townlight.github.io/versions.html">Versions and Windows release</a>
+<a href="https://townlight.github.io/terms.html">Terms and license</a></nav></header>
+<main id="main" class="reading wrap"><h2 id="windows-1.9.3.2-current-release">Windows 1.9.3.2 current
+release</h2>
+<p>Townlight for Windows 1.9.3.2 is the current signed public beta. See
+the <a
+href="https://github.com/townlight/townlight/releases/tag/townlight-windows-v1.9.3.2">release
+notes</a> and <a
+href="https://github.com/townlight/townlight/releases/download/townlight-windows-v1.9.3.2/ACCEPTANCE-Windows-1.9.3.2.md">acceptance
+record</a>.</p>
+<p>For an existing city, make and verify a backup, close Townlight, run
+the signed Windows 1.9.3.2 MSI, then reopen Townlight under the same
+Windows account and existing profile. Direct upgrade is tested from
+1.9.3.1; earlier paths have separate prior evidence.</p>
+<p>The Station renewal fix keeps controls available while session
+renewal completes.</p>
+<p>Authorized Records staff signed into the shared Windows workstation
+should open Records Requests and an existing saved request. Beside the
+private managed document, choose <strong>Download private
+attachment</strong>, then choose a new destination file or cancel.
+Townlight compares the byte count and SHA-256 before saving and reports
+the destination, count, and hash; protect the workstation copy as
+private Records evidence, with review and publication kept separate.</p>
+<h2 id="windows-1.9.3.2-meeting-recorder">Windows 1.9.3.2 meeting
 recorder</h2>
-<p>Windows 1.9.1.1 is a signed public beta. See the acceptance summary for the verified workflows and artifact identities. Set up Station during
-Townlight first run. Read the acceptance summary before upgrading. <a
-href="https://github.com/townlight/townlight/releases/download/townlight-windows-v1.9.1.1/ACCEPTANCE-Windows-1.9.1.1.md">Acceptance
-and limits</a>.</p>
 <h3 id="clerk-and-operator">Clerk and operator</h3>
 <ol type="1">
 <li>Install Townlight and complete normal first-run setup with the full
@@ -118,12 +54,13 @@ Closing the recorder tab does not stop a recording.</li>
 <li>Sign in with an existing authorized staff account. From Meetings
 choose <strong>Open / reconnect to meeting recorder</strong>. Select a
 meeting and its agenda items. In input setup, find devices, choose one
-camera/capture device and one microphone, and save. Record a ten-second
-input test, then play it to check the picture and sound; the meter
-responds during playback. This test clip is temporary and is not a
-canonical meeting record. Windows camera/microphone privacy settings and
-exclusive device use still apply. Configured UDP MPEG-TS input remains
-supported.</li>
+camera/capture device and one microphone, and save. Select
+<strong>Record 10-second input test</strong>. Station starts timing once
+it captures media, so the first run can take longer than ten seconds.
+Play the clip to check the picture and sound before recording the
+meeting. This test clip is temporary and is not a canonical meeting
+record. Windows camera/microphone privacy settings and exclusive device
+use still apply. Configured UDP MPEG-TS input remains supported.</li>
 <li>Start the meeting recording. The default duration limit is eight
 hours, with a 64 GiB file limit and at least 1 GiB reserved disk space.
 Admission estimates the configured duration and bitrate. Free space is
@@ -176,15 +113,15 @@ included Station backup separately.</p>
     Recorder --&gt; Private[Private Station database and recording]
     Private --&gt;|Explicit hash-verified attachment| Records[Records managed copy]
     Records --&gt; Review[Separate review and release decision]</code></pre>
-<p>Windows 1.9.1.1 improves the clerk workflows for Records, Meetings, and Code, adds Open Hall icons, and fixes the ten-second Station preview.</p>
-<p>Windows 1.9.1.1 is a signed public beta. See the acceptance summary for the verified workflows and artifact identities. Set up Station during
-Townlight first run. Read the acceptance summary before upgrading.</p>
+<p>Windows 1.9.1.1 improves the clerk workflows for Records, Meetings,
+and Code, adds Open Hall icons, and fixes the ten-second Station
+preview.</p>
 <p><a
 href="https://github.com/townlight/townlight/releases/tag/townlight-windows-v1.9.1.1">Release
 and downloads</a> · <a
 href="https://github.com/townlight/townlight/releases/download/townlight-windows-v1.9.1.1/ACCEPTANCE-Windows-1.9.1.1.md">Acceptance
 and limits</a>.</p>
-<p>Windows x64 Beta 1 · MSI 1.9.1.1</p>
+<p>Windows x64 Beta 1 · MSI 1.9.3.2</p>
 <p>Windows 1.8.1.1 adds shared meeting imports for 31 source families,
 with 34 supported source/format pairs. Installed Windows Sandbox checks
 exercised preview, save and durable readback using public captures and
@@ -250,12 +187,10 @@ href="https://townlight.github.io/manuals/meeting-imports.html">All 31
 sources, formats and handoffs</a> · <a
 href="https://github.com/townlight/townlight/releases/download/townlight-windows-v1.8.1.1/ACCEPTANCE-Windows-1.8.1.1.md">Installed
 acceptance</a>.</p>
-<p>Windows 1.9.1.1 is a signed public beta. See the acceptance summary for the verified workflows and artifact identities. Set up Station during
-Townlight first run. Read the acceptance summary before upgrading.</p>
 <p>Windows 1.9.1.1 contains Station 0.4.4, Records 1.8.0.dev4, Townlight
-Runtime 0.3.3 and Meetings 1.0.6. Its current component sources and
-installed evidence are identified in the maintenance acceptance
-summary.</p>
+Runtime 0.3.3 and Meetings 1.0.6. The release acceptance summary
+identifies the verified workflows and the builds that produced the
+evidence.</p>
 <p>Windows 1.8.1.1 adds shared meeting imports for 31 source families,
 with 34 supported source/format pairs. Installed Windows Sandbox checks
 exercised preview, save and durable readback using public captures and
@@ -292,35 +227,35 @@ included with the same documentation companion.</p>
 <tbody>
 <tr>
 <td>Documentation</td>
-<td>Townlight naming, Access and Notice candidate</td>
+<td>Townlight Beta 1</td>
 </tr>
 <tr>
 <td>Intended installer</td>
-<td>1.8.1.1</td>
+<td>1.9.3.2</td>
 </tr>
 <tr>
 <td>Desktop source</td>
-<td>1.8.1-1</td>
+<td>1.9.3-2</td>
 </tr>
 <tr>
 <td>Runtime distribution</td>
-<td>townlight-runtime 0.2.0</td>
+<td>townlight-runtime 0.3.4</td>
 </tr>
 <tr>
 <td>Station distribution/import</td>
-<td>townlight-station 0.3.0 / townlight_station</td>
+<td>townlight-station 0.4.4 / townlight_station</td>
 </tr>
 <tr>
 <td>Acceptance composition</td>
-<td>Windows 1.9.1.1: verified physical Station preview, recording and playback. Station setup is
-integrated.</td>
+<td>Signed 1.9.3.2 setup, backup/restore, uninstall, and adjacent
+upgrade verified.</td>
 </tr>
 <tr>
-<td>Candidate hashes/signature</td>
+<td>Published hashes/signature</td>
 <td><a
-href="https://github.com/townlight/townlight/releases/download/townlight-windows-v1.9.1.1/SHA256SUMS-Windows-1.9.1.1.txt">SHA-256
+href="https://github.com/townlight/townlight/releases/download/townlight-windows-v1.9.3.2/SHA256SUMS-Windows-1.9.3.2.txt">SHA-256
 checksums</a> and <a
-href="https://github.com/townlight/townlight/releases/download/townlight-windows-v1.9.1.1/ACCEPTANCE-Windows-1.9.1.1.md">Windows
+href="https://github.com/townlight/townlight/releases/download/townlight-windows-v1.9.3.2/ACCEPTANCE-Windows-1.9.3.2.md">Windows
 acceptance summary</a></td>
 </tr>
 <tr>
@@ -333,33 +268,33 @@ acceptance summary</a></td>
 Existing installations can use Settings → Modules → Townlight Station →
 Set up meeting recording.</p>
 <h2 id="first-run">First run</h2>
-<p>Windows 1.9.1.1 is a signed public beta. See the acceptance summary for the verified workflows and artifact identities. Set up Station during
-Townlight first run. Read the acceptance summary before upgrading.</p>
 <h3 id="fresh-installation">Fresh installation</h3>
-<p>Run the signed Windows 1.9.1.1 MSI and use an empty database and a
-new Townlight profile for first run.</p>
+<p>For a new city, install the signed Townlight Windows 1.9.3.2 MSI and
+complete first-run under the intended named Windows account with an
+empty database and a new profile. Current release acceptance: <a
+href="https://github.com/townlight/townlight/releases/download/townlight-windows-v1.9.3.2/ACCEPTANCE-Windows-1.9.3.2.md">ACCEPTANCE-Windows-1.9.3.2.md</a>.</p>
 <ol type="1">
 <li>Download the signed MSI, matching source companion and checksums
 from the <a
-href="https://github.com/townlight/townlight/releases/tag/townlight-windows-v1.8.1.1">public
+href="https://github.com/townlight/townlight/releases/tag/townlight-windows-v1.9.3.2">public
 Windows release</a>.</li>
 <li>Verify the MSI hash and Authenticode publisher before installation.
 See the <a
-href="https://github.com/townlight/townlight/releases/download/townlight-windows-v1.9.1.1/ACCEPTANCE-Windows-1.9.1.1.md">Windows
+href="https://github.com/townlight/townlight/releases/download/townlight-windows-v1.9.3.2/ACCEPTANCE-Windows-1.9.3.2.md">Windows
 acceptance summary</a> for the tested setup.</li>
-<li>Launch Townlight under the intended named Windows account. Choose
-the storage folders. Select <strong>Townlight Inspections
-candidate</strong> (<code>inspections-preview</code>) for the bounded
-desktop composition, including Access and Notice. A narrower default
-selection will not expose all workspaces.</li>
+<li>Launch Townlight under the intended Windows account and choose
+storage folders. On the setup screen, choose the full bundled profile
+labeled <strong>Townlight Inspections candidate</strong>; it includes
+Records, Meetings, Code, Access, Notice, Zoning, Planning, Permitting,
+Inspections, Boards &amp; Commissions, Contracts, Procurement, Data,
+Budget, and Grants.</li>
 <li>Enter the city profile, time zone and contacts. Create the first
 named local administrator, sign in and choose protected backup storage.
 <strong>Continue without local AI</strong> is valid for the
 deterministic workflows.</li>
-<li>Run Health Check and wait for readiness. Open Townlight. In System
-Health select <strong>Finish Records Migration</strong> to activate the
-canonical Python/PostgreSQL runtime. Do not fabricate migration receipts
-or seed accounts.</li>
+<li>Select <strong>Run Health Check</strong>, then choose <strong>Finish
+setup</strong>; in System Health, if <strong>Prepare Records</strong>
+appears, choose it and follow its prompts, otherwise skip it.</li>
 <li>Create named staff through Settings. Import authorized sources using
 each product’s source library. All examples in this package are
 synthetic; they are not municipal authority.</li>
@@ -430,6 +365,14 @@ Townlight owns current session authority; Station owns its database,
 storage and media children. Standalone CivicCast remains separate, with
 no shared configuration, service, data directory or automatic updater
 fallback.</p>
+<h3 id="shared-windows-staff-1.9.3.2">Shared Windows staff —
+1.9.3.2</h3>
+<p>In 1.9.3.2, Station capture/setup is city host only. Authorized named
+shared Records staff can attach a completed private recording by ID and
+verified hash and download an attachment verifying bytes and SHA-256.
+Publication is separate. See the <a
+href="https://github.com/townlight/townlight/blob/main/docs/installer/windows-shared-staff.md">shared
+staff guide</a>.</p>
 <table>
 <colgroup>
 <col style="width: 50%" />
@@ -611,7 +554,8 @@ paths in its OpenAPI download are not the full separate <code>/v1</code>
 service schema.</p>
 <h2 id="technical-specifications">Technical specifications</h2>
 <h3 id="runtime-and-storage">Runtime and storage</h3>
-<p>The Windows 1.9.1.1 package has physical Station camera and microphone acceptance. Its native shell uses <strong>Rust 2021, Tauri 2
+<p>The Windows 1.9.1.1 package has physical Station camera and
+microphone acceptance. Its native shell uses <strong>Rust 2021, Tauri 2
 and Microsoft WebView2</strong>; browser assets are JavaScript built
 with <strong>Vite 8.1.6</strong>. This describes the native desktop
 frontend; Station has a separate React operator, specified below or in
@@ -672,8 +616,8 @@ operator. The pinned operator package
 <strong>0.1.0</strong>, using <strong>React/react-dom 19.1.1</strong>,
 <strong>TypeScript 5.9.2</strong>, <strong>Vite 7.3.7</strong> and the
 React Vite plugin 5.0.2. Station serves its built assets through its own
-operator API. Its Python control/API package remains
-<strong>townlight-station 0.3.0</strong>, while its retained storage
+operator API. Its Python control/API package is
+<strong>townlight-station 0.4.4</strong>, while its retained storage
 identity remains <strong>0.1.0</strong>. These identities have different
 purposes and are not renumbered.</p>
 <p>The separate pinned CivicCast-derived media engine uses Python/native
@@ -684,7 +628,7 @@ describes the current mixed stack; no runtime rewrite or CivicCast
 migration is implied.</p>
 <h3 id="station-media-and-lifecycle-contract">Station media and
 lifecycle contract</h3>
-<p>The package/API version is <code>0.3.0</code>. Its retained storage
+<p>The package/API version is <code>0.4.4</code>. Its retained storage
 identity has version <code>0.1.0</code>; that is a separate storage
 marker and must not be rewritten to match the package. Product/app IDs
 are <code>townlight-station</code> and
@@ -725,12 +669,11 @@ normally activated synthetic profile</h3>
 <p>This procedure describes a future isolated beta installation.
 Documentation generation does not execute it. Complete normal Townlight
 Setup under the intended Windows account, select
-<code>inspections-preview</code>, sign in, and use <strong>Finish
-Records Migration</strong>. Keep the native database running and confirm
-the canonical runtime is ready. Use that account’s actual profile path;
-the default is <code>%LOCALAPPDATA%\CivicSuite</code>. Do not create
-session files, seed accounts or force
-<code>domain_enabled=True</code>.</p>
+<code>inspections-preview</code>, sign in, and use <strong>Prepare
+Records</strong>. Keep the native database running and confirm the
+canonical runtime is ready. Use that account’s actual profile path; the
+default is <code>%LOCALAPPDATA%\CivicSuite</code>. Do not create session
+files, seed accounts or force <code>domain_enabled=True</code>.</p>
 <p>Station needs its own database and initially empty absolute data
 directory. It uses the same named Townlight staff authority through an
 additional configured loopback suite process. It does not launch or
@@ -1149,8 +1092,8 @@ installations.</p>
 <tr>
 <td>Workspace absent</td>
 <td>Wrong product composition or unavailable canonical runtime.</td>
-<td>Check selected composition; activate through Finish Records
-Migration; wait for readiness.</td>
+<td>Check selected composition; activate through Prepare Records; wait
+for readiness.</td>
 </tr>
 <tr>
 <td>Cannot sign in / 401</td>
@@ -1289,13 +1232,10 @@ enforcement notice or records-release decision. Official permit fee
 authority remains with the adopted source and responsible organization;
 imported amounts do not become a new authoritative calculation.</p>
 <h3 id="beta-operation-and-recovery">Beta operation and recovery</h3>
-<p>Windows 1.8.0.1 was tested for fresh installation and in-place
-upgrade from 1.7.2.1. Upgrade paths from versions older than 1.7.2.1 are
-unverified. Station is configured during Townlight first run. Keep
-backups and original evidence. Test your physical equipment and network
-and service configuration before relying on them. See the <a
-href="https://github.com/townlight/townlight/releases/download/townlight-windows-v1.8.0.1/ACCEPTANCE-Windows-1.8.0.1.md">acceptance
-summary</a> for the tested paths.</p>
+<p>For an existing city, make and verify a backup, close Townlight, run
+the signed Windows 1.9.3.2 MSI, then reopen Townlight under the same
+Windows account and existing profile. Direct upgrade is tested from
+1.9.3.1; earlier paths have separate prior evidence.</p>
 <h3 id="warranty-and-liability">Warranty and liability</h3>
 <p>The covered software’s warranty and liability conditions are those in
 sections 15–17 of the supplied AGPL and any applicable separate written
@@ -1504,36 +1444,36 @@ href="https://townlight.github.io/manuals/station.html#take-a-live-override-and-
 a live override and return</a>.</li>
 </ul>
 <h2 id="source-and-document-control">Source and document control</h2>
-<p>This manual covers Station 0.4.4 installed with Windows MSI 1.9.1.1.
-The <a
-href="https://github.com/townlight/townlight/releases/download/townlight-windows-v1.9.1.1/ACCEPTANCE-Windows-1.9.1.1.md">Windows
-acceptance summary</a> records the tested Meetings, Station and Records
-handoff.</p>
+<p>This manual covers Station 0.4.4 bundled in current Windows 1.9.3.2.
+See <a
+href="https://github.com/townlight/townlight/releases/download/townlight-windows-v1.9.3.2/ACCEPTANCE-Windows-1.9.3.2.md">ACCEPTANCE-Windows-1.9.3.2.md</a>
+for the exact current tests. Older hardware evidence is distinct from
+current signed synthetic tests.</p>
 <h3 id="workflow-subject-index">Workflow subject index</h3>
 <ul>
 <li><p><strong>Capture and stop</strong> — <a
-href="https://townlight.github.io/manuals/station.html#workflow-4">Daily
+href="https://townlight.github.io/manuals/station.html#capture-and-stop">Daily
 workflow, step 4</a>.</p></li>
 <li><p><strong>Choose the input</strong> — <a
-href="https://townlight.github.io/manuals/station.html#workflow-3">Daily
+href="https://townlight.github.io/manuals/station.html#choose-the-input">Daily
 workflow, step 3</a>.</p></li>
 <li><p><strong>Close and recover</strong> — <a
-href="https://townlight.github.io/manuals/station.html#workflow-8">Daily
+href="https://townlight.github.io/manuals/station.html#close-and-recover">Daily
 workflow, step 8</a>.</p></li>
 <li><p><strong>Hand off to Records</strong> — <a
-href="https://townlight.github.io/manuals/station.html#workflow-6">Daily
+href="https://townlight.github.io/manuals/station.html#hand-off-to-records">Daily
 workflow, step 6</a>.</p></li>
 <li><p><strong>Open the operator</strong> — <a
-href="https://townlight.github.io/manuals/station.html#workflow-2">Daily
+href="https://townlight.github.io/manuals/station.html#open-the-operator">Daily
 workflow, step 2</a>.</p></li>
 <li><p><strong>Prepare meeting context</strong> — <a
-href="https://townlight.github.io/manuals/station.html#workflow-1">Daily
+href="https://townlight.github.io/manuals/station.html#prepare-meeting-context">Daily
 workflow, step 1</a>.</p></li>
 <li><p><strong>Review recording evidence</strong> — <a
-href="https://townlight.github.io/manuals/station.html#workflow-5">Daily
+href="https://townlight.github.io/manuals/station.html#review-recording-evidence">Daily
 workflow, step 5</a>.</p></li>
 <li><p><strong>Use playout deliberately</strong> — <a
-href="https://townlight.github.io/manuals/station.html#workflow-7">Daily
+href="https://townlight.github.io/manuals/station.html#use-playout-deliberately">Daily
 workflow, step 7</a>.</p></li>
 <li><p><a
 href="https://townlight.github.io/reference/source-inventory.json">Source
@@ -1798,243 +1738,4 @@ and reconciliation.</li>
 href="https://townlight.github.io/manuals/portal.html">Townlight Portal
 Guide</a> for its workflow and acceptance limits.</p>
 </section>
-<section id="import-source-matrix"><h2 id="shared-meeting-imports">Shared meeting imports</h2>
-<p>Use <strong>Meetings → Import meeting records</strong> in Windows
-1.8.1.1. Select a source and format, enter the original public URL, then
-choose <strong>Preview import</strong>. For a saved response, select the
-file before previewing. Choose a meeting and use <strong>Save selected
-meeting</strong>. Townlight records the source URL, format, stable
-source ID and capture hash with the canonical meeting. Reopening the
-same capture returns the existing meeting. A changed capture for that
-identity is reported for staff review.</p>
-<p>The source and format selector lists the supported reader pairs
-below. A public URL must serve the chosen format directly. Use a saved
-public response for POST-only listings, portals that require a browser
-session and sources whose page does not return the required response.
-The importer reads what a municipality publishes in that response.
-Fields and attachments vary by municipality and by meeting.</p>
-<table>
-<thead>
-<tr>
-<th>Source</th>
-<th>Input to preview</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td>Legistar</td>
-<td>Core-format JSON export</td>
-</tr>
-<tr>
-<td>PrimeGov</td>
-<td>Core-format JSON export or public portal meeting list JSON</td>
-</tr>
-<tr>
-<td>Granicus</td>
-<td>Core-format JSON export or public ViewPublisher HTML</td>
-</tr>
-<tr>
-<td>NovusAGENDA</td>
-<td>Core-format JSON export</td>
-</tr>
-<tr>
-<td>CivicPlus Agenda and Meeting Management Select</td>
-<td>Public Events JSON</td>
-</tr>
-<tr>
-<td>CivicPlus Agenda Center</td>
-<td>Public listing HTML</td>
-</tr>
-<tr>
-<td>Municode Meetings</td>
-<td>Public meetings HTML</td>
-</tr>
-<tr>
-<td>BoardBook</td>
-<td>Public organization HTML</td>
-</tr>
-<tr>
-<td>eSCRIBE</td>
-<td>Public calendar JSON</td>
-</tr>
-<tr>
-<td>Simbli</td>
-<td>Public meeting listing HTML</td>
-</tr>
-<tr>
-<td>iCompass CivicWeb</td>
-<td>Public meeting-type listing HTML</td>
-</tr>
-<tr>
-<td>iQM2</td>
-<td>Public meeting list HTML</td>
-</tr>
-<tr>
-<td>Granicus Swagit</td>
-<td>Public video archive HTML</td>
-</tr>
-<tr>
-<td>SuiteOne Media</td>
-<td>Public meeting archive HTML</td>
-</tr>
-<tr>
-<td>Granicus Peak</td>
-<td>Public agenda center ViewPublisher HTML</td>
-</tr>
-<tr>
-<td>Utah Public Notice Website</td>
-<td>Public notice detail HTML</td>
-</tr>
-<tr>
-<td>Destiny AgendaQuick</td>
-<td>Public meeting list HTML</td>
-</tr>
-<tr>
-<td>Town Hall Streams</td>
-<td>Public archive HTML</td>
-</tr>
-<tr>
-<td>TelVue</td>
-<td>Public playlist HTML</td>
-</tr>
-<tr>
-<td>CHAMP</td>
-<td>Public event JSON</td>
-</tr>
-<tr>
-<td>Hyland OnBase</td>
-<td>Public Agenda Online HTML</td>
-</tr>
-<tr>
-<td>Laserfiche WebLink</td>
-<td>Saved public dated document folder HTML</td>
-</tr>
-<tr>
-<td>TownCloud</td>
-<td>Saved public agenda table JSON or public agenda detail HTML</td>
-</tr>
-<tr>
-<td>Digital Towpath</td>
-<td>Public meeting detail HTML</td>
-</tr>
-<tr>
-<td>ClerkBase</td>
-<td>Public meeting document HTML</td>
-</tr>
-<tr>
-<td>Municipality-published calendar</td>
-<td>Public iCalendar feed</td>
-</tr>
-<tr>
-<td>Wistia</td>
-<td>Public media JSON</td>
-</tr>
-<tr>
-<td>Boardable</td>
-<td>Public Site meeting detail HTML</td>
-</tr>
-<tr>
-<td>gWorks FrontDesk</td>
-<td>Public city meetings JSON</td>
-</tr>
-<tr>
-<td>Diligent BoardDocs</td>
-<td>Unencrypted printed agenda PDF with numbered items</td>
-</tr>
-<tr>
-<td>Tyler Meeting Manager</td>
-<td>Saved public calendar JSON. Meeting information and item titles when
-present.</td>
-</tr>
-</tbody>
-</table>
-<h2 id="staff-handoffs">Staff handoffs</h2>
-<ul>
-<li><strong>Core and Meetings.</strong> Core's existing vendor formats
-share the same preview and save path as the public readers. The saved
-meeting and any structured agenda items open in the regular Meetings
-workflow.</li>
-<li><strong>Records.</strong> In Meetings, load imported documents by
-meeting ID, choose a PDF and enter the destination Records request ID.
-The attachment retains the citation and file hash. An HTML viewer or a
-dead document link may need staff to obtain the PDF separately.</li>
-<li><strong>Notice and Access.</strong> Use <strong>Review imported
-text</strong> to start a Notice draft or accessibility review with the
-source citation. Use each workspace's normal review and save
-actions.</li>
-<li><strong>Station.</strong> In the configured Station operator page,
-select the saved meeting and stage a direct MP4. Use the private capture
-workflow to queue processing. Player-only references are visible without
-a staging action.</li>
-<li><strong>Code.</strong> Use the existing ordinance proposal and
-adoption workflow with the canonical imported meeting and agenda
-IDs.</li>
-<li><strong>Boards, Contracts, Procurement, Zoning, Planning, Permitting
-and Inspections.</strong> In the destination workspace use
-<strong>Imported meeting evidence</strong>. Select an existing staff
-record and the saved meeting, then save the citation. The destination's
-existing role and workflow apply.</li>
-</ul>
-<h2 id="shared-interface">Shared interface</h2>
-<p>The installed Townlight Python runtime exposes a read-only CLI.
-CivicCast and other local clients can consume its normalized JSON and
-apply their own access and persistence rules.</p>
-<div class="sourceCode" id="cb1"><pre
-class="sourceCode powershell"><code class="sourceCode powershell"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a>python <span class="op">-</span>m townlight_runtime<span class="op">.</span><span class="fu">meeting_imports</span> champ PUBLIC_EVENT_URL saved-event<span class="op">.</span><span class="fu">json</span> <span class="op">--</span>format champ-event-json</span></code></pre></div>
-<p>Use <code>--fetch</code> in place of the saved file to read a
-supported public response.</p>
-<h2 id="interfaces-and-other-products">Interfaces and other
-products</h2>
-<p>The version-1 normalized JSON contract is shared by the Python
-function
-<code>townlight_runtime.meeting_imports.preview_export(connector, source_url, content, input_format=...)</code>
-and the CLI above. A saved response can also be read from stdin using
-<code>-</code>. Inputs are limited to 16 MiB. Preview is read-only; the
-consuming application owns persistence, staff authorization and its own
-data.</p>
-<p>The installed native HTTP bridge exposes
-<code>GET /desktop/v1/meetings/imports/sources</code>,
-<code>POST /desktop/v1/meetings/imports/preview</code>,
-<code>POST /desktop/v1/meetings/imports/fetch</code>,
-<code>POST /desktop/v1/meetings/imports/commit</code>, and
-meeting/link/document handoff operations in the <a
-href="https://townlight.github.io/api/suite-openapi.json">native API
-schema</a>. Use the existing <code>X-Townlight-Session</code>
-authentication, mapped staff roles and configured local PostgreSQL
-service. This is a native application interface; there is no independent
-anonymous importer HTTP service or importer MCP server.</p>
-<p><strong>CivicCast:</strong> opt in through its Townlight shared
-importer source setting and <code>TOWNLIGHT_IMPORT_PYTHON</code> (the
-absolute Python executable), <code>TOWNLIGHT_IMPORT_CONNECTOR</code>,
-<code>TOWNLIGHT_IMPORT_FORMAT</code>, <code>TOWNLIGHT_IMPORT_URL</code>
-and optional <code>TOWNLIGHT_IMPORT_CAPTURE</code>. The adapter saves
-normalized items through the existing AgendaStore. Structured agenda
-availability depends on the source response; a video listing can contain
-meeting metadata without agenda items. Existing sources remain the
-default.</p>
-<p><strong>CivicCast Brief:</strong> its existing PrimeGov and Granicus
-discovery routes can opt into the shared reader using
-<code>TOWNLIGHT_IMPORT_PYTHON</code>. Brief does not expose all 31
-sources as a new selection menu. Its existing caption/media workflow
-remains the consuming path. See each project's shared-import client
-documentation.</p>
-<p><strong>TownReporter, Describer Workbench and Textflowkit:</strong>
-no shared-import adapter was added to these products. TownReporter
-retains its own PrimeGov path. Describer Workbench and Textflowkit
-expose their existing transcription APIs/MCP interfaces, which do not
-constitute meeting-import integration. The shared engine ships inside
-Townlight Runtime; a standalone library is outside this release.</p>
-<h2 id="windows-acceptance-and-limits">Windows acceptance and
-limits</h2>
-<p>Windows 1.8.1.1 adds shared meeting imports for 31 source families,
-with 34 supported source/format pairs. Installed Windows Sandbox checks
-exercised preview, save and durable readback using public captures and
-fixtures, plus the documented Townlight handoffs. These checks do not
-establish automatic discovery on every live portal or a complete retest
-of every module.</p>
-<p>Windows 1.9.1.1 is a signed public beta. See the acceptance summary for the verified workflows and artifact identities.</p>
-<p>Windows 1.9.1.1 contains Station 0.4.4, Records 1.8.0.dev4, Runtime 0.3.3 and Meetings 1.0.6.</p>
-<p><a
-href="https://github.com/townlight/townlight/releases/download/townlight-windows-v1.8.1.1/ACCEPTANCE-Windows-1.8.1.1.md">Exact
-Windows 1.8.1.1 acceptance and limits</a>.</p>
-</section></main><aside class="release-note" aria-label="Current release"><p><strong>Current release:</strong> Townlight for Windows 1.9.2.1, a signed public beta. Shared staff and portal delivery require explicit setup. Acceptance used synthetic data on a physical Windows host and a clean Sandbox guest on the same computer; direct upgrades, a separate physical PC and live city deployment were not tested. <a href="https://github.com/townlight/townlight/releases/download/townlight-windows-v1.9.2.1/Townlight-Windows-x64-1.9.2.1.msi">Download MSI</a> · <a href="https://github.com/townlight/townlight/releases/tag/townlight-windows-v1.9.2.1">Release catalog</a> · <a href="https://github.com/townlight/townlight/releases/download/townlight-windows-v1.9.2.1/SHA256SUMS-Windows-1.9.2.1.txt">SHA-256 checksums</a> · <a href="https://github.com/townlight/townlight/releases/download/townlight-windows-v1.9.2.1/ACCEPTANCE-Windows-1.9.2.1.md">Acceptance and limits</a> · <a href="/versions.html">Versions</a></p></aside><footer>Townlight · AGPL-3.0-only · Acceptance evidence applies only to its identified artifacts.<span><a href="../brand/">Brand package</a></span><span><a href="../announcement.html">Announcement</a> · <a href="../support.html">Support and feedback</a></span></footer></body></html>
+</main><aside class="release-note" aria-label="Current release"><p><strong>Current release:</strong> Townlight for Windows 1.9.3.2, published 2026-11-24. Signed MSI SHA-256 b00510e0649552b5efd9744513bf9fcaf59cbee5755fd864eb922a5151c96b77; size 1,866,072,064 bytes. Direct-upgrade, lifecycle, and fresh exact-artifact acceptance checks passed. <a href="https://github.com/townlight/townlight/releases/download/townlight-windows-v1.9.3.2/Townlight-Windows-x64-1.9.3.2.msi">Download MSI</a> · <a href="https://github.com/townlight/townlight/releases/tag/townlight-windows-v1.9.3.2">Release catalog</a> · <a href="https://github.com/townlight/townlight/releases/download/townlight-windows-v1.9.3.2/SHA256SUMS-Windows-1.9.3.2.txt">SHA-256 checksums</a> · <a href="https://github.com/townlight/townlight/releases/download/townlight-windows-v1.9.3.2/ACCEPTANCE-Windows-1.9.3.2.md">Acceptance and limits</a>.</p></aside><footer>Townlight · AGPL-3.0-only · Acceptance evidence applies only to its identified artifacts.<span><a href="https://townlight.github.io/brand/">Brand package</a></span><span><a href="https://townlight.github.io/announcement.html">Announcement</a> · <a href="https://townlight.github.io/support.html">Support and feedback</a></span></footer></body></html>
