@@ -1,8 +1,14 @@
-## Windows 1.9.1.1 Station recorder release
+## Windows 1.9.3.2 current release
 
-## Windows 1.9.1.1 meeting recorder
+Townlight for Windows 1.9.3.2 is the current signed public beta. See the [release notes](https://github.com/townlight/townlight/releases/tag/townlight-windows-v1.9.3.2) and [acceptance record](https://github.com/townlight/townlight/releases/download/townlight-windows-v1.9.3.2/ACCEPTANCE-Windows-1.9.3.2.md).
 
-Windows 1.9.1.1 is a signed public beta. See the acceptance summary for the verified workflows and artifact identities. Set up Station during Townlight first run. Read the acceptance summary before upgrading. [Acceptance and limits](https://github.com/townlight/townlight/releases/download/townlight-windows-v1.9.1.1/ACCEPTANCE-Windows-1.9.1.1.md).
+For an existing city, make and verify a backup, close Townlight, run the signed Windows 1.9.3.2 MSI, then reopen Townlight under the same Windows account and existing profile. Direct upgrade is tested from 1.9.3.1; earlier paths have separate prior evidence.
+
+The Station renewal fix keeps controls available while session renewal completes.
+
+Authorized Records staff signed into the shared Windows workstation should open Records Requests and an existing saved request. Beside the private managed document, choose **Download private attachment**, then choose a new destination file or cancel. Townlight compares the byte count and SHA-256 before saving and reports the destination, count, and hash; protect the workstation copy as private Records evidence, with review and publication kept separate.
+
+## Windows 1.9.3.2 meeting recorder
 
 ### Clerk and operator
 
@@ -32,11 +38,9 @@ flowchart LR
 
 Windows 1.9.1.1 improves the clerk workflows for Records, Meetings, and Code, adds Open Hall icons, and fixes the ten-second Station preview.
 
-Windows 1.9.1.1 is a signed public beta. See the acceptance summary for the verified workflows and artifact identities. Set up Station during Townlight first run. Read the acceptance summary before upgrading.
-
 [Release and downloads](https://github.com/townlight/townlight/releases/tag/townlight-windows-v1.9.1.1) · [Acceptance and limits](https://github.com/townlight/townlight/releases/download/townlight-windows-v1.9.1.1/ACCEPTANCE-Windows-1.9.1.1.md).
 
-Windows x64 Beta 1 · MSI 1.9.1.1
+Windows x64 Beta 1 · MSI 1.9.3.2
 
 Windows 1.8.1.1 adds shared meeting imports for 31 source families, with 34 supported source/format pairs. Installed Windows Sandbox checks exercised preview, save and durable readback using public captures and fixtures, plus the documented Townlight handoffs. These checks do not establish automatic discovery on every live portal or a complete retest of every module.
 
@@ -71,8 +75,6 @@ Windows 1.8.1.1 adds shared meeting imports for 31 source families, with 34 supp
 
 [All 31 sources, formats and handoffs](https://townlight.github.io/manuals/meeting-imports.html) · [Installed acceptance](https://github.com/townlight/townlight/releases/download/townlight-windows-v1.8.1.1/ACCEPTANCE-Windows-1.8.1.1.md).
 
-Windows 1.9.1.1 is a signed public beta. See the acceptance summary for the verified workflows and artifact identities. Set up Station during Townlight first run. Read the acceptance summary before upgrading.
-
 Windows 1.9.1.1 contains Station 0.4.4, Records 1.8.0.dev4, Townlight Runtime 0.3.3 and Meetings 1.0.6. The release acceptance summary identifies the verified workflows and the builds that produced the evidence.
 
 
@@ -88,30 +90,28 @@ Staff should begin with First run and Daily workflow. Administrators should also
 
 | Identity | Value |
 |----|----|
-| Documentation | Townlight naming, Access and Notice candidate |
-| Intended installer | 1.8.1.1 |
-| Desktop source | 1.8.1-1 |
-| Runtime distribution | townlight-runtime 0.2.0 |
-| Station distribution/import | townlight-station 0.3.0 / townlight_station |
-| Acceptance composition | Windows 1.9.1.1: physical Station preview, recording and playback verified. Station setup is integrated. |
-| Candidate hashes/signature | [SHA-256 checksums](https://github.com/townlight/townlight/releases/download/townlight-windows-v1.9.1.1/SHA256SUMS-Windows-1.9.1.1.txt) and [Windows acceptance summary](https://github.com/townlight/townlight/releases/download/townlight-windows-v1.9.1.1/ACCEPTANCE-Windows-1.9.1.1.md) |
+| Documentation | Townlight Beta 1 |
+| Intended installer | 1.9.3.2 |
+| Desktop source | 1.9.3-2 |
+| Runtime distribution | townlight-runtime 0.3.4 |
+| Station distribution/import | townlight-station 0.4.4 / townlight_station |
+| Acceptance composition | Signed 1.9.3.2 setup, backup/restore, uninstall, and adjacent upgrade verified. |
+| Published hashes/signature | [SHA-256 checksums](https://github.com/townlight/townlight/releases/download/townlight-windows-v1.9.3.2/SHA256SUMS-Windows-1.9.3.2.txt) and [Windows acceptance summary](https://github.com/townlight/townlight/releases/download/townlight-windows-v1.9.3.2/ACCEPTANCE-Windows-1.9.3.2.md) |
 | Owned software license | AGPL-3.0-only |
 
 Townlight first run can provision the bundled Station service. Existing installations can use Settings → Modules → Townlight Station → Set up meeting recording.
 
 ## First run
 
-Windows 1.9.1.1 is a signed public beta. See the acceptance summary for the verified workflows and artifact identities. Set up Station during Townlight first run. Read the acceptance summary before upgrading.
-
 ### Fresh installation
 
-For a fresh setup, run the signed Windows 1.9.1.1 MSI and use an empty database and a new Townlight profile. For an upgrade from 1.9.0.1, back up city data and settings, close Townlight, run the MSI, then reopen Townlight under the same Windows account and profile. The upgrade was exercised on the earlier signed 1.9.1.1 iteration. See [acceptance and limits](https://github.com/townlight/townlight/releases/download/townlight-windows-v1.9.1.1/ACCEPTANCE-Windows-1.9.1.1.md) for evidence by build.
+For a new city, install the signed Townlight Windows 1.9.3.2 MSI and complete first-run under the intended named Windows account with an empty database and a new profile. Current release acceptance: [ACCEPTANCE-Windows-1.9.3.2.md](https://github.com/townlight/townlight/releases/download/townlight-windows-v1.9.3.2/ACCEPTANCE-Windows-1.9.3.2.md).
 
-1.  Download the signed MSI, matching source companion and checksums from the [public Windows release](https://github.com/townlight/townlight/releases/tag/townlight-windows-v1.9.1.1).
-2.  Verify the MSI hash and Authenticode publisher before installation. See the [Windows acceptance summary](https://github.com/townlight/townlight/releases/download/townlight-windows-v1.9.1.1/ACCEPTANCE-Windows-1.9.1.1.md) for the tested setup.
-3.  Launch Townlight under the intended named Windows account. Choose the storage folders. Select **Townlight Inspections candidate** (`inspections-preview`) for the bounded desktop composition, including Access and Notice. A narrower default selection will not expose all workspaces.
+1.  Download the signed MSI, matching source companion and checksums from the [public Windows release](https://github.com/townlight/townlight/releases/tag/townlight-windows-v1.9.3.2).
+2.  Verify the MSI hash and Authenticode publisher before installation. See the [Windows acceptance summary](https://github.com/townlight/townlight/releases/download/townlight-windows-v1.9.3.2/ACCEPTANCE-Windows-1.9.3.2.md) for the tested setup.
+3.  Launch Townlight under the intended Windows account and choose storage folders. On the setup screen, choose the full bundled profile labeled **Townlight Inspections candidate**; it includes Records, Meetings, Code, Access, Notice, Zoning, Planning, Permitting, Inspections, Boards & Commissions, Contracts, Procurement, Data, Budget, and Grants.
 4.  Enter the city profile, time zone and contacts. Create the first named local administrator, sign in and choose protected backup storage. **Continue without local AI** is valid for the deterministic workflows.
-5.  Run Health Check and wait for readiness. Open Townlight. In System Health select **Finish Records Migration** to activate the canonical Python/PostgreSQL runtime. Do not fabricate migration receipts or seed accounts.
+5.  Select **Run Health Check**, then choose **Finish setup**; in System Health, if **Prepare Records** appears, choose it and follow its prompts, otherwise skip it.
 6.  Create named staff through Settings. Import authorized sources using each product’s source library. All examples in this package are synthetic; they are not municipal authority.
 7.  Set up Station during first run with the full profile or with Meetings and Records selected. On an existing installation, open Settings → Modules → Townlight Station → Set up meeting recording. Configure vision explicitly only if automatic photo drafting is selected.
 
@@ -163,9 +163,9 @@ Drafting, review, approval, attachment, export, fulfillment and publication are 
 
 Meetings → Station → Records is the accepted recording workflow. Townlight owns current session authority; Station owns its database, storage and media children. Standalone CivicCast remains separate, with no shared configuration, service, data directory or automatic updater fallback.
 
-### Shared Windows staff candidate — 1.9.2.1
+### Shared Windows staff — 1.9.3.2
 
-In the signed Suite 1.9.2.1 candidate, Station capture and administration remain on the city Windows host. Named Records Staff can use a workstation to attach a completed private recording by its ID and verified hash; a workstation does not operate or administer Station. The original recording stays private, and a Records release copy is a separate reviewed artifact. This shared workflow is not in the public 1.9.1.1 installer and does not change the standalone Station package. Read the [1.9.2.1 candidate guide](https://townlight.github.io/manuals/windows-1.9.2.1-candidate.html) and [shared staff guide at the signed source commit](https://github.com/townlight/townlight/blob/1bc45be5a14aa969e53b87b1cef1f278dadc79a4/docs/installer/windows-shared-staff.md). The acceptance guest ran in Windows Sandbox on the same physical PC as the host.
+In 1.9.3.2, Station capture/setup is city host only. Authorized named shared Records staff can attach a completed private recording by ID and verified hash and download an attachment verifying bytes and SHA-256. Publication is separate. See the [shared staff guide](https://github.com/townlight/townlight/blob/main/docs/installer/windows-shared-staff.md).
 
 | Direction | Material |
 |----|----|
@@ -264,13 +264,13 @@ The exact [runtime payload lock](https://townlight.github.io/reference/runtime-p
 
 ### Station operator and media components
 
-The native desktop frontend above is distinct from Station’s browser operator. The pinned operator package `townlight-station-operator` is version **0.1.0**, using **React/react-dom 19.1.1**, **TypeScript 5.9.2**, **Vite 7.3.7** and the React Vite plugin 5.0.2. Station serves its built assets through its own operator API. Its Python control/API package remains **townlight-station 0.3.0**, while its retained storage identity remains **0.1.0**. These identities have different purposes and are not renumbered.
+The native desktop frontend above is distinct from Station’s browser operator. The pinned operator package `townlight-station-operator` is version **0.1.0**, using **React/react-dom 19.1.1**, **TypeScript 5.9.2**, **Vite 7.3.7** and the React Vite plugin 5.0.2. Station serves its built assets through its own operator API. Its Python control/API package is **townlight-station 0.4.4**, while its retained storage identity remains **0.1.0**. These identities have different purposes and are not renumbered.
 
 The separate pinned CivicCast-derived media engine uses Python/native GStreamer processing and bounded media children. It is not the standalone CivicCast application. Station’s control database, data root, service/configuration and update identity remain independent. This describes the current mixed stack; no runtime rewrite or CivicCast migration is implied.
 
 ### Station media and lifecycle contract
 
-The package/API version is `0.3.0`. Its retained storage identity has version `0.1.0`; that is a separate storage marker and must not be rewritten to match the package. Product/app IDs are `townlight-station` and `org.townlight.station`; service identity is `TownlightStation`, virtual account `NT SERVICE\TownlightStation`, credential namespace `townlight.station`, database schema `station`, and update-channel identity `townlight-station`. An identity name or SCM entry point does not establish that a Windows service was registered.
+The package/API version is `0.4.4`. Its retained storage identity has version `0.1.0`; that is a separate storage marker and must not be rewritten to match the package. Product/app IDs are `townlight-station` and `org.townlight.station`; service identity is `TownlightStation`, virtual account `NT SERVICE\TownlightStation`, credential namespace `townlight.station`, database schema `station`, and update-channel identity `townlight-station`. An identity name or SCM entry point does not establish that a Windows service was registered.
 
 The control service is Python; its separate pinned CivicCast-derived engine uses native GStreamer media processing. There is no launch of the standalone CivicCast application. Default encoding is 1920×1080, 30 fps and 6000 kbps; explicit validated configuration may change it. The source lock is verified before use. Media children are isolated and bounded; unfinished attempts become interrupted on recovery.
 
@@ -282,7 +282,7 @@ Recorded-file requests accept a managed ingest filename, optional SRT sidecar an
 
 ### Prepare the normally activated synthetic profile
 
-This procedure describes a future isolated beta installation. Documentation generation does not execute it. Complete normal Townlight Setup under the intended Windows account, select `inspections-preview`, sign in, and use **Finish Records Migration**. Keep the native database running and confirm the canonical runtime is ready. Use that account’s actual profile path; the default is `%LOCALAPPDATA%\CivicSuite`. Do not create session files, seed accounts or force `domain_enabled=True`.
+This procedure describes a future isolated beta installation. Documentation generation does not execute it. Complete normal Townlight Setup under the intended Windows account, select `inspections-preview`, sign in, and use **Prepare Records**. Keep the native database running and confirm the canonical runtime is ready. Use that account’s actual profile path; the default is `%LOCALAPPDATA%\CivicSuite`. Do not create session files, seed accounts or force `domain_enabled=True`.
 
 Station needs its own database and initially empty absolute data directory. It uses the same named Townlight staff authority through an additional configured loopback suite process. It does not launch or modify CivicCast. No SCM installation, registry edit or replacement of the desktop’s fixed-origin service is needed.
 
@@ -576,7 +576,7 @@ On failure, record the time, selected composition, component/installer versions 
 
 | Symptom | Likely meaning | Next action |
 |----|----|----|
-| Workspace absent | Wrong product composition or unavailable canonical runtime. | Check selected composition; activate through Finish Records Migration; wait for readiness. |
+| Workspace absent | Wrong product composition or unavailable canonical runtime. | Check selected composition; activate through Prepare Records; wait for readiness. |
 | Cannot sign in / 401 | Missing or expired named account session. | Sign in normally; reopen a Station launch ticket if applicable. |
 | Permission denied / 403 | Account, module, source or browser-origin permission. | Ask the authorized administrator to inspect the intended permission; do not invent role headers. |
 | Save conflict / 409 | The saved revision, expected source hash or lifecycle changed. | Keep edits, reopen current state and reconcile deliberately. |
@@ -620,7 +620,7 @@ Staff verify the jurisdiction, source currency, permissions, citations and propo
 
 ### Beta operation and recovery
 
-Back up city data and settings before upgrading from 1.9.0.1. Close Townlight, run the 1.9.1.1 MSI, then reopen under the same Windows account and existing profile. Station is configured during Townlight first run. Keep backups and original evidence. Test your physical equipment and network and service configuration before relying on them. See the [acceptance summary](https://github.com/townlight/townlight/releases/download/townlight-windows-v1.9.1.1/ACCEPTANCE-Windows-1.9.1.1.md) for the tested paths.
+For an existing city, make and verify a backup, close Townlight, run the signed Windows 1.9.3.2 MSI, then reopen Townlight under the same Windows account and existing profile. Direct upgrade is tested from 1.9.3.1; earlier paths have separate prior evidence.
 
 ### Warranty and liability
 
@@ -692,25 +692,25 @@ When an organization ends testing, it controls retention/export and removes acce
 
 ## Source and document control
 
-This manual covers Station 0.4.4 installed with Windows MSI 1.9.1.1. The [Windows acceptance summary](https://github.com/townlight/townlight/releases/download/townlight-windows-v1.9.1.1/ACCEPTANCE-Windows-1.9.1.1.md) identifies the physical camera and microphone test and the build used for installed handoff evidence.
+This manual covers Station 0.4.4 bundled in current Windows 1.9.3.2. See [ACCEPTANCE-Windows-1.9.3.2.md](https://github.com/townlight/townlight/releases/download/townlight-windows-v1.9.3.2/ACCEPTANCE-Windows-1.9.3.2.md) for the exact current tests. Older hardware evidence is distinct from current signed synthetic tests.
 
 ### Workflow subject index
 
-- **Capture and stop** — [Daily workflow, step 4](https://townlight.github.io/manuals/station.html#workflow-4).
+- **Capture and stop** — [Daily workflow, step 4](https://townlight.github.io/manuals/station.html#capture-and-stop).
 
-- **Choose the input** — [Daily workflow, step 3](https://townlight.github.io/manuals/station.html#workflow-3).
+- **Choose the input** — [Daily workflow, step 3](https://townlight.github.io/manuals/station.html#choose-the-input).
 
-- **Close and recover** — [Daily workflow, step 8](https://townlight.github.io/manuals/station.html#workflow-8).
+- **Close and recover** — [Daily workflow, step 8](https://townlight.github.io/manuals/station.html#close-and-recover).
 
-- **Hand off to Records** — [Daily workflow, step 6](https://townlight.github.io/manuals/station.html#workflow-6).
+- **Hand off to Records** — [Daily workflow, step 6](https://townlight.github.io/manuals/station.html#hand-off-to-records).
 
-- **Open the operator** — [Daily workflow, step 2](https://townlight.github.io/manuals/station.html#workflow-2).
+- **Open the operator** — [Daily workflow, step 2](https://townlight.github.io/manuals/station.html#open-the-operator).
 
-- **Prepare meeting context** — [Daily workflow, step 1](https://townlight.github.io/manuals/station.html#workflow-1).
+- **Prepare meeting context** — [Daily workflow, step 1](https://townlight.github.io/manuals/station.html#prepare-meeting-context).
 
-- **Review recording evidence** — [Daily workflow, step 5](https://townlight.github.io/manuals/station.html#workflow-5).
+- **Review recording evidence** — [Daily workflow, step 5](https://townlight.github.io/manuals/station.html#review-recording-evidence).
 
-- **Use playout deliberately** — [Daily workflow, step 7](https://townlight.github.io/manuals/station.html#workflow-7).
+- **Use playout deliberately** — [Daily workflow, step 7](https://townlight.github.io/manuals/station.html#use-playout-deliberately).
 
 - [Source inventory and file hashes](https://townlight.github.io/reference/source-inventory.json)
 
