@@ -32,23 +32,31 @@ class ImportedRecording(BaseModel):
 def install_operator(app, settings, suite):
     import threading
     tickets, sessions = {}, {}
+    authority_lock = threading.Lock()
     input_lock = threading.Lock()
     static = Path(__file__).with_name('ui')
+
+    def operator_cookie(response, token, request):
+        response.set_cookie('station_operator', token, httponly=True, secure=request.url.scheme == 'https',
+                            samesite='strict', max_age=900, path='/')
+        return response
 
     @app.middleware('http')
     async def browser_boundary(request: Request, call_next):
         now = time.monotonic()
-        for mapping in (tickets, sessions):
-            for key in list(mapping):
-                if mapping[key][1] < now:
-                    del mapping[key]
         token = request.cookies.get('station_operator')
-        browser = token in sessions
+        with authority_lock:
+            for mapping in (tickets, sessions):
+                for key in list(mapping):
+                    if mapping[key][1] <= now:
+                        del mapping[key]
+            entry = sessions.get(token)
+        browser = entry is not None
         if request.url.path.startswith('/operator/') and request.method != 'GET' or browser and request.method not in ('GET', 'HEAD'):
             if request.headers.get('origin') != str(request.base_url).rstrip('/') or request.headers.get('X-Station-UI') != '1':
                 return JSONResponse({'detail': 'Same-origin operator action required'}, status_code=403)
         if browser and not request.headers.get('X-Townlight-Session'):
-            request.scope['headers'] = [*request.scope['headers'], (b'x-townlight-session', sessions[token][0].encode())]
+            request.scope['headers'] = [*request.scope['headers'], (b'x-townlight-session', entry[0].encode())]
         response = await call_next(request)
         response.headers['Cache-Control'] = 'no-store'
         response.headers['Referrer-Policy'] = 'no-referrer'
@@ -59,30 +67,31 @@ def install_operator(app, settings, suite):
     @app.post('/v1/operator-ticket')
     def issue(proof: str | None = Header(default=None, alias='X-Townlight-Session')):
         suite.get('/desktop/v1/station/context?capability=read', proof)
-        if len(tickets) >= 256:
-            raise HTTPException(429, 'Too many outstanding operator launches')
-        token = secrets.token_urlsafe(32)
-        tickets[token] = (proof, time.monotonic()+60)
+        with authority_lock:
+            if len(tickets) >= 256:
+                raise HTTPException(429, 'Too many outstanding operator launches')
+            token = secrets.token_urlsafe(32)
+            tickets[token] = (proof, time.monotonic()+60)
         return {'ticket': token, 'expires_in': 60}
 
     @app.post('/operator/session')
     def exchange(data: Ticket, request: Request):
-        entry = tickets.pop(data.ticket, None)
-        if not entry or entry[1] < time.monotonic():
+        with authority_lock:
+            entry = tickets.pop(data.ticket, None)
+        if not entry or entry[1] <= time.monotonic():
             raise HTTPException(401, 'Launch link expired or already used; reopen Station from the signed-in staff session')
         suite.get('/desktop/v1/station/context?capability=read', entry[0])
-        if len(sessions) >= 256:
-            raise HTTPException(429, 'Operator session capacity reached')
-        token = secrets.token_urlsafe(32)
-        sessions[token] = (entry[0], time.monotonic()+900)
-        response = JSONResponse({'connected': True})
-        response.set_cookie('station_operator', token, httponly=True, secure=request.url.scheme == 'https',
-                            samesite='strict', max_age=900, path='/')
-        return response
+        with authority_lock:
+            if len(sessions) >= 256:
+                raise HTTPException(429, 'Operator session capacity reached')
+            token = secrets.token_urlsafe(32)
+            sessions[token] = (entry[0], time.monotonic()+900)
+        return operator_cookie(JSONResponse({'connected': True}), token, request)
 
     @app.post('/operator/logout')
     def logout(request: Request):
-        sessions.pop(request.cookies.get('station_operator'), None)
+        with authority_lock:
+            sessions.pop(request.cookies.get('station_operator'), None)
         response = JSONResponse({'connected': False})
         response.delete_cookie('station_operator', path='/')
         return response
@@ -90,23 +99,25 @@ def install_operator(app, settings, suite):
     @app.post('/operator/renew')
     def renew(request: Request):
         token = request.cookies.get('station_operator')
-        entry = sessions.get(token)
+        with authority_lock:
+            entry = sessions.get(token)
         if not entry:
             raise HTTPException(401, 'Reconnect through your signed-in Townlight session; recording continues')
         try:
             suite.get('/desktop/v1/station/context?capability=read', entry[0])
         except HTTPException as exc:
             if exc.status_code in (401, 403):
-                sessions.pop(token, None)
+                with authority_lock:
+                    sessions.pop(token, None)
             raise
-        renewed = secrets.token_urlsafe(32)
-        sessions.pop(token, None)
-        sessions[renewed] = (entry[0], time.monotonic()+900)
-        response = JSONResponse({'connected': True, 'expires_in': 900})
-        response.set_cookie('station_operator', renewed, httponly=True,
-                            secure=request.url.scheme == 'https', samesite='strict',
-                            max_age=900, path='/')
-        return response
+        with authority_lock:
+            current = sessions.get(token)
+            now = time.monotonic()
+            if not current or current[1] <= now:
+                raise HTTPException(401, 'Reconnect through your signed-in Townlight session; recording continues')
+            # Other browser requests keep using the cookie while renewal is in flight.
+            sessions[token] = (current[0], now + 900)
+        return operator_cookie(JSONResponse({'connected': True, 'expires_in': 900}), token, request)
 
     @app.get('/operator/devices')
     def device_list(proof: str | None = Header(default=None, alias='X-Townlight-Session')):
